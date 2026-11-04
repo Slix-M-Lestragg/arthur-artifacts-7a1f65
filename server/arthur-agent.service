@@ -1,0 +1,30 @@
+# arthur companion agent — systemd unit — managed by the arthur project.
+#
+# Deploys to /etc/systemd/system/arthur-agent.service with the script at
+# /opt/arthur-agent/arthur-agent.py and config/token in /etc/arthur-agent/.
+#   sudo systemctl daemon-reload && sudo systemctl enable --now arthur-agent
+#
+# Binds 0.0.0.0:8766 (token-gated) so the Obsidian plugin can reach it over
+# the LAN — see README-install.md for the tradeoff.
+
+[Unit]
+Description=arthur companion agent (ComfyUI lifecycle control)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/arthur-agent/arthur-agent.py
+EnvironmentFile=/etc/arthur-agent/env
+Restart=on-failure
+RestartSec=3
+
+# Hardening. The agent runs as root because it controls system units; it
+# needs to write only its audit log under /var/log and only read /etc.
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
