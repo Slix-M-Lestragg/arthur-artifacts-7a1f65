@@ -72,7 +72,11 @@ if (runOut("git diff --cached --name-only").trim()) {
 
 // 5. Return to dev. The non-artifact dev files are untracked duplicates here
 // (git refuses to switch branches over identical-but-untracked files), so
-// clean them first — dev was guaranteed clean in step 1, and `git clean -fd`
-// without -x leaves gitignored entries (node_modules/, build/) untouched.
-run("git clean -fd");
+// remove exactly the set of files dev tracks (dev was guaranteed clean in
+// step 1) before switching — no blanket `git clean`, which would also eat
+// gitignored entries like node_modules/ (main tracks no .gitignore).
+const devFiles = runOut("git ls-tree -r dev --name-only")
+	.split("\n")
+	.filter((f) => f && !ARTEFACTS.includes(f));
+for (const f of devFiles) fs.rmSync(f, { force: true });
 run("git checkout dev");
