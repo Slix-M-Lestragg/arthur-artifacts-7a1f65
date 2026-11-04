@@ -3,14 +3,17 @@
 //
 // `main` is an ARTIFACTS-ONLY branch: main.js, manifest.json, styles.css,
 // versions.json, INSTALL.md — nothing else must ever land there. This script:
-//   1. reads the version from the dev-branch manifest.json
+//   1. requires a clean `dev` tree (everything from dev is committed) and
+//      reads the version from dev's manifest.json
 //   2. runs the production esbuild (main.js at repo root, gitignored on dev)
 //   3. checks out `main` (creating it as an orphan branch on first run)
-//   4. overwrites ONLY the artifact files and commits them (git add -f, since
-//      main.js is gitignored so dev worktrees never track a stray bundle)
-//   5. returns to `dev`
+//   4. stages ONLY the artifact files (git add -f, since main.js is
+//      gitignored so dev worktrees never track a stray bundle) and commits
+//   5. returns to `dev`: the dev files left in the worktree are untracked
+//      duplicates (git refuses to switch over them), so they are cleaned
+//      first — safe by construction because dev was clean in step 1.
 //
-// Run on a clean dev tree: `npm run release`.
+// Run from the repo root on a clean dev tree: `npm run release`.
 
 import { execSync } from "node:child_process";
 import fs from "node:fs";
@@ -26,7 +29,13 @@ const ARTEFACTS = [
 const run = (cmd) => execSync(cmd, { stdio: "inherit" });
 const runOut = (cmd) => execSync(cmd, { encoding: "utf8" });
 
-// 1. Version from the dev manifest (before switching branches).
+// 1. Must run on dev with a clean tree — see step 5 for why this matters.
+const branch = runOut("git branch --show-current").trim();
+if (branch !== "dev") throw new Error(`Run this on dev (currently on '${branch}')`);
+if (runOut("git status --porcelain").trim())
+	throw new Error("dev tree is dirty; commit or stash before releasing");
+
+// Version from the dev manifest (read before switching branches).
 const manifest = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
 if (!manifest.version) throw new Error("manifest.json has no version");
 
@@ -54,13 +63,16 @@ if (mainExists) {
 for (const f of ARTEFACTS) fs.writeFileSync(f, snapshot[f]);
 run(`git add -f -- ${ARTEFACTS.join(" ")}`);
 
-const staged = runOut(["git", "diff", "--cached", "--name-only"].join(" ")).trim();
-if (staged) {
+if (runOut("git diff --cached --name-only").trim()) {
 	run(`git commit -m "Release v${manifest.version}"`);
-	console.log(`Committed release v${manifest.version} onto main: ${staged}`);
+	console.log(`Committed release v${manifest.version} onto main.`);
 } else {
 	console.log("No artifact changes since last release; nothing to commit.");
 }
 
-// 5. Back to dev.
+// 5. Return to dev. The non-artifact dev files are untracked duplicates here
+// (git refuses to switch branches over identical-but-untracked files), so
+// clean them first — dev was guaranteed clean in step 1, and `git clean -fd`
+// without -x leaves gitignored entries (node_modules/, build/) untouched.
+run("git clean -fd");
 run("git checkout dev");
