@@ -1,0 +1,14 @@
+/* Minimal styles for the arthur dashboard view. */
+
+.arthur-dashboard {
+	padding: 1em;
+}
+
+.arthur-dashboard h2 {
+	margin-top: 0;
+}
+
+.arthur-note {
+	opacity: 0.7;
+	font-style: italic;
+}

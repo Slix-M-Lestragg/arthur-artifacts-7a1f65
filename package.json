@@ -1,0 +1,23 @@
+{
+	"name": "arthur",
+	"version": "0.1.0",
+	"description": "Remotely manage ComfyUI and ai-toolkit instances on the home server",
+	"main": "main.js",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "tsc --noEmit && node esbuild.config.mjs production",
+		"typecheck": "tsc --noEmit",
+		"release": "node scripts/release.mjs"
+	},
+	"keywords": [],
+	"author": "Slix-M-Lestragg",
+	"license": "MIT",
+	"devDependencies": {
+		"@types/node": "^22.10.0",
+		"builtin-modules": "^3.3.0",
+		"esbuild": "^0.17.3",
+		"obsidian": "^1.5.0",
+		"tslib": "1.14.1",
+		"typescript": "^5.4.0"
+	}
+}
