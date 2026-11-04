@@ -20,11 +20,16 @@ interface Collector {
 
 export class Poller {
 	private intervalMs: number;
-	private intervalId: number | null = null;
+	private timerId: number | null = null;
 	private readonly collectors = new Map<string, Collector>();
 
 	constructor(intervalMs: number) {
 		this.intervalMs = intervalMs;
+	}
+
+	/** The live interval id (null when stopped) — lets callers hand it to registerInterval. */
+	get intervalId(): number | null {
+		return this.timerId;
 	}
 
 	/** Register (or replace) a named collector. Name must be unique. */
@@ -39,24 +44,24 @@ export class Poller {
 
 	/** Start ticking (idempotent). */
 	start(): void {
-		if (this.intervalId !== null) return;
+		if (this.timerId !== null) return;
 		// window.setInterval in the renderer gives numeric ids compatible
 		// with Obsidian's registerInterval bookkeeping.
-		this.intervalId = window.setInterval(() => this.tick(), this.intervalMs);
+		this.timerId = window.setInterval(() => this.tick(), this.intervalMs);
 	}
 
 	/** Stop ticking and clear the timer (idempotent). */
 	stop(): void {
-		if (this.intervalId !== null) {
-			window.clearInterval(this.intervalId);
-			this.intervalId = null;
+		if (this.timerId !== null) {
+			window.clearInterval(this.timerId);
+			this.timerId = null;
 		}
 	}
 
 	/** Adjust cadence at runtime; restarts the timer if running. */
 	setIntervalMs(ms: number): void {
 		this.intervalMs = ms;
-		if (this.intervalId !== null) {
+		if (this.timerId !== null) {
 			this.stop();
 			this.start();
 		}

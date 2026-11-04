@@ -16,16 +16,22 @@ export interface AgentStatus {
 
 export interface AgentInstanceSummary {
 	id: string;
+	/** Friendly label from the agent's config.json (defaults to the id). */
+	name?: string;
 	up: boolean;
 	uptime?: number | null;
 	port?: number | null;
 	gpu?: number | null;
 }
 
+/** Agent version this plugin build was written against — mismatch → banner. */
+export const AGENT_VERSION = "0.4.0";
+
 /** GET /api/instances — instance registry (configured, not necessarily up). */
 export interface AgentInstancesResponse {
 	instances: Array<{
 		id: string;
+		name?: string;
 		port: number;
 		gpu: number;
 		/** Raw launch command from the agent's instance map, if exposed. */
@@ -45,9 +51,10 @@ export interface AgentInstanceStatus {
 	uptime?: number | null;
 }
 
-/** GET /health — unauthenticated {ok:true}; distinguishes "agent down" from "bad token". */
+/** GET /health — unauthenticated {ok:true, version}; distinguishes "agent down" from "bad token". */
 export interface AgentHealth {
 	ok: boolean;
+	version?: string;
 }
 
 export class ArthurAgentClient {

@@ -1,14 +1,274 @@
-/* Minimal styles for the arthur dashboard view. */
+/* arthur — dashboard, status bar, controls. Uses Obsidian theme variables
+   only; no framework, no new rules beyond what the UI code emits. */
 
-.arthur-dashboard {
-	padding: 1em;
+/* ---------------------------------------------------------------- pills */
+
+.arthur-status-pill {
+	cursor: pointer;
+	white-space: nowrap;
 }
 
-.arthur-dashboard h2 {
-	margin-top: 0;
+.arthur-status-part {
+	margin-inline: 0.4em 0;
+}
+
+.arthur-status-part:first-child {
+	margin-inline-start: 0;
+}
+
+.arthur-status-offline {
+	opacity: 0.55;
+}
+
+/* ---------------------------------------------------------------- top bar */
+
+.arthur-dashboard {
+	padding: 0.75em;
+	display: flex;
+	flex-direction: column;
+	gap: 0.75em;
+}
+
+.arthur-topbar {
+	display: flex;
+	align-items: center;
+	gap: 1em;
+	flex-wrap: wrap;
+	padding: 0.35em 0.75em;
+	border-radius: var(--radius-s);
+	background: var(--background-secondary);
+	font-size: var(--font-ui-small);
+}
+
+.arthur-topbar-profile {
+	font-weight: var(--font-semibold);
+}
+
+.arthur-topbar-dots {
+	display: flex;
+	align-items: center;
+	gap: 0.75em;
+	flex-wrap: wrap;
+	min-width: 0;
+}
+
+.arthur-dot-wrap {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.3em;
+	/* tooltip label */
+	position: relative;
+}
+
+.arthur-dot-label {
+	opacity: 0.75;
+}
+
+.arthur-topbar-updated {
+	margin-inline-start: auto;
+	opacity: 0.6;
+	font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- dots */
+
+.arthur-dot {
+	display: inline-block;
+	width: 0.6em;
+	height: 0.6em;
+	border-radius: 50%;
+	flex: none;
+	background: var(--background-modifier-border);
+}
+
+.arthur-dot--green {
+	background: var(--color-green);
+}
+
+.arthur-dot--red {
+	background: var(--color-red);
+}
+
+.arthur-dot--gray {
+	background: var(--text-faint);
+}
+
+/* ---------------------------------------------------------------- banners */
+
+.arthur-banner {
+	display: flex;
+	align-items: center;
+	gap: 0.5em;
+	padding: 0.4em 0.75em;
+	border-radius: var(--radius-s);
+	background: var(--background-modifier-warning);
+	color: var(--text-warning);
+	font-size: var(--font-ui-small);
+}
+
+.arthur-banner--warn::before {
+	content: "⚠";
+}
+
+/* ---------------------------------------------------------------- sections */
+
+.arthur-section {
+	display: flex;
+	flex-direction: column;
+	gap: 0.5em;
+}
+
+.arthur-section h4 {
+	margin: 0 0 0.15em 0;
+}
+
+.arthur-section h5 {
+	margin: 0.5em 0 0.15em 0;
+}
+
+.arthur-cards {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+	gap: 0.75em;
+}
+
+.arthur-card {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background: var(--background-secondary);
+	padding: 0.6em 0.75em;
+	display: flex;
+	flex-direction: column;
+	gap: 0.4em;
+	min-width: 0;
+}
+
+.arthur-card-head {
+	display: flex;
+	align-items: center;
+	gap: 0.5em;
+	min-width: 0;
+}
+
+.arthur-card-title {
+	font-weight: var(--font-semibold);
+	flex: none;
+}
+
+.arthur-card-meta {
+	font-size: var(--font-ui-small);
+	opacity: 0.75;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------- bars */
+
+.arthur-bar {
+	height: 6px;
+	border-radius: 3px;
+	background: var(--background-modifier-border);
+	overflow: hidden;
+}
+
+.arthur-bar-fill {
+	height: 100%;
+	width: 0%;
+	border-radius: 3px;
+	background: var(--color-accent);
+	transition: width 0.2s ease;
+}
+
+/* ---------------------------------------------------------------- buttons */
+
+.arthur-btn-row {
+	display: flex;
+	gap: 0.4em;
+	flex-wrap: wrap;
+}
+
+.arthur-btn {
+	font-size: var(--font-ui-small);
+	padding: 0.15em 0.7em;
+	border-radius: var(--radius-s);
+	box-shadow: none;
+}
+
+.arthur-btn--tiny {
+	padding: 0 0.45em;
+	font-size: var(--font-ui-smaller);
+}
+
+.arthur-btn:disabled {
+	opacity: 0.45;
+}
+
+.arthur-pending-list {
+	display: flex;
+	flex-direction: column;
+	gap: 0.2em;
+}
+
+.arthur-pending-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.5em;
+}
+
+/* ---------------------------------------------------------------- training */
+
+.arthur-table {
+	width: 100%;
+	font-size: var(--font-ui-small);
+	border-collapse: collapse;
+}
+
+.arthur-table th {
+	text-align: left;
+	font-weight: var(--font-medium);
+	opacity: 0.7;
+	padding: 0.3em 0.5em;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.arthur-table td {
+	padding: 0.3em 0.5em;
+	border-bottom: 1px solid var(--background-modifier-border-faint);
+	white-space: nowrap;
+}
+
+.arthur-actions {
+	display: flex;
+	gap: 0.25em;
+	flex-wrap: wrap;
+}
+
+.arthur-queue-rows {
+	display: flex;
+	flex-direction: column;
+	gap: 0.3em;
+}
+
+.arthur-queue-row {
+	display: flex;
+	align-items: center;
+	gap: 0.6em;
+}
+
+/* ---------------------------------------------------------------- modal */
+
+.arthur-modal-buttons {
+	display: flex;
+	justify-content: flex-end;
+	gap: 0.5em;
+	margin-top: 1em;
 }
 
 .arthur-note {
 	opacity: 0.7;
 	font-style: italic;
+	font-size: var(--font-ui-small);
 }

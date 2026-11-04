@@ -181,6 +181,16 @@ export class AiToolkitClient {
 		return this.callMutation(`/api/jobs/${encodeURIComponent(id)}/mark_stopped`);
 	}
 
+	/** Force the trainer's next checkpoint save immediately. */
+	async jobSaveNow(id: string): Promise<unknown> {
+		return this.callMutation(`/api/jobs/${encodeURIComponent(id)}/save_now`);
+	}
+
+	/** Force an immediate sample render. */
+	async jobSampleNow(id: string): Promise<unknown> {
+		return this.callMutation(`/api/jobs/${encodeURIComponent(id)}/sample_now`);
+	}
+
 	/** GET /api/jobs/{id}/log?offset= — incremental tail; returns the full log plus new data. */
 	async jobLog(id: string, offset: number): Promise<AiToolkitLogResponse> {
 		return this.call<AiToolkitLogResponse>(

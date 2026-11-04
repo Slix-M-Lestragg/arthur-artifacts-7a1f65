@@ -1,11 +1,8 @@
 import {
 	App,
-	ItemView,
-	Notice,
 	Plugin,
 	PluginSettingTab,
 	Setting,
-	WorkspaceLeaf,
 } from "obsidian";
 
 import { ArthurAgentClient } from "./api/agent";
@@ -13,9 +10,12 @@ import { AiToolkitClient } from "./api/aitoolkit";
 import { ComfyUIClient } from "./api/comfy";
 import { obsidianRequester } from "./api/transport";
 import { Poller } from "./poller";
-
-const VIEW_TYPE_ARTHUR_DASHBOARD = "arthur-dashboard";
-const PLUGIN_VERSION = "0.1.0";
+import {
+	ArthurDashboardView,
+	VIEW_TYPE_ARTHUR_DASHBOARD,
+} from "./ui/dashboard-view";
+import { StatusBarPill, StatusBarState } from "./ui/status-bar";
+import { fmtBytes } from "./util";
 
 /** One server profile — host + which ports the services live on + tokens. */
 export interface ServerProfile {
@@ -34,13 +34,18 @@ export interface ArthurSettings {
 }
 
 /** Clients built from the active profile — rebuilt when settings change. */
-interface ArthurClients {
+export interface ArthurClients {
 	profile: ServerProfile;
-	/** One ComfyUIClient per entry of profile.comfyPorts. */
+	/** Parsed ComfyUI instance ports, same order as `comfy`. */
+	comfyPorts: number[];
+	/** One ComfyUIClient per entry of comfyPorts. */
 	comfy: ComfyUIClient[];
 	aitoolkit: AiToolkitClient;
 	agent: ArthurAgentClient;
-	poller: Poller;
+	/** Light cycle (12s, always on): feeds the status bar pill. */
+	lightPoller: Poller;
+	/** Detail cycle (3s): feeds the dashboard; collectors self-gate on view visibility. */
+	detailPoller: Poller;
 }
 
 const DEFAULT_PROFILE: ServerProfile = {
@@ -57,38 +62,22 @@ const DEFAULT_SETTINGS: ArthurSettings = {
 	profiles: [{ ...DEFAULT_PROFILE }],
 };
 
-/** Placeholder dashboard view — real monitoring UI lands in milestone M2. */
-class ArthurDashboardView extends ItemView {
-	constructor(leaf: WorkspaceLeaf) {
-		super(leaf);
-	}
+const LIGHT_INTERVAL_MS = 12_000;
+const DETAIL_INTERVAL_MS = 3_000;
 
-	getViewType(): string {
-		return VIEW_TYPE_ARTHUR_DASHBOARD;
-	}
-
-	getDisplayText(): string {
-		return "Arthur dashboard";
-	}
-
-	getIcon(): string {
-		return "monitor-cog";
-	}
-
-	async onOpen(): Promise<void> {
-		const root = this.contentEl.createEl("div", {
-			cls: "arthur-dashboard",
-		});
-		root.createEl("h2", { text: "Arthur — remote instance manager" });
-		root.createEl("p", {
-			text: "Live monitoring of ComfyUI instances, generation queue and ai-toolkit training arrives in milestone M2 (see docs/PLAN.md).",
-			cls: "arthur-note",
-		});
-	}
-
-	async onClose(): Promise<void> {
-		this.contentEl.empty();
-	}
+/** Light-cycle snapshot — status bar input, kept for inspection/debugging. */
+export interface LightState {
+	gpus: Array<{
+		port: number;
+		gpuIndex: number | null;
+		online: boolean | null;
+		freeBytes: number | null;
+	}>;
+	queueDepth: number;
+	/** Most advanced RUNNING training job, or null. */
+	train: { name: string; step: number; total: number | null } | null;
+	agentOnline: boolean | null;
+	lastUpdated: number | null;
 }
 
 class ArthurSettingTab extends PluginSettingTab {
@@ -105,7 +94,7 @@ class ArthurSettingTab extends PluginSettingTab {
 
 		containerEl.createEl("h3", { text: "Server profile" });
 
-		// Single-profile scaffold; M2+ grows this into a multi-profile list.
+		// Single-profile for v0.1; grows into a profile list later.
 		const profile = this.plugin.settings.profiles[0];
 
 		new Setting(containerEl)
@@ -176,7 +165,7 @@ class ArthurSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("ai-toolkit token")
-			.setDesc("Bearer token expected by ai-toolkit (AI_TOOLKIT_AUTH).")
+			.setDesc("Bearer token expected by ai-toolkit (AI_TOOLKIT_AUTH); empty = no auth header.")
 			.addText((text) => {
 				text.inputEl.type = "password";
 				text.setValue(profile.aiToolkitToken).onChange(async (value) => {
@@ -201,34 +190,74 @@ class ArthurSettingTab extends PluginSettingTab {
 export default class ArthurPlugin extends Plugin {
 	settings: ArthurSettings = DEFAULT_SETTINGS;
 
-	/** API clients for the active profile; null until first profile parse. */
+	/** API clients + pollers for the active profile; null until load/teardown. */
 	clients: ArthurClients | null = null;
+
+	/** Live dashboard view instance, if its leaf is open (set/cleared by the view). */
+	dashboardView: ArthurDashboardView | null = null;
+
+	/** Parsed comfy instance ports of the active profile ([] until clients exist). */
+	get comfyPorts(): number[] {
+		return this.clients?.comfyPorts ?? [];
+	}
+
+	/** Light-cycle snapshot; fed to the status bar pill each tick. */
+	private lightState: LightState = {
+		gpus: [],
+		queueDepth: 0,
+		train: null,
+		agentOnline: null,
+		lastUpdated: null,
+	};
+
+	/** Status bar pill wrapper; owns the DOM element we created. */
+	private statusPill: StatusBarPill | null = null;
+	/** The status bar item (removed on unload). */
+	private statusBarItem: HTMLElement | null = null;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
 
-		// Ribbon icon opens the dashboard view.
-		this.addRibbonIcon("monitor-cog", "Open Arthur dashboard", async () => {
-			await this.activateView();
-		});
-
-		// Status bar pill — compact metrics arrive in M2; placeholder for now.
-		const statusBar = this.addStatusBarItem();
-		statusBar.setText(`arthur ${PLUGIN_VERSION}`);
-
 		// Dashboard view factory.
 		this.registerView(
 			VIEW_TYPE_ARTHUR_DASHBOARD,
-			(leaf) => new ArthurDashboardView(leaf)
+			(leaf) => new ArthurDashboardView(leaf, this),
 		);
+
+		// Ribbon icon opens the dashboard view.
+		this.addRibbonIcon("monitor-cog", "Open Arthur dashboard", () => {
+			void this.activateView();
+		});
+
+		// Status bar pill — always-on light metrics; click opens the dashboard.
+		this.statusBarItem = this.addStatusBarItem();
+		this.statusPill = new StatusBarPill(this.statusBarItem, () => {
+			void this.activateView();
+		});
 
 		// Settings tab.
 		this.addSettingTab(new ArthurSettingTab(this.app, this));
 
-		// Central poller — starts now, stopped on unload (M1 wiring; collectors
-		// are registered by the M2 dashboard).
+		// Clients + pollers.
 		this.rebuildClients();
-		this.clients?.poller.start();
+		const clients = this.clients;
+		if (clients) {
+			clients.lightPoller.registerCollector("light-summary", async () => {
+				await this.collectLightData();
+			});
+			clients.detailPoller.registerCollector("dashboard-detail", async () => {
+				// The view no-ops when closed/hidden (its own visibility gate).
+				await this.dashboardView?.refreshData();
+			});
+			clients.lightPoller.start();
+			clients.detailPoller.start();
+			// Belt-and-braces: registerInterval reaps the timers even if a
+			// future edit forgets poller.stop() in onunload.
+			const lightId = clients.lightPoller.intervalId;
+			const detailId = clients.detailPoller.intervalId;
+			if (lightId !== null) this.registerInterval(lightId);
+			if (detailId !== null) this.registerInterval(detailId);
+		}
 	}
 
 	/** Build API clients from the active profile; replaces any previous set. */
@@ -239,13 +268,13 @@ export default class ArthurPlugin extends Plugin {
 			.map((p) => parseInt(p.trim(), 10))
 			.filter((p) => Number.isFinite(p) && p > 0);
 
-		const poller = new Poller(10_000);
 		const comfy = comfyPorts.map(
 			(port) => new ComfyUIClient(profile.host, port, obsidianRequester),
 		);
 
 		this.clients = {
 			profile,
+			comfyPorts,
 			comfy,
 			aitoolkit: new AiToolkitClient(
 				profile.host,
@@ -259,21 +288,114 @@ export default class ArthurPlugin extends Plugin {
 				profile.agentToken || null,
 				obsidianRequester,
 			),
-			poller,
+			lightPoller: new Poller(LIGHT_INTERVAL_MS),
+			detailPoller: new Poller(DETAIL_INTERVAL_MS),
 		};
 	}
 
+	/**
+	 * Light cycle: per-port system_stats + queue, ai-toolkit jobs, agent
+	 * status (best-effort; anything failing just means its field stays null
+	 * / offline). Paints the status bar pill. Runs every LIGHT_INTERVAL_MS
+	 * while the plugin is loaded, dashboard open or not.
+	 */
+	private async collectLightData(): Promise<void> {
+		const clients = this.clients;
+		if (!clients) return;
+
+		const best = async <T>(p: Promise<T>): Promise<T | null> => {
+			try {
+				return await p;
+			} catch {
+				return null;
+			}
+		};
+
+		const results = await Promise.all(
+			clients.comfy.map(async (client) => ({
+				stats: await best(client.systemStats()),
+				queue: await best(client.queue()),
+			})),
+		);
+		const [agentStatus, aiJobs] = await Promise.all([
+			best(clients.agent.status()),
+			best(clients.aitoolkit.jobs()),
+		]);
+
+		const gpus = results.map((r, i) => ({
+			port: clients.comfyPorts[i],
+			gpuIndex:
+				agentStatus?.instances.find((v) => v.port === clients.comfyPorts[i])?.gpu ??
+				null,
+			online: r.stats !== null,
+			freeBytes: r.stats?.devices?.[0]?.vram_free ?? null,
+		}));
+
+		const runningJobs = (aiJobs?.jobs ?? []).filter((j) => j.status === "running");
+		let train: LightState["train"] = null;
+		for (const job of runningJobs) {
+			if (train === null || job.step > train.step) {
+				train = { name: job.name, step: job.step, total: job.total_steps };
+			}
+		}
+
+		this.lightState = {
+			gpus,
+			queueDepth: results.reduce(
+				(acc, r) =>
+					acc +
+					(r.queue ? (r.queue.queue_running?.length ?? 0) + (r.queue.queue_pending?.length ?? 0) : 0),
+				0,
+			),
+			train,
+			agentOnline: agentStatus !== null,
+			lastUpdated: Date.now(),
+		};
+
+		this.paintStatusBar();
+	}
+
+	/** Push the light snapshot into the status bar pill. */
+	private paintStatusBar(): void {
+		if (!this.statusPill) return;
+		const s = this.lightState;
+		const state: StatusBarState = {
+			profileName: this.clients?.profile.name ?? "arthur",
+			host: this.clients?.profile.host ?? "",
+			gpus: s.gpus.map((g) => ({
+				port: g.port,
+				gpuIndex: g.gpuIndex,
+				online: g.online,
+				freeBytes: g.freeBytes,
+			})),
+			queueDepth: s.queueDepth,
+			train: s.train ? { step: s.train.step, total: s.train.total } : null,
+			lastUpdated: s.lastUpdated,
+		};
+		this.statusPill.update(state);
+	}
+
 	onunload(): void {
+		// Detaching the leaf closes the view → WS sockets + dashboardView ref.
 		this.app.workspace.detachLeavesOfType(VIEW_TYPE_ARTHUR_DASHBOARD);
-		// No orphan timers — the poller owns its own window.setInterval.
-		this.clients?.poller.stop();
+		this.dashboardView = null;
+
+		// Stop poller timers (registerInterval above is the backstop).
+		this.clients?.lightPoller.stop();
+		this.clients?.detailPoller.stop();
+
+		// Remove the status bar element we created.
+		this.statusPill = null;
+		this.statusBarItem?.remove();
+		this.statusBarItem = null;
+
 		this.clients = null;
 	}
 
 	private async loadSettings(): Promise<void> {
 		const data = (await this.loadData()) as Partial<ArthurSettings> | null;
 		this.settings = {
-			profiles: [ { ...DEFAULT_PROFILE, ...(data?.profiles?.[0] ?? {}) } ],
+			profiles: [{ ...DEFAULT_PROFILE, ...(data?.profiles?.[0] ?? {}) }],
 		};
 	}
 
@@ -281,7 +403,8 @@ export default class ArthurPlugin extends Plugin {
 		await this.saveData(this.settings);
 	}
 
-	private async activateView(): Promise<void> {
+	/** Open (or reveal) the dashboard view. */
+	async activateView(): Promise<void> {
 		const { workspace } = this.app;
 		let leaf = workspace.getLeavesOfType(VIEW_TYPE_ARTHUR_DASHBOARD)[0];
 		if (!leaf) {
@@ -292,5 +415,17 @@ export default class ArthurPlugin extends Plugin {
 			});
 		}
 		workspace.revealLeaf(leaf);
+	}
+
+	/** For docs/debugging: human summary of the last light tick. */
+	describeLightState(): string {
+		const s = this.lightState;
+		const gpus = s.gpus
+			.map(
+				(g) =>
+					`${g.gpuIndex != null ? `G${g.gpuIndex}` : `P${g.port}`}: ${g.online ? fmtBytes(g.freeBytes) : "down"}`,
+			)
+			.join(", ");
+		return `gpus[${gpus}] queue=${s.queueDepth} agent=${String(s.agentOnline)}`;
 	}
 }
