@@ -8,6 +8,12 @@ import {
 	WorkspaceLeaf,
 } from "obsidian";
 
+import { ArthurAgentClient } from "./api/agent";
+import { AiToolkitClient } from "./api/aitoolkit";
+import { ComfyUIClient } from "./api/comfy";
+import { obsidianRequester } from "./api/transport";
+import { Poller } from "./poller";
+
 const VIEW_TYPE_ARTHUR_DASHBOARD = "arthur-dashboard";
 const PLUGIN_VERSION = "0.1.0";
 
@@ -25,6 +31,16 @@ export interface ServerProfile {
 
 export interface ArthurSettings {
 	profiles: ServerProfile[];
+}
+
+/** Clients built from the active profile — rebuilt when settings change. */
+interface ArthurClients {
+	profile: ServerProfile;
+	/** One ComfyUIClient per entry of profile.comfyPorts. */
+	comfy: ComfyUIClient[];
+	aitoolkit: AiToolkitClient;
+	agent: ArthurAgentClient;
+	poller: Poller;
 }
 
 const DEFAULT_PROFILE: ServerProfile = {
@@ -185,6 +201,9 @@ class ArthurSettingTab extends PluginSettingTab {
 export default class ArthurPlugin extends Plugin {
 	settings: ArthurSettings = DEFAULT_SETTINGS;
 
+	/** API clients for the active profile; null until first profile parse. */
+	clients: ArthurClients | null = null;
+
 	async onload(): Promise<void> {
 		await this.loadSettings();
 
@@ -206,11 +225,49 @@ export default class ArthurPlugin extends Plugin {
 		// Settings tab.
 		this.addSettingTab(new ArthurSettingTab(this.app, this));
 
-		// Nothing periodic is registered yet — no orphan timers on unload.
+		// Central poller — starts now, stopped on unload (M1 wiring; collectors
+		// are registered by the M2 dashboard).
+		this.rebuildClients();
+		this.clients?.poller.start();
+	}
+
+	/** Build API clients from the active profile; replaces any previous set. */
+	private rebuildClients(): void {
+		const profile = this.settings.profiles[0];
+		const comfyPorts = profile.comfyPorts
+			.split(",")
+			.map((p) => parseInt(p.trim(), 10))
+			.filter((p) => Number.isFinite(p) && p > 0);
+
+		const poller = new Poller(10_000);
+		const comfy = comfyPorts.map(
+			(port) => new ComfyUIClient(profile.host, port, obsidianRequester),
+		);
+
+		this.clients = {
+			profile,
+			comfy,
+			aitoolkit: new AiToolkitClient(
+				profile.host,
+				profile.aiToolkitPort,
+				profile.aiToolkitToken || null,
+				obsidianRequester,
+			),
+			agent: new ArthurAgentClient(
+				profile.host,
+				profile.agentPort,
+				profile.agentToken || null,
+				obsidianRequester,
+			),
+			poller,
+		};
 	}
 
 	onunload(): void {
 		this.app.workspace.detachLeavesOfType(VIEW_TYPE_ARTHUR_DASHBOARD);
+		// No orphan timers — the poller owns its own window.setInterval.
+		this.clients?.poller.stop();
+		this.clients = null;
 	}
 
 	private async loadSettings(): Promise<void> {
