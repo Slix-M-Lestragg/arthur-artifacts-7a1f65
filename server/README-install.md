@@ -2,7 +2,7 @@
 
 `server/` holds the pieces that run on the arthur home server (the machine
 hosting ComfyUI + ai-toolkit), not the Obsidian plugin itself. The agent is
-at **v0.6.0** (GPU-aware spawning):
+at **v0.7.0** (GPU-aware spawning + pi session aggregation):
 
 ```json
 {"known": {"comfyui": {"0": null, "2": [1], "3": [0, 1]}}}
@@ -23,7 +23,7 @@ falls back to the modulo default otherwise.
 | `comfy-dual.service`  | `/etc/systemd/system/comfy-dual.service` | dual-GPU ComfyUI unit (v0.5.2): one process on **both** GPUs (`CUDA_VISIBLE_DEVICES=0,1` + `--cuda-device 0,1`), port `8190`; installed **enabled but stopped** |
 | `arthur-agent.service`| `/etc/systemd/system/arthur-agent.service` | agent unit, listens on `0.0.0.0:8766` |
 
-The agent is a **single-file Python 3 stdlib server** (no pip deps, v0.6.0).
+The agent is a **single-file Python 3 stdlib server** (no pip deps, v0.7.0).
 It exposes a *service registry* — services are defined once in config.json and
 instances are **computed**, never stored from requests. Request data is never
 interpolated into shell commands; the agent only ever runs `systemctl
@@ -33,6 +33,11 @@ stats query, all with subprocess timeouts. The only other writes besides the
 state/audit files are the per-index runtime drop-ins under
 `/run/systemd/system/comfy@<i>.service.d/` (v0.6.0, GPU-aware spawning).
 Every mutation appends one JSON line to the audit log.
+
+The v0.7.0 `/api/pi/*` endpoints are **read-only views** over the local
+*pi-sync mirror repo* — see "pi session aggregation (v0.7.0)" below. They are
+NOT a systemd-backed service (pi sessions aren't lifecycle-managed) and stay
+out of the services registry; they are never audited (audit = mutations only).
 
 ## GPU-aware spawning (v0.6.0): spawn-state + runtime drop-ins
 
@@ -135,7 +140,7 @@ sudo install -m 644 comfy@.service comfy-dual.service arthur-agent.service \
 sudo systemctl daemon-reload
 sudo systemctl enable comfy-dual.service   # enabled but NOT started
 sudo systemctl restart arthur-agent
-curl -s http://127.0.0.1:8766/health   # → {"ok": true, "version": "0.6.0"}
+curl -s http://127.0.0.1:8766/health   # → {"ok": true, "version": "0.7.0"}
 ```
 
 Token lives in `/etc/arthur-agent/token` (root 0600) and `/etc/arthur-agent/env`
@@ -193,16 +198,80 @@ Same as schema v2 plus the optional per-service `extra_instances` array
 
 ---
 
-## API surface (v0.6.0; plugin code targets exactly this)
+## API surface (v0.7.0; plugin code targets exactly this)
 
 `GET /health` is unauthenticated. **Everything under `/api/` requires
 `Authorization: Bearer <token>`.** All responses are JSON; errors are always
 `{"error": "message"}` with a fitting HTTP code.
 
 ### GET /health (no auth)
-`{"ok": true, "version": "0.6.0"}`
+`{"ok": true, "version": "0.7.0"}`
 
-### GET /api/gpus
+### GET /api/pi/status  (v0.7.0)
+Aggregated pi session status across all devices publishing into the local
+*pi-sync mirror repo*. Read-only; never audited; **not** a service-registry
+entry (pi sessions are not systemd-lifecycle-managed).
+
+Producer: the **pi-arthur** extension writes per-device status via **pi-sync
+0.2.0**'s status pipe, deployed independently on each pi host — the agent must
+tolerate its absence.
+
+Contract files under the pi-sync repo (`~/.pi/agent/pi-sync/repo` by default;
+`ARTHUR_PI_REPO` env override, e.g. for tests):
+
+- `status/<Device>.sessions.json` —
+  `{device, hostname, updatedAt, sessions: [{id, path, cwd, name, model,
+  provider, startedAt, lastActivity, active}], subagents: [{runId, batchId,
+  agent, taskPreview, state, parentSessionId, startedAt, finishedAt}]}`
+- `devices/<Device>.json` — `{deviceId, hostname, updatedAt, daemon, …}`
+  (device info; its `hostname` is the authority and overrides the status
+  file's own `hostname` field when both exist)
+
+Each `*.sessions.json` becomes one device entry (file stem = device id);
+`stale` is `true` when `updatedAt` parses to more than **5 minutes** ago
+(or is missing/unparseable):
+
+```json
+{
+  "devices": [
+    {
+      "device": "Arthur", "hostname": "Arthur",
+      "repoUpdatedAt": "2026-11-06T21:40:12.000Z",
+      "sessionsCount": 3, "activeSessions": 1, "subagentsRunning": 2,
+      "sessions": [ {contract sessions entry, verbatim}, … ],
+      "subagents": [ {contract subagents entry, verbatim}, … ],
+      "stale": false
+    }, …
+  ],
+  "generatedAt": "2026-11-06T21:41:00Z"
+}
+```
+
+Degradable, not fatal: when the pi-sync repo or its `status/` directory
+doesn't exist (producer not deployed yet / repo moved), the answer is still
+**HTTP 200** with `{"devices": [], "warning": "pi-sync status unavailable",
+"generatedAt": …}`. An unreadable single status file yields a `stale: true`
+entry carrying `"error": "unreadable status file"` instead of failing the
+whole response.
+
+### GET /api/pi/sessions/{device}/{sessionId}/tail?lines=N  (v0.7.0)
+Read-tail of one session's JSONL, for the plugin's session peek. The JSONL
+path is resolved from the device's `status/<Device>.sessions.json` entry (`id`
+match) — never from the request.
+
+- `lines` is clamped to `1..50` (default 20); non-integer → **400**.
+- **Sandbox:** the recorded path is matched against its `realpath()` and only
+  accepted when it lies directly under `/home/*/.pi/agent/sessions/` — a
+  tampered status file cannot point the tail at arbitrary files → **403**
+  otherwise.
+- Unknown device / session id / vanished file → **404**.
+
+Response: `{"device", "sessionId", "count", "lines": [...]}` where each line
+is a compacted entry — message entries `{type: "message", role,
+preview (first ~120 chars of text content, whitespace-collapsed; toolResult
+entries prefixed with their `toolName`), timestamp}`, everything else
+(e.g. `session`, `model_change`) `{type, timestamp}`. Chronological order,
+newest last.
 Live GPU stats straight from `nvidia-smi --query-gpu=...` (5 s subprocess
 timeout):
 
@@ -429,3 +498,10 @@ same: `comfy-0`, `comfy-1`, `aitoolkit`).
   with `NoNewPrivileges`, `ProtectSystem=full`, `ProtectHome=read-only`,
   `PrivateTmp`. Audit log: `/var/log/arthur-agent/audit.jsonl`; spawn-state:
   `/var/lib/arthur-agent/instances.json`.
+- **pi tail sandbox (v0.7.0).** The `/api/pi/sessions/{d}/{id}/tail` endpoint
+  reads files only: the JSONL path comes from the pi-sync status file (not the
+  request) and is accepted only after `realpath()` resolve proves it sits
+  directly under `/home/*/.pi/agent/sessions/` (403 otherwise) — symlink
+  escapes and tampered status paths fail closed. Session files are opened
+  read-only; nothing under the pi-sync repo or sessions tree is ever written
+  by the agent.

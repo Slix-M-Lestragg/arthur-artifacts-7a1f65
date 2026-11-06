@@ -49,6 +49,18 @@ API (see server/README-install.md for the full documented surface):
                  extras: entry removed from config.json, live rewrite;
                  the default instance (index 0) is never forgettable)
   GET  /api/log?offset=N                        → JSONL audit tail
+
+(v0.7.0, Bearer-gated like all /api/*) pi session aggregation: the pi-sync
+mirror repo (~/.pi/agent/pi-sync/repo, env ARTHUR_PI_REPO override) is read
+for per-device pi session status — NOT a systemd-backed service, never in the
+registry:
+
+  GET  /api/pi/status                          → aggregated per-device session
+                 status {devices: [...], generatedAt}; degradable: missing
+                 repo/status/ → 200 {devices: [], warning: "..."}
+  GET  /api/pi/sessions/{dev}/{id}/tail?lines=N → last N compacted entries of
+                 the session's JSONL (path resolved from the device's status
+                 file, sandboxed to /home/*/.pi/agent/sessions/)
 """
 
 import json
@@ -59,10 +71,12 @@ import subprocess
 import threading
 import time
 import urllib.request
+from collections import deque
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-AGENT_VERSION = "0.6.0"
+AGENT_VERSION = "0.7.0"
 
 CONFIG_PATH = os.environ.get("ARTHUR_AGENT_CONFIG", "/etc/arthur-agent/config.json")
 TOKEN_PATH = os.environ.get("ARTHUR_AGENT_TOKEN_FILE", "/etc/arthur-agent/token")
@@ -955,6 +969,201 @@ def action_forget_instance(inst, ip):
 
 
 # --------------------------------------------------------------------------
+# pi session aggregation (v0.7.0) — read-only views over the pi-sync repo
+# --------------------------------------------------------------------------
+
+PI_REPO_ENV = "ARTHUR_PI_REPO"
+PI_STALE_SECS = 300      # updatedAt older than this → device entry stale
+PI_TAIL_DEFAULT = 20     # default lines for the tail endpoint
+PI_TAIL_MAX = 50         # hard cap on tail lines
+PI_PREVIEW_CHARS = 120   # preview truncation for compacted tail entries
+PI_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+# tail sandbox: only files directly under a user's pi sessions tree may be
+# read — matched against the REALPATH of the status-recorded session path
+PI_SESSIONS_SNDBOX_RE = re.compile(r"^/home/[^/]+/\.pi/agent/sessions/")
+
+
+def pi_repo():
+    """Root of the pi-sync mirror repo. Default ~/.pi/agent/pi-sync/repo;
+    ARTHUR_PI_REPO overrides (test hook). The pi-sync 0.2.0 status pipe (via
+    the pi-arthur extension) is the producer and is deployed independently —
+    the agent must tolerate its absence (degradable, never fatal)."""
+    root = os.environ.get(PI_REPO_ENV, "").strip()
+    if root:
+        return os.path.realpath(root)
+    return os.path.join(os.path.expanduser("~"), ".pi", "agent",
+                        "pi-sync", "repo")
+
+
+def _pi_load_json(path):
+    """Parsed dict from a JSON file, or None on any IO/parse problem."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _pi_parse_ts(val):
+    """ISO-8601 timestamp (Z or offset form) → aware datetime, else None."""
+    if not isinstance(val, str) or not val.strip():
+        return None
+    try:
+        t = val.strip()
+        if t.endswith(("Z", "z")):
+            t = t[:-1] + "+00:00"
+        dt = datetime.fromisoformat(t)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _pi_device_entry(device, data):
+    """Response entry for one <Device>.sessions.json. Contract:
+    {device, hostname, updatedAt, sessions: [...], subagents: [...]}."""
+    sessions = [s for s in data.get("sessions") if isinstance(s, dict)] \
+        if isinstance(data.get("sessions"), list) else []
+    subagents = [s for s in data.get("subagents") if isinstance(s, dict)] \
+        if isinstance(data.get("subagents"), list) else []
+    updated = _pi_parse_ts(data.get("updatedAt"))
+    updated_raw = data.get("updatedAt")
+    return {
+        "device": device,
+        "hostname": data.get("hostname")
+                    if isinstance(data.get("hostname"), str) else None,
+        "repoUpdatedAt": updated_raw if isinstance(updated_raw, str) else None,
+        "sessionsCount": len(sessions),
+        "activeSessions": sum(1 for s in sessions if s.get("active") is True),
+        "subagentsRunning": sum(1 for s in subagents if s.get("state") == "running"),
+        "sessions": sessions,
+        "subagents": subagents,
+        "stale": updated is None or
+                 (datetime.now(timezone.utc) - updated).total_seconds() > PI_STALE_SECS,
+    }
+
+
+def pi_status():
+    """GET /api/pi/status body: aggregate every status/<Device>.sessions.json
+    in the pi-sync repo, with hostname merged in from devices/<Device>.json
+    when present (the device-info file is the hostname authority). Missing
+    repo or status/ → degradable 200 warning, never an error."""
+    status_dir = os.path.join(pi_repo(), "status")
+    if not os.path.isdir(status_dir):
+        return {"devices": [], "generatedAt": _now_iso(),
+                "warning": "pi-sync status unavailable"}
+    devices = []
+    for fn in sorted(os.listdir(status_dir)):
+        if not fn.endswith(".sessions.json"):
+            continue
+        device = fn[:-len(".sessions.json")]
+        data = _pi_load_json(os.path.join(status_dir, fn))
+        if data is None:
+            devices.append({"device": device, "hostname": None,
+                            "repoUpdatedAt": None, "sessionsCount": 0,
+                            "activeSessions": 0, "subagentsRunning": 0,
+                            "sessions": [], "subagents": [], "stale": True,
+                            "error": "unreadable status file"})
+            continue
+        entry = _pi_device_entry(device, data)
+        dev_info = _pi_load_json(os.path.join(pi_repo(), "devices",
+                                              "%s.json" % device))
+        if dev_info and isinstance(dev_info.get("hostname"), str) \
+                and dev_info["hostname"]:
+            entry["hostname"] = dev_info["hostname"]
+        devices.append(entry)
+    return {"devices": devices, "generatedAt": _now_iso()}
+
+
+def _pi_msg_preview(msg):
+    """First ~PI_PREVIEW_CHARS of a message's text content (whitespace runs
+    collapsed); toolResult messages are prefixed with their tool name."""
+    def _texts(content):
+        if isinstance(content, str):
+            return [content]
+        if isinstance(content, list):
+            return [p.get("text") for p in content
+                    if isinstance(p, dict) and isinstance(p.get("text"), str)]
+        return []
+    texts = [t for t in _texts(msg.get("content")) if t]
+    text = " ".join(" ".join(t.split()) for t in texts)
+    if msg.get("role") == "toolResult":
+        name = msg.get("toolName") if isinstance(msg.get("toolName"), str) else None
+        if not texts:
+            return "%s: <no text>" % name if name else text
+        return ("%s: %s" % (name, text[:PI_PREVIEW_CHARS])) \
+            if name else text[:PI_PREVIEW_CHARS]
+    return text[:PI_PREVIEW_CHARS]
+
+
+def _pi_compact_entry(evt):
+    """Session JSONL entry → the essentials: message entries become
+    {type, role, preview, timestamp}; everything else {type, timestamp}.
+    Returns None for entries without a type."""
+    if not isinstance(evt, dict) or not isinstance(evt.get("type"), str):
+        return None
+    out = {"type": evt["type"]}
+    if isinstance(evt.get("timestamp"), str):
+        out["timestamp"] = evt["timestamp"]
+    msg = evt.get("message")
+    if evt["type"] == "message" and isinstance(msg, dict):
+        if isinstance(msg.get("role"), str):
+            out["role"] = msg["role"]
+        out["preview"] = _pi_msg_preview(msg)
+    return out
+
+
+def pi_session_tail(device, session_id, n):
+    """(code, body) for GET /api/pi/sessions/{device}/{sessionId}/tail.
+    Resolves the session's JSONL path from the device's status file (repo
+    data, never the request), then read-tails the last <=n lines as compacted
+    entries. Path sandbox: matched against the RESOLVED path — only files
+    under /home/*/.pi/agent/sessions/ may be read, so a tampered status file
+    cannot point the tail at arbitrary files."""
+    status_path = os.path.join(pi_repo(), "status", "%s.sessions.json" % device)
+    if not os.path.isdir(os.path.dirname(status_path)):
+        return 404, {"error": "pi-sync status unavailable"}
+    if not os.path.isfile(status_path):
+        return 404, {"error": "unknown device %r" % device}
+    data = _pi_load_json(status_path)
+    if data is None:
+        return 500, {"error": "status file for %r is not valid JSON" % device}
+    sessions = data.get("sessions") if isinstance(data.get("sessions"), list) else []
+    entry = next((s for s in sessions if isinstance(s, dict)
+                  and s.get("id") == session_id), None)
+    if entry is None:
+        return 404, {"error": "unknown session %r on device %r"
+                              % (session_id, device)}
+    raw = entry.get("path")
+    if not isinstance(raw, str) or not os.path.isabs(raw):
+        return 500, {"error": "session entry has no usable path"}
+    path = os.path.realpath(raw)
+    if not PI_SESSIONS_SNDBOX_RE.match(path):
+        return 403, {"error": "session path is outside the sessions sandbox"}
+    if not os.path.isfile(path):
+        return 404, {"error": "session file not found"}
+    recent = deque(maxlen=n)
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.strip():
+                    recent.append(line)
+    except OSError as exc:
+        return 500, {"error": "cannot read session file: %s" % exc}
+    lines = []
+    for line in recent:
+        try:
+            evt = json.loads(line)
+        except ValueError:
+            continue
+        compact = _pi_compact_entry(evt)
+        if compact is not None:
+            lines.append(compact)
+    return 200, {"device": device, "sessionId": session_id,
+                 "count": len(lines), "lines": lines}
+
+
+# --------------------------------------------------------------------------
 # HTTP layer
 # --------------------------------------------------------------------------
 
@@ -1192,6 +1401,26 @@ class Handler(BaseHTTPRequestHandler):
             next_offset, lines = tail_audit(offset)
             return self.respond(200, {"offset": offset, "next_offset": next_offset,
                                       "lines": lines})
+
+        # ---- pi session aggregation (v0.7.0) -----------------------------
+        # read-only views over the pi-sync repo; NOT in the service registry
+        # (pi sessions are not lifecycle-managed) and never audited (no mutations)
+        if path == "/api/pi/status" and verb == "GET":
+            return self.respond(200, pi_status())
+
+        m = re.match(r"^/api/pi/sessions/([^/]+)/([^/]+)/tail$", path)
+        if m and verb == "GET":
+            device, sid = m.group(1), m.group(2)
+            if not PI_NAME_RE.match(device) or not PI_NAME_RE.match(sid) \
+                    or ".." in device or ".." in sid:
+                return self.respond(400, {"error": "invalid device or session id"})
+            try:
+                n = int(query.get("lines", [str(PI_TAIL_DEFAULT)])[0])
+            except ValueError:
+                return self.respond(400, {"error": "lines must be an integer"})
+            n = max(1, min(n, PI_TAIL_MAX))
+            code, body = pi_session_tail(device, sid, n)
+            return self.respond(code, body)
 
         self.respond(404, {"error": "not found"})
 
