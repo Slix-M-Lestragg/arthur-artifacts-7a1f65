@@ -485,3 +485,22 @@
 	font-style: italic;
 	font-size: var(--font-ui-small);
 }
+
+/* down instance — compact lifecycle row (down badge + start, no live data) */
+.arthur-card--compact .arthur-btn-row {
+	margin-top: 0.25em;
+}
+
+.arthur-badge {
+	display: inline-block;
+	padding: 0 0.45em;
+	border-radius: var(--radius-s);
+	font-size: var(--font-ui-smaller);
+	font-weight: var(--font-semibold);
+	line-height: 1.5;
+}
+
+.arthur-badge--down {
+	color: var(--text-on-accent);
+	background: var(--text-error);
+}

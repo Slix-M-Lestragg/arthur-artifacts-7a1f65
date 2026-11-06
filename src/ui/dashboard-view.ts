@@ -48,12 +48,27 @@ import type { ComfyUIClient, QueueResponse, SystemStats } from "../api/comfy";
 import { parseComfyBinaryFrame } from "../comfy-frame";
 import { WsConnection, WsState } from "../connection";
 import { renderLossChart } from "./loss-chart";
-import { el, fmtBytes, fmtClockTime, fmtDuration, truncate } from "../util";
-import { ArthurApiError } from "../api/transport";
+import { el, DETAIL_INTERVAL_MS, fmtBytes, fmtClockTime, fmtDuration, truncate } from "../util";
+import { ArthurApiError, isTimeoutError } from "../api/transport";
 import { ServiceBar } from "./service-bar";
 import { confirmModal, describeError, run, toastErr, toastOk } from "./actions";
 
 export const VIEW_TYPE_ARTHUR_DASHBOARD = "arthur-dashboard";
+
+/** A section that shows neither data nor error for this long degrades to its
+ *  error state (watchdog, independent of any hung request chain). */
+const STUCK_AFTER_MS = 2 * DETAIL_INTERVAL_MS;
+/** Watchdog cadence: finer than the stuck threshold, coarse enough to be cheap. */
+const WATCHDOG_INTERVAL_MS = 1000;
+
+/** Per-section stuck-state bookkeeping ("agent" / "training" / "gen:<port>"). */
+interface SectionWatch {
+	/** Timestamp of the tick that first left the section without a settle;
+	 *  null once the section renders data OR an error. */
+	pendingSinceMs: number | null;
+	/** Degraded error state already painted (once per pending stretch). */
+	degraded: boolean;
+}
 
 interface ComfyPortDetail {
 	/** system_stats succeeded? null = no data yet. */
@@ -236,6 +251,10 @@ export class ArthurDashboardView extends ItemView {
 	};
 	private lastTick: number | null = null;
 
+	// stuck-state watchdog — no section waits past ~2 detail cycles
+	private readonly sectionWatches = new Map<string, SectionWatch>();
+	private watchTimer: number | null = null;
+
 	// training accordion state (job id → state; cleared on close/unload/job delete)
 	private readonly jobUi = new Map<string, JobPanelUi>();
 	private readonly jobLoss = new Map<string, JobLossCache>();
@@ -287,16 +306,21 @@ export class ArthurDashboardView extends ItemView {
 
 	/**
 	 * Comfy ports to attach generation cards to: the comfyui service's
-	 * discovered instances (agent order) when /api/status answers — the
+	 * discovered LIVE instances (agent order) when /api/status answers — the
 	 * settings comfyPorts list (labeled unmanaged) only when it doesn't.
+	 * Down instances (up:false, port dead) never get a generation panel or a
+	 * WS socket — they render as compact rows in the lifecycle section, where
+	 * their start button lives (probing a dead port yields only timeout noise).
 	 */
 	private desiredPorts(): DesiredPort[] {
 		const comfy = this.agentDetail.status?.services.find((s) => s.id === "comfyui");
 		if (this.agentDetail.statusOk === true && comfy) {
-			return comfy.instances.map((i) => ({
-				port: i.port,
-				label: `${i.id}${i.gpu != null ? ` · GPU ${i.gpu}` : ""} · :${i.port}`,
-			}));
+			return comfy.instances
+				.filter((i) => i.up === true)
+				.map((i) => ({
+					port: i.port,
+					label: `${i.id}${i.gpu != null ? ` · GPU ${i.gpu}` : ""} · :${i.port}`,
+				}));
 		}
 		return this.comfyPorts().map((p) => ({ port: p, label: `ComfyUI :${p} · unmanaged` }));
 	}
@@ -323,6 +347,7 @@ export class ArthurDashboardView extends ItemView {
 		this.wsHost = null;
 		this.activePorts = [];
 		this.skeletonBuilt = false;
+		this.sectionWatches.clear();
 		this.buildSkeleton(this.desiredPorts());
 		this.openWss();
 		this.plugin.dashboardView = this;
@@ -333,6 +358,14 @@ export class ArthurDashboardView extends ItemView {
 			this.clearAllPreviews();
 			this.clearTrainingState();
 		});
+		// Stuck-state watchdog: independent of the poll chain, it degrades any
+		// section that sits neither in data nor in error for 2 detail cycles.
+		if (this.watchTimer === null) {
+			this.watchTimer = window.setInterval(
+				() => this.checkStuckSections(),
+				WATCHDOG_INTERVAL_MS,
+			);
+		}
 		// Immediate first fill after the synchronously rendered skeleton: without
 		// this, the user's first paint of data waits for the next 3s detail tick
 		// (and the gate below no-ops that tick if layout isn't finished yet).
@@ -341,11 +374,101 @@ export class ArthurDashboardView extends ItemView {
 
 	async onClose(): Promise<void> {
 		this.isOpened = false;
+		if (this.watchTimer !== null) {
+			window.clearInterval(this.watchTimer);
+			this.watchTimer = null;
+		}
+		this.sectionWatches.clear();
 		this.closeWss();
 		this.clearAllPreviews();
 		this.clearTrainingState();
 		if (this.plugin.dashboardView === this) this.plugin.dashboardView = null;
 		this.contentEl.empty();
+	}
+
+	/** Mark a section as pending with no data/error yet (first tick only). */
+	private watchPending(key: string): void {
+		const w = this.sectionWatches.get(key);
+		if (w && (w.pendingSinceMs !== null || w.degraded)) return;
+		this.sectionWatches.set(key, { pendingSinceMs: Date.now(), degraded: false });
+	}
+
+	/** The section now renders data or an error — clear pending + degraded. */
+	private watchSettle(key: string): void {
+		const w = this.sectionWatches.get(key);
+		if (w) {
+			w.pendingSinceMs = null;
+			w.degraded = false;
+		}
+	}
+
+	/** Drop watches of generation ports that are no longer desired. */
+	private pruneSectionWatches(): void {
+		const wanted = new Set(this.activePorts.map((p) => `gen:${p.port}`));
+		for (const key of this.sectionWatches.keys()) {
+			if (key.startsWith("gen:") && !wanted.has(key)) this.sectionWatches.delete(key);
+		}
+	}
+
+	/** Watchdog callback — degrade sections stuck between data and error. */
+	private checkStuckSections(): void {
+		if (!this.visible()) return;
+		const now = Date.now();
+		for (const [key, w] of this.sectionWatches) {
+			if (w.pendingSinceMs === null || w.degraded) continue;
+			if (now - w.pendingSinceMs < STUCK_AFTER_MS) continue;
+			// No data, no error for ~2 detail cycles — the collector chain may be
+			// wedged. Paint the error state NOW instead of waiting (possibly
+			// forever) for the tick that may never settle.
+			w.degraded = true;
+			this.paintStuckSection(key);
+		}
+	}
+
+	/** Paint a section's degraded 'no response — timeout/offline' state.
+	 *  Runs outside the poll chain; the next settled tick repaints the truth. */
+	private paintStuckSection(key: string): void {
+		const host = this.plugin.clients?.profile.host ?? "";
+		const mark = "no response — timeout/offline";
+		if (key === "agent") {
+			const port = this.plugin.clients?.profile.agentPort ?? 0;
+			const hostPort = host ? `${host}:${port}` : "(not configured)";
+			this.instanceCardsEl.empty();
+			this.instanceCardsEl.append(
+				el("p", {
+					cls: "arthur-note",
+					text: `arthur-agent — ${mark}`,
+					attrs: { title: errTooltip(hostPort, mark) },
+				}),
+			);
+		} else if (key === "training") {
+			const port = this.plugin.clients?.profile.aiToolkitPort ?? 0;
+			const hostPort = host ? `${host}:${port}` : "(not configured)";
+			this.trainingNoteEl.setText(`ai-toolkit — ${mark}`);
+			this.trainingNoteEl.setAttribute("title", errTooltip(hostPort, mark));
+			this.trainingNoteEl.show();
+		} else if (key.startsWith("gen:")) {
+			const port = Number(key.slice(4));
+			const hostPort = host ? `${host}:${port}` : "(not configured)";
+			const tooltip = errTooltip(hostPort, mark);
+			const panel = this.panels.get(port);
+			if (panel) {
+				setDot(panel.genDot, false);
+				panel.genDot.setAttribute("title", tooltip);
+				panel.queueEl.setText(mark);
+			}
+			const dot = this.topDots.get(`c${port}`);
+			if (dot) {
+				setDot(dot, false);
+				dot.setAttribute("title", tooltip);
+			}
+		}
+	}
+
+	/** Per-service outcome label for one request error (debug breadcrumbs). */
+	private outcomeFor(err: unknown): string {
+		if (err == null) return "ok";
+		return isTimeoutError(err) ? "timeout" : "err";
 	}
 
 	/** Detail poller entry point — fetch everything, then paint. */
@@ -371,6 +494,8 @@ export class ArthurDashboardView extends ItemView {
 				error: "not configured",
 			};
 			this.lastTick = null;
+			// The "not configured" placeholder is a settled state — no watch pending.
+			this.sectionWatches.clear();
 			// Port set may have changed in settings while the view sat open.
 			this.syncSkeleton();
 			this.renderTopBar(profile.name, "");
@@ -381,6 +506,13 @@ export class ArthurDashboardView extends ItemView {
 			this.renderTraining();
 			return;
 		}
+
+		// Stuck-state bookkeeping: every section in this tick starts pending;
+		// the watchdog degrades any that never settles into data or error.
+		const tickStarted = Date.now();
+		this.watchPending("agent");
+		this.watchPending("training");
+		for (const p of this.desiredPorts()) this.watchPending(`gen:${p.port}`);
 
 		// Agent status first — it defines the instance list every other card
 		// hangs off of (the settings port list is the unreachable fallback).
@@ -404,6 +536,10 @@ export class ArthurDashboardView extends ItemView {
 						? describeError(statusRes.error)
 						: "status failed (token rejected?)",
 		};
+		// Health/status settled — with data (ok) or a captured error; both are
+		// renderable states, so the agent section can never sit "loading" here.
+		this.watchSettle("agent");
+		const agentError = this.agentDetail.error;
 
 		// Settings may have changed, or the agent discovered/removed instances
 		// (spawn/stop) — resync the cached cards + WS sockets with the current
@@ -413,6 +549,7 @@ export class ArthurDashboardView extends ItemView {
 		this.syncSkeleton();
 		const desired = this.desiredPorts();
 		this.activePorts = desired;
+		this.pruneSectionWatches();
 		const stale =
 			profile.host !== this.wsHost ||
 			!this.skeletonBuilt ||
@@ -420,7 +557,10 @@ export class ArthurDashboardView extends ItemView {
 				this.activePorts.map((p) => p.port).join(",");
 		if (stale) this.rebuildPortPanels(desired);
 
-		// Inner promises never reject; per-port failures land in .error.
+		// Inner promises never reject; per-port failures land in .error. Each
+		// port settles its own watch as soon as its result is known — one hung
+		// port timeouts (8s) without blocking the others' settle bookkeeping.
+		const comfyErrors = new Map<number, unknown>();
 		this.comfyDetail = await Promise.all(
 			desired.map(async ({ port }): Promise<ComfyPortDetail> => {
 				const client = this.clientFor(port);
@@ -428,8 +568,11 @@ export class ArthurDashboardView extends ItemView {
 				try {
 					const stats = await client.systemStats();
 					const queue = await client.queue();
+					this.watchSettle(`gen:${port}`);
 					return { online: true, stats, queue, error: null };
 				} catch (err) {
+					comfyErrors.set(port, err);
+					this.watchSettle(`gen:${port}`);
 					return {
 						online: false,
 						stats: null,
@@ -440,31 +583,37 @@ export class ArthurDashboardView extends ItemView {
 			}),
 		);
 
-		try {
-			const [jobs, queue] = await Promise.all([
-				clients.aitoolkit.jobs(),
-				clients.aitoolkit.queueList(),
-			]);
-			this.aiDetail = {
-				reachable: true,
-				jobs: jobs.jobs ?? [],
-				queues: (queue.queues ?? []).map(
-					(q): AiToolkitQueueRow => ({
-						id: q.id,
-						gpu_ids: q.gpu_ids,
-						is_running: q.is_running,
-					}),
-				),
-				error: null,
-			};
-		} catch (err) {
-			this.aiDetail = {
-				reachable: false,
-				jobs: [],
-				queues: [],
-				error: describeError(err),
-			};
-		}
+		const aiError: unknown = await (async () => {
+			try {
+				const [jobs, queue] = await Promise.all([
+					clients.aitoolkit.jobs(),
+					clients.aitoolkit.queueList(),
+				]);
+				this.aiDetail = {
+					reachable: true,
+					jobs: jobs.jobs ?? [],
+					queues: (queue.queues ?? []).map(
+						(q): AiToolkitQueueRow => ({
+							id: q.id,
+							gpu_ids: q.gpu_ids,
+							is_running: q.is_running,
+						}),
+					),
+					error: null,
+				};
+				return null;
+			} catch (err) {
+				this.aiDetail = {
+					reachable: false,
+					jobs: [],
+					queues: [],
+					error: describeError(err),
+				};
+				return err;
+			}
+		})();
+		// Jobs/queues settled — data or error, always a renderable state.
+		this.watchSettle("training");
 
 		this.lastTick = Date.now();
 		this.renderTopBar(profile.name, profile.host);
@@ -473,6 +622,24 @@ export class ArthurDashboardView extends ItemView {
 		this.renderInstanceRows();
 		this.renderGeneration();
 		this.renderTraining();
+
+		// Debug breadcrumb (settings toggle): one line per tick — collector
+		// name, per-service outcome (ok/err/timeout), duration, host:port.
+		if (this.plugin.settings.debugLogging) {
+			const hostPort = (port: number) => `${profile.host}:${port}`;
+			const parts: string[] = [];
+			parts.push(
+				`agent ${this.outcomeFor(health.value === null ? health.error : null)} ${hostPort(profile.agentPort)}` +
+					(agentError ? ` · status ${this.outcomeFor(statusRes.error)}` : ""),
+			);
+			for (const p of desired) {
+				parts.push(`comfy ${this.outcomeFor(comfyErrors.get(p.port) ?? null)} ${hostPort(p.port)}`);
+			}
+			parts.push(`aitk ${this.outcomeFor(aiError)} ${hostPort(profile.aiToolkitPort)}`);
+			console.debug(
+				`arthur dashboard-detail ok ${Date.now() - tickStarted}ms · ${parts.join(" · ")}`,
+			);
+		}
 	}
 
 	// ------------------------------------------------------------------
@@ -807,7 +974,13 @@ export class ArthurDashboardView extends ItemView {
 					continue;
 				}
 				for (const inst of svc.instances) {
-					container.append(this.buildInstanceRow(svc, inst, hostPort));
+					// Down instances get a compact lifecycle row (down badge + start);
+					// only live instances get the full card (and a generation panel).
+					container.append(
+						inst.up
+							? this.buildInstanceRow(svc, inst, hostPort)
+							: this.buildDownInstanceRow(svc, inst, hostPort),
+					);
 				}
 			}
 			return;
@@ -837,6 +1010,41 @@ export class ArthurDashboardView extends ItemView {
 		for (const p of this.activePorts) {
 			container.append(this.buildUnmanagedRow(p, hostPort));
 		}
+	}
+
+	/** Compact row for a down instance (up:false, port dead): name, port,
+	 *  'down' badge and the per-instance start endpoint — no VRAM bar, no
+	 *  stop/restart (nothing to stop), no generation panel or WS chatter. */
+	private buildDownInstanceRow(
+		svc: AgentService,
+		inst: AgentInstance,
+		hostPort: (port: number) => string,
+	): HTMLElement {
+		const name = inst.name ?? inst.id;
+		const dot = el("span", { cls: "arthur-dot arthur-dot--red" });
+		dot.setAttribute("title", `agent: instance down · ${hostPort(inst.port)}`);
+		const badge = el("span", { cls: "arthur-badge arthur-badge--down", text: "down" });
+		const metaParts = [`:${inst.port}`];
+		if (inst.gpu != null) metaParts.push(`GPU ${inst.gpu}`);
+		const btnStart = newBtn("Start");
+		btnStart.addClass("arthur-btn--tiny");
+		btnStart.addEventListener("click", () =>
+			void this.instanceLifecycle(svc.id, inst.id, `start ${name}`, "start"),
+		);
+		const row = el("div", { cls: "arthur-card arthur-card--compact" });
+		row.append(
+			el("div", {
+				cls: "arthur-card-head",
+				children: [
+					dot,
+					el("span", { cls: "arthur-card-title", text: name }),
+					el("span", { cls: "arthur-card-meta", text: metaParts.join(" · ") }),
+					badge,
+				],
+			}),
+			el("div", { cls: "arthur-btn-row", children: [btnStart] }),
+		);
+		return row;
 	}
 
 	/** One agent-reported instance card (lifecycle buttons + VRAM). */

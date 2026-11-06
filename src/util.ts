@@ -3,6 +3,15 @@
  * a tiny DOM element builder. No dependencies on obsidian types.
  */
 
+/** Default transport-level request timeout (ms). A wedged server must surface
+ *  as a typed `ArthurApiError` (`timeout after Nms`) instead of freezing its
+ *  collector chain via the in-flight guard — see src/api/transport.ts. */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 8000;
+
+/** Detail poll cadence (ms) — the dashboard stuck-state watchdog degrades any
+ *  section that shows neither data nor error for 2× this interval. */
+export const DETAIL_INTERVAL_MS = 3000;
+
 /** Format a byte count for compact display, e.g. 24576 → "24.0 KB", 12.3e9 → "11.4 GB". */
 export function fmtBytes(bytes: number | null | undefined, decimals = 1): string {
 	if (bytes == null || !Number.isFinite(bytes)) return "?";

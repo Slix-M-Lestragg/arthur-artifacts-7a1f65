@@ -222,16 +222,21 @@ const obsidianStub = {
 	// Rejects exactly like an unreachable server — callers treat it offline.
 	// Sections can install a temporary httpResponder(opts) → {status, body}
 	// handler to simulate a live arthur-agent; no match → offline (default).
+	// A responder may instead return a Promise (e.g. one that never settles) to
+	// simulate a hung/wedged server — see the timeout smoke section.
 	// NOTE: the resolved response mirrors Obsidian's REAL requestUrl contract:
 	// `.json` and `.text` are pre-parsed VALUE properties (not methods).
 	requestUrl: async (opts) => {
 		if (httpResponder) {
 			const resp = httpResponder(opts);
-			if (resp) return {
-				status: resp.status ?? 200,
-				json: resp.body ?? {},
-				text: JSON.stringify(resp.body ?? {}),
-			};
+			if (resp) {
+				if (typeof resp.then === "function") return await resp;
+				return {
+					status: resp.status ?? 200,
+					json: resp.body ?? {},
+					text: JSON.stringify(resp.body ?? {}),
+				};
+			}
 		}
 		throw new Error("offline (smoke stub)");
 	},
@@ -340,6 +345,14 @@ function findButton(node, text) {
 		if (hit) return hit;
 	}
 	return null;
+}
+
+/** Find ALL buttons by visible text inside a stub element tree. */
+function findButtons(node, text, out = []) {
+	if (node == null || typeof node !== "object") return out;
+	if (node.tagName === "BUTTON" && (node.textContent ?? "").includes(text)) out.push(node);
+	for (const child of node.children ?? []) findButtons(child, text, out);
+	return out;
 }
 
 // ------------------------------------------------------------------- run -----
@@ -778,6 +791,173 @@ try {
 	StubNotice.reset();
 	await app.workspace.detachLeavesOfType("arthur-dashboard");
 
+	// ---- 10. hung request → transport timeout, section degrades, guard released
+	console.log("== 10. hung request → 8s transport timeout, no permanent poller block ===");
+	// Freeze background pollers so the timing assertions below are deterministic.
+	plugin.clients.lightPoller.stop();
+	plugin.clients.detailPoller.stop();
+	// Responder that never resolves for the agent /health (wedged server);
+	// everything else rejects instantly like an unreachable server.
+	httpResponder = (opts) => {
+		calls9.push({ url: opts.url, method: opts.method ?? "GET", hung: true });
+		if (opts.url.endsWith("/health")) return new Promise(() => {}); // never settles
+		return null;
+	};
+	StubNotice.reset();
+	app.workspace.detachLeavesOfType("arthur-dashboard");
+	let view10;
+	ok = true;
+	try {
+		await plugin.activateView();
+		view10 = app.workspace.getLeavesOfType("arthur-dashboard")[0]?.view;
+		// Hangs ~8s on /health, then the transport timeout settles the chain
+		// and the tick paints the timeout error state (never a stuck loading).
+		await view10.refreshData();
+	} catch (err) {
+		ok = false;
+		console.error(`    refreshData (hung /health) threw: ${err?.stack ?? err}`);
+	}
+	assert(ok, "refreshData with a hung request settles via the transport timeout");
+	let v10 = allText(view10.contentEl);
+	assert(v10.includes("timeout after 8000ms"), "dashboard names the hung request as 'timeout after 8000ms'");
+	assert(v10.includes("agent unreachable") || v10.includes("not responding"),
+		"sections show error states — nothing stuck in a loading placeholder");
+	assert(plugin.clients.detailPoller.hasInFlight === false, "no collector stuck in flight after the timeout");
+
+	// In-flight guard: a hung tick engages the guard, the timeout releases it.
+	plugin.clients.detailPoller.pollNow();
+	await sleep(100);
+	assert(plugin.clients.detailPoller.hasInFlight === true, "hung tick engages the in-flight guard");
+	{
+		const deadline = Date.now() + 9000;
+		while (plugin.clients.detailPoller.hasInFlight && Date.now() < deadline) await sleep(200);
+	}
+	assert(plugin.clients.detailPoller.hasInFlight === false, "guard released after the transport timeout (no permanent block)");
+	// Next tick proceeds — the guard is not poisoned by the timeout.
+	plugin.clients.detailPoller.pollNow();
+	await sleep(100);
+	assert(plugin.clients.detailPoller.hasInFlight === true, "next tick after the timeout proceeds (no permanent in-flight block)");
+
+	// ---- 11. down instances (up:false) — no panels/ws, compact lifecycle row
+	console.log("== 11. down instances: no generation panels/ws for dead ports ===");
+	httpResponder = null;
+	agentStatusBody.services[0].instances = [
+		{ id: "comfy-0", service: "comfyui", name: "ComfyUI #0", port: 8188, gpu: 0, up: true, uptime: 169000.0 },
+		{ id: "comfy-1", service: "comfyui", name: "ComfyUI #1", port: 8189, gpu: 1, up: true, uptime: 168000.0 },
+		{ id: "comfy-2", service: "comfyui", name: "ComfyUI #2", port: 8190, gpu: null, up: false, uptime: null },
+	];
+	httpResponder = (opts) => {
+		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.0" });
+		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
+		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/instances/") && opts.url.endsWith("/start")) {
+			return jsonBody(200, { action: "start", result: "started", instance: { id: "comfy-2", up: true, port: 8190 } });
+		}
+		return null;
+	};
+	StubNotice.reset();
+	app.workspace.detachLeavesOfType("arthur-dashboard");
+	let view11;
+	ok = true;
+	try {
+		await plugin.activateView();
+		view11 = app.workspace.getLeavesOfType("arthur-dashboard")[0]?.view;
+		await view11.refreshData();
+	} catch (err) {
+		ok = false;
+		console.error(`    down-instance refresh threw: ${err?.stack ?? err}`);
+	}
+	assert(ok, "down-instance view attach + refresh did not throw");
+	assert(view11.panels.get(8188) != null && view11.panels.get(8189) != null, "generation panels attach only to up:true instances");
+	assert(view11.panels.get(8190) === undefined, "no generation panel for a down instance (up:false)");
+	assert(!view11.wss.has(8190), "no WS connection opened to a dead port");
+	let v11 = allText(view11.instanceCardsEl);
+	assert(v11.includes("ComfyUI #2"), "down instance renders as a row in the lifecycle section");
+	assert(v11.includes("down"), "down instance row carries the 'down' badge");
+	// The down row's start button hits the per-instance start endpoint.
+	const downStartBtns = findButtons(view11.instanceCardsEl, "Start");
+	assert(downStartBtns.length >= 1, "down instance row exposes a start button");
+	calls9 = [];
+	for (const btn of downStartBtns) btn.handlers.get("click")[0]?.();
+	await sleep(30);
+	assert(calls9.some((c) => c.method === "POST" && c.url.includes("/api/services/comfyui/instances/comfy-2/start")) === true,
+		"down-instance start hits the agent's per-instance start endpoint");
+	// Light cycle + status bar skip dead ports entirely.
+	await plugin.collectLightData(); // private in TS, callable from the smoke
+	assert(plugin.describeLightState().includes("P8190") === false,
+		"status bar / light cycle skip dead ports (got: " + plugin.describeLightState() + ")");
+
+	// ---- 12. WS close during CONNECTING — no error callback, no backoff
+	console.log("== 12. WS close-during-CONNECTING is swallowed silently ===");
+	const bundleWs = bundle.WsConnection;
+	assert(typeof bundleWs === "function", "bundle exports WsConnection for this check");
+	class CloseDuringConnectStub {
+		constructor(url) {
+			this.url = url;
+			this.readyState = 0; // CONNECTING
+			this.onopen = null;
+			this.onmessage = null;
+			this.onclose = null;
+			this.onerror = null;
+		}
+		close() {
+			this.readyState = 3;
+			// Mirror the device symptom: closing during CONNECT makes the engine
+			// surface a benign close + error to whoever still holds handlers.
+			const c = this.onclose;
+			const e = this.onerror;
+			queueMicrotask(() => {
+				c?.({});
+				e?.({ message: "WebSocket is closed before the connection is established" });
+			});
+		}
+	}
+	const realWs = globalThis.WebSocket;
+	globalThis.WebSocket = CloseDuringConnectStub;
+	const wsStates = [];
+	const conn = new bundleWs("ws://10.0.0.9:8188/ws?clientId=smoke", {
+		onStateChanged: (s) => wsStates.push(s),
+		onEvent: () => {
+			throw new Error("unexpected event callback after close-during-connecting");
+		},
+	});
+	conn.open();
+	assert(conn.currentState === "connecting", "socket starts in CONNECTING");
+	conn.close();
+	await sleep(20);
+	assert(conn.currentState === "closed", "intentional close during CONNECTING lands in Closed");
+	assert(wsStates.length === 2 && wsStates[0] === "connecting" && wsStates[1] === "closed",
+		`no error callback / no backoff for close-during-connecting (got: ${wsStates.join(" -> ")})`);
+	globalThis.WebSocket = realWs;
+
+	// ---- 13. debug breadcrumbs — one console.debug line per tick, OFF default
+	console.log("== 13. debug breadcrumbs (settings toggle) ===");
+	// Section 10's last guard-test tick may still be settling on the hung
+	// responder — wait for quiescence, then install the responder + logging.
+	{
+		const deadline = Date.now() + 10000;
+		while (plugin.clients.detailPoller.hasInFlight && Date.now() < deadline) await sleep(100);
+	}
+	const debugLines = [];
+	const realDebug = console.debug;
+	console.debug = (...args) => debugLines.push(args.map(String).join(" "));
+	plugin.settings.debugLogging = true;
+	plugin.clients.detailPoller.debugLogging = true;
+	plugin.clients.detailPoller.pollNow();
+	{
+		const deadline = Date.now() + 5000;
+		while (plugin.clients.detailPoller.hasInFlight && Date.now() < deadline) await sleep(50);
+	}
+	await sleep(50);
+
+	console.debug = realDebug;
+	plugin.settings.debugLogging = false;
+	plugin.clients.detailPoller.debugLogging = false;
+	assert(debugLines.some((l) => l.includes("arthur poll dashboard-detail ok") && l.includes("10.0.0.9")),
+		`poller breadcrumb: collector name + outcome + duration + host (got: ${debugLines.join(" | ") || "none"})`);
+	assert(debugLines.some((l) => l.includes("arthur dashboard-detail") && l.includes("10.0.0.9:8766")),
+		"dashboard breadcrumb: per-service outcomes with host:port");
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();
@@ -793,4 +973,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-tooltips / agent-v0.5.0-service-bar all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-tooltips / agent-v0.5.0-service-bar / hung-request-timeout-guard / down-instance-filtering / ws-close-connecting-swallowed / debug-breadcrumbs all clean");

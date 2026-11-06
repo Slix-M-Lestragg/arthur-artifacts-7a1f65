@@ -8,10 +8,13 @@
  * poller.stop() in onunload (or hand the id to plugin.registerInterval).
  */
 import { WsState } from "./connection"; // eslint-disable-line -- type adjacency only
+import { isTimeoutError } from "./api/transport";
 
 interface Collector {
 	name: string;
 	fn: () => Promise<unknown>;
+	/** Describes what the collector talks to (host:port) — debug logging only. */
+	describe?: () => string;
 	/** Number of runs currently in flight (0 or 1 given the guard). */
 	inFlight: number;
 	/** Set true (temporarily) if the last run threw — collectors are unreliable sources. */
@@ -22,6 +25,9 @@ export class Poller {
 	private intervalMs: number;
 	private timerId: number | null = null;
 	private readonly collectors = new Map<string, Collector>();
+	/** Debug breadcrumbs: one console.debug line per collector per tick
+	 *  (name, outcome ok/err/timeout/skipped, duration, host:port). */
+	debugLogging = false;
 
 	constructor(intervalMs: number) {
 		this.intervalMs = intervalMs;
@@ -32,14 +38,16 @@ export class Poller {
 		return this.timerId;
 	}
 
-	/** Register (or replace) a named collector. Name must be unique. */
-	registerCollector(name: string, fn: () => Promise<unknown>): void {
+	/** Register (or replace) a named collector. Name must be unique.
+	 *  `describe` supplies the host:port context for debug breadcrumbs. */
+	registerCollector(name: string, fn: () => Promise<unknown>, describe?: () => string): void {
 		const existing = this.collectors.get(name);
 		if (existing) {
 			existing.fn = fn;
+			if (describe) existing.describe = describe;
 			return;
 		}
-		this.collectors.set(name, { name, fn, inFlight: 0, lastError: undefined });
+		this.collectors.set(name, { name, fn, describe, inFlight: 0, lastError: undefined });
 	}
 
 	/** Start ticking (idempotent). */
@@ -75,13 +83,24 @@ export class Poller {
 	/** Fan the tick out across collectors, guarding per-collector in-flight. */
 	private tick(): void {
 		for (const collector of this.collectors.values()) {
-			if (collector.inFlight > 0) continue; // previous run unsettled — skip
+			if (collector.inFlight > 0) {
+				// previous run unsettled — skip. With request timeouts this only
+				// happens for the few seconds a long chain legitimately takes.
+				if (this.debugLogging) {
+					console.debug(
+						`arthur poll ${collector.name} skipped (in flight) ${collector.describe?.() ?? ""}`.trimEnd(),
+					);
+				}
+				continue;
+			}
 			collector.inFlight++;
 			this.run(collector);
 		}
 	}
 
 	private async run(collector: Collector): Promise<void> {
+		const started = Date.now();
+		let outcome: "ok" | "err" | "timeout" = "ok";
 		try {
 			await collector.fn();
 			collector.lastError = undefined;
@@ -89,8 +108,14 @@ export class Poller {
 			// Collectors are data-observation functions: never let one erroring
 			// take the poller down; stash the error for debuggability.
 			collector.lastError = err;
+			outcome = isTimeoutError(err) ? "timeout" : "err";
 		} finally {
 			collector.inFlight--;
+			if (this.debugLogging) {
+				console.debug(
+					`arthur poll ${collector.name} ${outcome} ${Date.now() - started}ms ${collector.describe?.() ?? ""}`.trimEnd(),
+				);
+			}
 		}
 	}
 

@@ -10,16 +10,16 @@ import { AiToolkitClient } from "./api/aitoolkit";
 import { ComfyUIClient } from "./api/comfy";
 import { obsidianRequester } from "./api/transport";
 import { Poller } from "./poller";
-import {
-	ArthurDashboardView,
-	VIEW_TYPE_ARTHUR_DASHBOARD,
-} from "./ui/dashboard-view";
+import { DETAIL_INTERVAL_MS } from "./util";
+import { ArthurDashboardView, VIEW_TYPE_ARTHUR_DASHBOARD } from "./ui/dashboard-view";
 import { StatusBarPill, StatusBarState } from "./ui/status-bar";
 import { fmtBytes, normalizeHost } from "./util";
 
 // Re-exported for bundle smoke tests (scripts/test-bundle.mjs asserts the
-// normalizer directly against the compiled main.js export surface).
+// normalizer directly against the compiled main.js export surface; WsConnection
+// is asserted for the close-during-CONNECTING swallow). Not used at runtime.
 export { normalizeHost };
+export { WsConnection, WsState } from "./connection";
 
 /** One server profile — host + which ports the services live on + tokens. */
 export interface ServerProfile {
@@ -39,6 +39,8 @@ export interface ArthurSettings {
 	previewCount: number;
 	/** Max metric lines drawn in a job loss chart (default 4). */
 	maxChartKeys: number;
+	/** One-line console.debug breadcrumb per poll tick (default OFF). */
+	debugLogging: boolean;
 }
 
 /** Clients built from the active profile — rebuilt when settings change. */
@@ -70,6 +72,7 @@ const DEFAULT_SETTINGS: ArthurSettings = {
 	profiles: [{ ...DEFAULT_PROFILE }],
 	previewCount: 4,
 	maxChartKeys: 4,
+	debugLogging: false,
 };
 
 /** Parse a bounded positive int; invalid/missing → fallback. */
@@ -79,7 +82,6 @@ function clampInt(raw: unknown, fallback: number, min: number, max: number): num
 }
 
 const LIGHT_INTERVAL_MS = 12_000;
-const DETAIL_INTERVAL_MS = 3_000;
 /** Debounce window for runtime rebuilds triggered from settings edits. */
 const REBUILD_DEBOUNCE_MS = 400;
 
@@ -223,6 +225,17 @@ class ArthurSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				})
 			);
+
+		containerEl.createEl("h3", { text: "Diagnostics" });
+		new Setting(containerEl)
+			.setName("Debug logging")
+			.setDesc("Log one line per poll tick to the developer console (collector, outcome ok/err/timeout, duration, server host:port). Leave off in normal use.")
+			.addToggle((toggle) =>
+				toggle.setValue(s.debugLogging).onChange(async (value) => {
+					s.debugLogging = value;
+					await this.plugin.saveSettings();
+				})
+			);
 	}
 }
 
@@ -301,13 +314,27 @@ export default class ArthurPlugin extends Plugin {
 
 		const clients = this.clients;
 		if (!clients) return;
-		clients.lightPoller.registerCollector("light-summary", async () => {
-			await this.collectLightData();
-		});
-		clients.detailPoller.registerCollector("dashboard-detail", async () => {
-			// The view no-ops when closed/hidden (its own visibility gate).
-			await this.dashboardView?.refreshData();
-		});
+		// Debug breadcrumb context: which host:ports this collector talks to.
+		const describeHosts = () => {
+			const p = this.clients?.profile;
+			if (!p?.host) return "";
+			return `${p.host} (agent :${p.agentPort} · aitk :${p.aiToolkitPort} · comfy :${p.comfyPorts})`;
+		};
+		clients.lightPoller.registerCollector(
+			"light-summary",
+			async () => {
+				await this.collectLightData();
+			},
+			describeHosts,
+		);
+		clients.detailPoller.registerCollector(
+			"dashboard-detail",
+			async () => {
+				// The view no-ops when closed/hidden (its own visibility gate).
+				await this.dashboardView?.refreshData();
+			},
+			describeHosts,
+		);
 		clients.lightPoller.start();
 		clients.detailPoller.start();
 		// Belt-and-braces: registerInterval reaps the timers even if a future
@@ -369,6 +396,9 @@ export default class ArthurPlugin extends Plugin {
 			lightPoller: new Poller(LIGHT_INTERVAL_MS),
 			detailPoller: new Poller(DETAIL_INTERVAL_MS),
 		};
+		// Debug breadcrumbs follow the settings toggle at every rebuild.
+		this.clients.lightPoller.debugLogging = this.settings.debugLogging;
+		this.clients.detailPoller.debugLogging = this.settings.debugLogging;
 	}
 
 	/**
@@ -414,7 +444,11 @@ export default class ArthurPlugin extends Plugin {
 
 		// Comfy ports come from the agent's discovered instances when it
 		// answers; the settings comfyPorts list is the unreachable fallback.
-		const comfyInstances = agentStatus?.services.find((s) => s.id === "comfyui")?.instances ?? null;
+		// Dead instances (up:false, port dead) are skipped by the light cycle:
+		// probing them only produces timeout chatter, and the dashboard's
+		// lifecycle section owns their start button.
+		const comfyInstancesAll = agentStatus?.services.find((s) => s.id === "comfyui")?.instances ?? null;
+		const comfyInstances = comfyInstancesAll?.filter((i) => i.up === true) ?? null;
 		const targets: Array<{ port: number; gpu: number | null }> = comfyInstances
 			? comfyInstances.map((i) => ({ port: i.port, gpu: i.gpu }))
 			: clients.comfyPorts.map((p) => ({ port: p, gpu: null }));
@@ -512,6 +546,7 @@ export default class ArthurPlugin extends Plugin {
 			profiles: [profile],
 			previewCount: clampInt(data?.previewCount, DEFAULT_SETTINGS.previewCount, 1, 12),
 			maxChartKeys: clampInt(data?.maxChartKeys, DEFAULT_SETTINGS.maxChartKeys, 1, 8),
+			debugLogging: data?.debugLogging === true,
 		};
 	}
 

@@ -196,6 +196,16 @@ export class WsConnection {
 		ws.onmessage = null;
 		ws.onclose = null;
 		ws.onerror = null;
+		if (ws.readyState === WebSocket.CONNECTING) {
+			// Deliberate close of a never-opened socket: browsers emit a benign
+			// 'WebSocket is closed before the connection is established'
+			// close/error pair afterward (console spam on device). Arm silent
+			// no-op handlers so it is swallowed — the reconnect machinery must
+			// never see an intentional close as a drop (no error callback, no
+			// backoff, no attempts increment).
+			ws.onclose = () => {};
+			ws.onerror = () => {};
+		}
 		try {
 			ws.close();
 		} catch {

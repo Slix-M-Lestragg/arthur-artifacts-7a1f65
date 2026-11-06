@@ -9,6 +9,8 @@
  */
 import { requestUrl } from "obsidian";
 
+import { DEFAULT_REQUEST_TIMEOUT_MS } from "../util";
+
 /** Typed error carrying HTTP status (0 = network-level failure). */
 export class ArthurApiError extends Error {
 	readonly url: string;
@@ -35,6 +37,10 @@ export interface RequestOpts {
 	headers?: Record<string, string>;
 	/** Objects are serialized as JSON; strings are sent as-is. */
 	body?: object | string;
+	/** Timeout for the request in ms (default: DEFAULT_REQUEST_TIMEOUT_MS).
+	 *  obsidian's requestUrl has no built-in timeout — without this, a wedged
+	 *  server would hold its caller (and the poller's in-flight guard) forever. */
+	timeoutMs?: number;
 }
 
 /**
@@ -76,6 +82,15 @@ function serializeBody(
 	return { body: JSON.stringify(body), contentType: "application/json" };
 }
 
+/** True when the error is the transport's own request-timeout rejection. */
+export function isTimeoutError(err: unknown): boolean {
+	return (
+		err instanceof ArthurApiError &&
+		err.status === 0 &&
+		err.message.startsWith("timeout after ")
+	);
+}
+
 /** Production requester — obsidian's requestUrl bypasses CORS on desktop. */
 export const obsidianRequester: Requester = {
 	async request(opts: RequestOpts): Promise<HttpResponse> {
@@ -84,26 +99,47 @@ export const obsidianRequester: Requester = {
 		if (contentType && !headers["content-type"] && !headers["Content-Type"]) {
 			headers["Content-Type"] = contentType;
 		}
-		try {
-			const resp = await requestUrl({
-				url: opts.url,
-				method: opts.method ?? "GET",
-				headers,
-				body,
-				// Never auto-throw on HTTP error statuses — callers inspect `status`.
-				throw: false,
-			});
-			return {
+
+		// requestUrl has no timeout of its own: race the real request against a
+		// timer so a hung server rejects with a typed, diagnosable error instead
+		// of wedging the collector chain. The losing promise gets a no-op catch —
+		// a late offline rejection must never surface as an unhandled rejection.
+		const timeoutMs = opts.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+		let timerId: ReturnType<typeof setTimeout> | null = null;
+		const timer = new Promise<never>((_resolve, reject) => {
+			timerId = setTimeout(
+				() => reject(new ArthurApiError(opts.url, 0, `timeout after ${timeoutMs}ms`)),
+				timeoutMs,
+			);
+		});
+		const inflight = requestUrl({
+			url: opts.url,
+			method: opts.method ?? "GET",
+			headers,
+			body,
+			// Never auto-throw on HTTP error statuses — callers inspect `status`.
+			throw: false,
+		}).then(
+			(resp) => ({
 				status: resp.status,
 				json: () => resp.json,
 				text: () => resp.text,
-			};
-		} catch (err) {
-			// With throw:false this only happens for network-level failures
-			// (server down, DNS, proxy) — surface as a typed offline error.
-			const message =
-				err instanceof Error ? err.message : "request failed (network error)";
-			throw new ArthurApiError(opts.url, 0, message);
+			}),
+			(err) => {
+				// With throw:false this only happens for network-level failures
+				// (server down, DNS, proxy) — surface as a typed offline error.
+				const message =
+					err instanceof Error
+						? err.message
+						: "request failed (network error)";
+				throw new ArthurApiError(opts.url, 0, message);
+			},
+		);
+		inflight.catch(() => {}); // swallow whatever the timer outlives
+		try {
+			return await Promise.race([inflight, timer]);
+		} finally {
+			if (timerId !== null) clearTimeout(timerId);
 		}
 	},
 };
