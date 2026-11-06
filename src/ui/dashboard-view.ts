@@ -16,16 +16,22 @@
  *                    queueCollapsed). The error banner sits ABOVE both
  *                    collapsibles and never collapses.
  *   1. INSTANCES   — the GPU instance grid: one COLUMN per GPU (live stats
- *                    from GET /api/gpus, agent v0.5.2), one ROW per GPU-owning
+ *                    from GET /api/gpus, agent v0.5.3), one ROW per GPU-owning
  *                    instance (comfy, incl. multi-GPU spanning rows) and per
  *                    queued/running ai-toolkit training job. Rows are
  *                    self-contained outlined cards (running = accent tint,
  *                    idle = neutral, down = dashed muted + grayscale),
  *                    carrying a state badge (running/idle/down), quick run
  *                    stats for running rows (WS progress / job step+speed),
- *                    lifecycle buttons for instances, and a 'view in queue ↓'
- *                    link for running rows that scrolls to the matching
- *                    job-queue anchor below. Idle rows sort first, running
+ *                    lifecycle + queue buttons for instances (down rows get
+ *                    Start + Remove — remove forgets the stopped instance via
+ *                    /forget; up comfy rows get Clear-queue + Free-VRAM), a
+ *                    two-line stats block (VRAM used/total matched from
+ *                    /api/gpus + pending queue depth + a small WS state chip),
+ *                    and a 'view in queue ↓' link for running rows WITH queue
+ *                    jobs that scrolls to the matching job-queue anchor
+ *                    below. Single-GPU ai-toolkit queue sets surface as tiny
+ *                    play/pause chips on their GPU column headers. Idle rows sort first, running
  *                    rows by run duration (longest first); run starts are
  *                    tracked locally (WS execution_start / queue transition;
  *                    agent uptime as fallback). /api/gpus unreachable →
@@ -33,20 +39,27 @@
  *                    fallback: 2) with a 'gpu stats unavailable' note; agent
  *                    fully down → grid hidden, the settings comfyPorts render
  *                    as unmanaged rows.
- *   2. JOB QUEUE   — ONE unified queue of compact job cards below the grid:
- *                    per comfy instance a group header (stable anchor id
- *                    arthur-queue-<port> for the grid links) holding the
- *                    queue depth + clear-queue/free-VRAM actions, followed by
- *                    the instance's running card (live WS progress + cancel)
- *                    and pending cards (per-prompt ✕ delete); ai-toolkit
- *                    training entries (arthur-training-row-<id> anchor) with
- *                    their existing action buttons + accordion (running,
- *                    queued and recent stopped/error jobs render); per-GPU-set
- *                    queue toggles close the queue. The two ai-toolkit
- *                    collectors (jobs / queues) are decoupled: a broken queue
- *                    endpoint never hides job cards, and a failed part is
- *                    shown as an inline degraded state instead of an
- *                    empty-queue note. Ordering:
+ *   2. JOB QUEUE   — ONE PURE JOB LIST below the grid (v0.6.3 restructure:
+ *                    the per-instance group headers, the per-GPU-set queue
+ *                    toggles block and the 'no jobs' note are GONE — empty
+ *                    queue = no cards at all; the clear-queue/free-VRAM
+ *                    actions moved onto the grid cards and the per-GPU-set
+ *                    toggles onto GPU column headers / matching training
+ *                    cards). Job cards only: the comfy instance's running
+ *                    generation (inline instance label 'comfy-0 · :8188' +
+ *                    live WS progress + cancel + preview strip), pending
+ *                    prompts (inline label + per-prompt ✕ delete) and
+ *                    ai-toolkit training entries (arthur-training-row-<id>
+ *                    anchor, full action set + accordion — multi-GPU queue
+ *                    sets surface as a small toggle chip on matching cards).
+ *                    The stable anchor id arthur-queue-<port> lives on the
+ *                    instance's FIRST job card (running, else pending); the
+ *                    grid's 'view in queue ↓' link only renders while that
+ *                    anchor exists. The two ai-toolkit collectors (jobs /
+ *                    queues) are decoupled: a broken queue endpoint never
+ *                    hides job cards, and a failed source is shown as ONE
+ *                    inline degraded line inside the queue section instead of
+ *                    a fake empty state. Ordering:
  *                    running (by run duration desc) → pending/queued →
  *                    recent stopped/error training (cap 5). Ports come from
  *                    the agent's discovered instances (settings list is the
@@ -142,6 +155,9 @@ interface GridRowSpec {
 	statsPct: number | null;
 	/** DOM anchor the 'view in queue' link points at. */
 	anchor: string;
+	/** 'view in queue ↓' link renders only while the queue section actually
+	 *  holds a job card at that anchor (comfy: running or pending > 0). */
+	linkable: boolean;
 	// lifecycle wiring (instance rows only)
 	svcId: string | null;
 	instId: string | null;
@@ -200,32 +216,29 @@ interface GenProgress {
 /** One comfy port the generation cards are attached to. */
 interface DesiredPort {
 	port: number;
-	/** Card title + topbar dot label: instance id + GPU, or "unmanaged". */
+	/** Inline card label: instance id + port, or "unmanaged" on the
+	 *  settings-fallback list. */
 	label: string;
 }
 
-/** Cached DOM widgets + bookkeeping for one comfy port's queue group. */
+/** Cached DOM widgets + bookkeeping for one comfy port's queue cards. */
 interface GenPanel {
 	port: number;
-	// queue group header (anchor id arthur-queue-<port>): dot + label + ws
-	// state + queue depth + clear-queue/free-VRAM actions
-	head: HTMLElement;
-	titleEl: HTMLElement;
-	genDot: HTMLElement;
-	wsDot: HTMLElement;
-	wsLabel: HTMLElement;
-	queueEl: HTMLElement;
-	// running job card: live WS progress + cancel + preview strip
+	// running job card (anchor id arthur-queue-<port> while it is the
+	// instance's first job): inline instance label + live WS progress + cancel
+	// + preview strip
 	runningCard: HTMLElement;
+	runLabel: HTMLElement;
 	runningTextEl: HTMLElement;
 	progressFill: HTMLElement;
 	progressLabel: HTMLElement;
 	btnCancel: HTMLButtonElement;
-	btnFree: HTMLButtonElement;
-	btnClear: HTMLButtonElement;
-	// pending job card (per-prompt ✕ delete rows)
-	pendingWrap: HTMLElement;
+	// live preview strip (WS binary frames → newest-first thumbnails)
 	previewStrip: HTMLElement;
+	// pending job card (inline instance label + per-prompt ✕ delete rows)
+	pendingWrap: HTMLElement;
+	pendingLabel: HTMLElement;
+	pendingMeta: HTMLElement;
 	// bookkeeping
 	progress: GenProgress | null;
 	/** node id → node definition of the running prompt (from /queue). */
@@ -381,14 +394,14 @@ export class ArthurDashboardView extends ItemView {
 	private gridEl!: HTMLElement;
 	private gridNoteEl!: HTMLElement;
 	private unmanagedEl!: HTMLElement;
-	/** Unified job queue (comfy groups + training cards + aitk queue toggles). */
+	/** Unified job queue (pure job list: running + pending cards + training
+	 *  cards, ordered per tick by the queue sorting rules — no group headers,
+	 *  no toggles block, no empty-queue note). */
 	private queueEl!: HTMLElement;
-	/** Tail of the unified queue: per-GPU-set ai-toolkit queue toggles (shown
-	 *  only while the queue endpoint answers) + the inline degraded state for
-	 *  a failed ai-toolkit collector + the empty-queue note. */
-	private aiQueueToggleEl!: HTMLElement;
+	/** The queue section's ONE subtle degraded line: shown only while a source
+	 *  errored (ai-toolkit collectors, unreachable comfy ports, or the
+	 *  watchdog's stuck-collector states) — never a fake empty state. */
 	private aiStateEl!: HTMLElement;
-	private queueEmptyEl!: HTMLElement;
 	/** True while the training collector sits degraded (watchdog); cleared on
 	 *  each settled tick — feeds the error banner. */
 	private trainingStuck = false;
@@ -428,11 +441,15 @@ export class ArthurDashboardView extends ItemView {
 	/** Row keys seen in the previous build — distinguishes "already running at
 	 *  view open" (uptime fallback) from a fresh idle→running transition. */
 	private readonly runPrior = new Set<string>();
-	/** Cached progress widgets of live grid rows, keyed like runStarts —
-	 *  WS ticks repaint them without a grid rebuild. */
+	/** Cached progress + WS-chip widgets of live grid rows, keyed like
+	 *  runStarts — WS ticks repaint them without a grid rebuild. */
 	private readonly gridRows = new Map<
 		string,
-		{ progressFill: HTMLElement; progressLabel: HTMLElement }
+		{
+			progressFill: HTMLElement | null;
+			progressLabel: HTMLElement | null;
+			wsChip: HTMLElement | null;
+		}
 	>();
 	/** Latest per-row run durations from buildGridRows ("inst:<id>" / "job:<id>")
 	 *  — the unified queue's duration sort reuses them so the run-start
@@ -503,7 +520,7 @@ export class ArthurDashboardView extends ItemView {
 				.filter((i) => i.up === true)
 				.map((i) => ({
 					port: i.port,
-					label: `${i.id}${i.gpu != null ? ` · GPU ${i.gpu}` : ""} · :${i.port}`,
+					label: `${i.id} · :${i.port}`,
 				}));
 		}
 		return this.comfyPorts().map((p) => ({ port: p, label: `ComfyUI :${p} · unmanaged` }));
@@ -637,13 +654,12 @@ export class ArthurDashboardView extends ItemView {
 		} else if (key.startsWith("gen:")) {
 			const port = Number(key.slice(4));
 			const hostPort = host ? `${host}:${port}` : "(not configured)";
-			const tooltip = errTooltip(hostPort, mark);
-			const panel = this.panels.get(port);
-			if (panel) {
-				setDot(panel.genDot, false);
-				panel.genDot.setAttribute("title", tooltip);
-				panel.queueEl.setText(mark);
-			}
+			// Degraded line in the queue section (the only tail element) — the
+			// next settled tick repaints the truth.
+			this.paintDegraded(
+				[`comfy :${port} — ${mark}`],
+				errTooltip(hostPort, mark),
+			);
 		}
 	}
 
@@ -913,10 +929,10 @@ export class ArthurDashboardView extends ItemView {
 		this.unmanagedEl.hide();
 
 		// 2. JOB QUEUE — collapsible section ('Queue' + chevron) wrapping the
-		// ONE unified queue: per-port cached group (header + running card +
-		// pending card) ordered per tick by the queue sorting rules, training
-		// job cards rebuilt per tick. Re-attaching the cached nodes preserves
-		// the WS-facing widget refs (progress bars never need a rebuild).
+		// ONE pure job list: per-port cached cards (running + pending) ordered
+		// per tick by the queue sorting rules, training job cards rebuilt per
+		// tick. Re-attaching the cached nodes preserves the WS-facing widget
+		// refs (progress bars never need a rebuild).
 		const queueSection = root.createEl("div", { cls: "arthur-section" });
 		this.queueHeadEl = this.buildSectionHead("queue");
 		queueSection.append(this.queueHeadEl);
@@ -925,21 +941,12 @@ export class ArthurDashboardView extends ItemView {
 		this.queueBodyEl.setAttribute("id", "arthur-section-queue");
 		this.queueEl = this.queueBodyEl.createEl("div", { cls: "arthur-queue" });
 		for (const p of ports) {
-			this.queueEl.append(this.buildGenGroup(p));
+			this.buildGenGroup(p);
 		}
-		// Queue tail: per-GPU-set queue toggles (repainted per tick; shown only
-		// while the ai-toolkit queue endpoint answers), the inline degraded
-		// state for a failed ai-toolkit collector (never a fake empty state)
-		// and the empty-queue note (shown only when every source answered).
-		this.aiQueueToggleEl = this.queueEl.createEl("div", { cls: "arthur-aiqueue" });
-		this.aiQueueToggleEl.hide();
+		// Queue tail: the ONE inline degraded state for a failed source (never
+		// a fake empty state — an empty queue is simply no job cards).
 		this.aiStateEl = this.queueEl.createEl("div", { cls: "arthur-aiqueue-state" });
 		this.aiStateEl.hide();
-		this.queueEmptyEl = el("p", {
-			cls: "arthur-note",
-			text: "no jobs — every queue is clear",
-		});
-		this.queueEmptyEl.hide();
 
 		// Port list the groups+WS are now built for.
 		this.activePorts = ports;
@@ -1011,39 +1018,15 @@ export class ArthurDashboardView extends ItemView {
 	}
 
 	/**
-	 * Build the queue group for one port and cache its widgets: a group header
-	 * (stable anchor id arthur-queue-<port>, queue depth + clear/free actions),
-	 * a running job card (live WS progress + cancel + preview strip) and a
-	 * pending card (per-prompt ✕ delete rows). The nodes are cached for the
-	 * view's lifetime; per-tick renderQueue only repaints + reorders them.
+	 * Build the queue cards for one port and cache their widgets: a running
+	 * job card (carries the stable anchor id arthur-queue-<port> while it is
+	 * the instance's first job; inline instance label + live WS progress +
+	 * cancel + preview strip) and a pending card (inline instance label +
+	 * per-prompt ✕ delete rows). The nodes are cached for the view's
+	 * lifetime; per-tick renderQueue only repaints + reorders them.
 	 */
-	private buildGenGroup(p: DesiredPort): HTMLElement {
+	private buildGenGroup(p: DesiredPort): void {
 		const port = p.port;
-		const buttonRow = (...btns: HTMLButtonElement[]) =>
-			el("div", { cls: "arthur-btn-row", children: btns });
-
-		// group header — also the scroll target of the grid's 'view in queue ↓'
-		const head = el("div", {
-			cls: "arthur-queue-head",
-			attrs: { id: `arthur-queue-${port}` },
-		});
-		const titleEl = el("span", { cls: "arthur-queue-title", text: p.label });
-		const genDot = el("span", { cls: "arthur-dot arthur-dot--gray" });
-		const wsDot = el("span", { cls: "arthur-dot arthur-dot--gray" });
-		const wsLabel = el("span", { cls: "arthur-card-meta", text: "ws off" });
-		const queueEl = el("span", { cls: "arthur-card-meta", text: "…" });
-		const btnClear = newBtn("Clear queue");
-		btnClear.addClass("arthur-btn--tiny");
-		const btnFree = newBtn("Free VRAM");
-		btnFree.addClass("arthur-btn--tiny");
-		head.append(
-			genDot,
-			titleEl,
-			wsDot,
-			wsLabel,
-			queueEl,
-			buttonRow(btnClear, btnFree),
-		);
 
 		// running job card — the only place the live WS progress surfaces
 		const progressFill = el("div", { cls: "arthur-bar-fill" });
@@ -1051,20 +1034,22 @@ export class ArthurDashboardView extends ItemView {
 		const progressLabel = el("span", { cls: "arthur-card-meta", text: "idle" });
 		const runningTextEl = el("span", { cls: "arthur-card-meta" });
 		runningTextEl.hide();
+		const runLabel = el("span", { cls: "arthur-queue-label", text: p.label });
 		const previewStrip = el("div", { cls: "arthur-preview-strip" });
 		previewStrip.hide();
 		const btnCancel = newBtn("Cancel");
 		btnCancel.addClass("arthur-btn--tiny");
 		const runningCard = el("div", {
 			cls: "arthur-queue-job arthur-queue-job--running",
+			attrs: { "data-port": String(port) },
 		});
 		runningCard.append(
 			el("div", {
 				cls: "arthur-card-head",
 				children: [
-					el("span", { cls: "arthur-badge arthur-badge--running", text: "running" }),
+					runLabel,
 					runningTextEl,
-					buttonRow(btnCancel),
+					el("div", { cls: "arthur-btn-row", children: [btnCancel] }),
 				],
 			}),
 			el("div", { cls: "arthur-bar", children: [progressFill] }),
@@ -1074,46 +1059,30 @@ export class ArthurDashboardView extends ItemView {
 		runningCard.hide();
 
 		// pending card — one compact row per queued prompt, refilled per tick
+		const pendingLabel = el("span", { cls: "arthur-queue-label", text: p.label });
+		const pendingMeta = el("span", { cls: "arthur-card-meta" });
 		const pendingWrap = el("div", {
 			cls: "arthur-pending-list arthur-queue-job arthur-queue-job--pending",
+			attrs: { "data-port": String(port) },
 		});
+		pendingWrap.append(
+			el("div", { cls: "arthur-card-head", children: [pendingLabel, pendingMeta] }),
+		);
 		pendingWrap.hide();
 
 		btnCancel.addEventListener("click", () => void this.cancelRunning(port));
-		btnClear.addEventListener("click", () => {
-			const n = this.panels.get(port)?.pendingIds.length ?? 0;
-			confirmModal(
-				this.app,
-				"Clear queue",
-				`Delete all ${n} pending prompt${n === 1 ? "" : "s"} on port ${port}?`,
-				() => void this.clearQueue(port),
-			);
-		});
-		btnFree.addEventListener("click", () => {
-			confirmModal(
-				this.app,
-				"Free VRAM",
-				`Unload models and free memory on port ${port}? Models reload on the next generation.`,
-				() => void this.freeVram(port),
-			);
-		});
 
 		this.panels.set(port, {
 			port,
-			head,
-			titleEl,
-			genDot,
-			wsDot,
-			wsLabel,
-			queueEl,
 			runningCard,
+			runLabel,
 			runningTextEl,
 			progressFill,
 			progressLabel,
 			btnCancel,
-			btnFree,
-			btnClear,
 			pendingWrap,
+			pendingLabel,
+			pendingMeta,
 			previewStrip,
 			progress: null,
 			promptGraph: null,
@@ -1121,7 +1090,6 @@ export class ArthurDashboardView extends ItemView {
 			pendingIds: [],
 			previewUrls: [],
 		});
-		return head;
 	}
 
 	// ------------------------------------------------------------------
@@ -1321,6 +1289,10 @@ export class ArthurDashboardView extends ItemView {
 					? detail!.queue!.queue_running.length
 					: 0;
 			const running = runningCount > 0;
+			const pendingCount =
+				inst.up && Array.isArray(detail?.queue?.queue_pending)
+					? detail!.queue!.queue_pending.length
+					: 0;
 			const key = `run:${inst.port}`;
 			const duration = runDuration(key, running);
 			const effective = duration ?? (running ? (inst.uptime ?? null) : null);
@@ -1344,6 +1316,9 @@ export class ArthurDashboardView extends ItemView {
 				statsText: null,
 				statsPct: null,
 				anchor: `arthur-queue-${inst.port}`,
+				// 'view in queue ↓' only while the queue section actually holds
+				// a job card at that anchor (running or pending > 0).
+				linkable: running && runningCount + pendingCount > 0,
 				svcId: inst.service,
 				instId: inst.id,
 				port: inst.port,
@@ -1376,6 +1351,7 @@ export class ArthurDashboardView extends ItemView {
 						`${job.step}/${job.total_steps ?? "?"} · ${job.speed_string || "—"}`,
 					statsPct: pct,
 					anchor: `arthur-training-row-${job.id}`,
+					linkable: true,
 					svcId: null,
 					instId: null,
 					port: null,
@@ -1425,6 +1401,15 @@ export class ArthurDashboardView extends ItemView {
 				el("div", { cls: "arthur-bar", children: [fill] }),
 				el("span", { cls: "arthur-card-meta", text: parts.join(" · ") }),
 			);
+			// Single-GPU ai-toolkit queue set ('0' → GPU0): a tiny play/pause
+			// chip on that column's header chip (multi-GPU sets live on the
+			// matching training job cards instead).
+			const gpuQueue = this.aiDetail.queues.find(
+				(q) => q.gpu_ids.trim() === String(col.index),
+			);
+			if (this.aiDetail.queuesOk === true && gpuQueue) {
+				head.append(this.queueToggleChip(gpuQueue));
+			}
 			grid.append(head);
 		});
 
@@ -1493,6 +1478,8 @@ export class ArthurDashboardView extends ItemView {
 		);
 		cell.append(head);
 
+		// Lifecycle buttons (instance rows only) — up rows: Start/Stop/Restart;
+		// down rows: Start + Remove (forget the stopped instance from the agent).
 		if (spec.kind === "instance" && spec.svcId && spec.instId) {
 			const buttons = this.gridLifecycleButtons(spec);
 			buttons.addClass("arthur-grid-actions");
@@ -1511,7 +1498,14 @@ export class ArthurDashboardView extends ItemView {
 					text: p?.id ? `prompt ${truncate(p.id, 12)}` : "running (prompt id unknown)",
 				});
 				cell.append(promptLine, el("div", { cls: "arthur-bar", children: [progressFill] }), progressLabel);
-				this.gridRows.set(`run:${spec.port}`, { progressFill, progressLabel });
+				const widgets = this.gridRows.get(`run:${spec.port!}`) ?? {
+					progressFill: null,
+					progressLabel: null,
+					wsChip: null,
+				};
+				widgets.progressFill = progressFill;
+				widgets.progressLabel = progressLabel;
+				this.gridRows.set(`run:${spec.port!}`, widgets);
 				const panel = spec.port != null ? this.panels.get(spec.port) : null;
 				if (panel) this.paintProgress(panel.progress, progressFill, progressLabel);
 			} else {
@@ -1522,23 +1516,91 @@ export class ArthurDashboardView extends ItemView {
 					el("div", { cls: "arthur-bar", children: [statsFill] }),
 				);
 			}
-			const link = el("a", {
-				cls: "arthur-grid-link",
-				text: "view in queue ↓",
-				attrs: { href: `#${spec.anchor}` },
-			});
-			link.addEventListener("click", (e) => {
-				e.preventDefault();
-				this.flashAnchor(spec.anchor);
-			});
-			cell.append(link);
+			if (spec.linkable) {
+				const link = el("a", {
+					cls: "arthur-grid-link",
+					text: "view in queue ↓",
+					attrs: { href: `#${spec.anchor}` },
+				});
+				link.addEventListener("click", (e) => {
+					e.preventDefault();
+					this.flashAnchor(spec.anchor);
+				});
+				cell.append(link);
+			}
+		}
+
+		// Two compact stats lines for UP comfy instance cards: VRAM used/total
+		// (matched from /api/gpus by the instance's gpu indexes) + pending queue
+		// depth, then a small WS state chip + the clear-queue/free-VRAM actions.
+		if (spec.kind === "instance" && spec.state !== "down" && spec.port != null) {
+			const detail = this.comfyDetailFor(spec.port);
+			const pendingCount = Array.isArray(detail?.queue?.queue_pending)
+				? detail!.queue!.queue_pending.length
+				: 0;
+			let vramUsed = 0;
+			let vramTotal = 0;
+			let vramMatched = false;
+			for (const g of spec.gpus) {
+				const col = cols.find((c) => c.index === g);
+				if (col && col.usedMb != null && col.totalMb != null && col.totalMb > 0) {
+					vramMatched = true;
+					vramUsed += col.usedMb;
+					vramTotal += col.totalMb;
+				}
+			}
+			const statParts = [
+				vramMatched ? `VRAM ${fmtGigCompact(vramUsed)}/${fmtGigCompact(vramTotal)}` : null,
+				pendingCount > 0 ? `queue ${pendingCount}` : null,
+			].filter((s): s is string => s !== null);
+			if (statParts.length > 0) {
+				cell.append(el("span", { cls: "arthur-card-meta arthur-grid-stats", text: statParts.join(" · ") }));
+			}
+			// WS state chip (small live/connecting/down/off) + queue actions row.
+			const statsRow = el("div", { cls: "arthur-grid-stats-row" });
+			const wsChip = el("span", { cls: "arthur-ws-chip" });
+			this.paintWsChip(wsChip, this.wss.get(spec.port)?.currentState ?? WsState.Closed);
+			statsRow.append(wsChip);
+			const widgets = this.gridRows.get(`run:${spec.port}`) ?? {
+				progressFill: null,
+				progressLabel: null,
+				wsChip: null,
+			};
+			widgets.wsChip = wsChip;
+			this.gridRows.set(`run:${spec.port}`, widgets);
+			const client = this.clientFor(spec.port);
+			if (client) {
+				const btnClear = newBtn("Clear queue");
+				btnClear.addClass("arthur-btn--tiny");
+				btnClear.addEventListener("click", () => {
+					confirmModal(
+						this.app,
+						"Clear queue",
+						`Delete all ${pendingCount} pending prompt${pendingCount === 1 ? "" : "s"} on port ${spec.port}?`,
+						() => void this.clearQueue(spec.port!),
+					);
+				});
+				const btnFree = newBtn("Free VRAM");
+				btnFree.addClass("arthur-btn--tiny");
+				btnFree.addEventListener("click", () => {
+					confirmModal(
+						this.app,
+						"Free VRAM",
+						`Unload models and free memory on port ${spec.port}? Models reload on the next generation.`,
+						() => void this.freeVram(spec.port!),
+					);
+				});
+				statsRow.append(btnClear, btnFree);
+			}
+			cell.append(statsRow);
 		}
 		return cell;
 	}
 
-	/** Start/stop/restart for one grid instance row (down rows: start only) —
-	 *  reuses the agent lifecycle handlers with the existing confirm/force
-	 *  (409) escalation contract. */
+	/** Start/stop/restart for one grid instance row (down rows: Start +
+	 *  Remove — remove FORGETS the stopped instance from the agent's registry
+	 *  after a destructive confirm) — reuses the agent lifecycle handlers with
+	 *  the existing confirm/force (409) escalation contract. */
 	private gridLifecycleButtons(spec: GridRowSpec): HTMLElement {
 		const instName = spec.title;
 		const op = (action: "start" | "stop" | "restart") =>
@@ -1569,8 +1631,75 @@ export class ArthurDashboardView extends ItemView {
 				),
 			);
 			buttons.push(btnStop, btnRestart);
+		} else if (spec.svcId && spec.instId) {
+			// DOWN row: destructive remove — forgets the stopped instance from
+			// the agent's registry (409 while it is still up; 404 unknown).
+			const btnRemove = newBtn("Remove");
+			btnRemove.addClass("arthur-btn--tiny");
+			btnRemove.addEventListener("click", () =>
+				confirmModal(
+					this.app,
+					"Remove instance",
+					`Remove ${spec.instId} from the agent? It will no longer be listed.`,
+					() => void this.instanceForget(spec.svcId!, spec.instId!),
+				),
+			);
+			buttons.push(btnRemove);
 		}
 		return el("div", { cls: "arthur-btn-row", children: buttons });
+	}
+
+	/** Comfy detail for one port (null when the port isn't currently polled). */
+	private comfyDetailFor(port: number): ComfyPortDetail | null {
+		const idx = this.activePorts.findIndex((p) => p.port === port);
+		return idx >= 0 ? this.comfyDetail[idx] ?? null : null;
+	}
+
+	/**
+	 * Tiny play/pause chip for an ai-toolkit training queue row — on the GPU
+	 * column header (single-GPU sets) or the matching training job card
+	 * (multi-GPU sets). Starts/pauses the per-GPU-set queue with a toast +
+	 * re-poll, never optimistic.
+	 */
+	private queueToggleChip(q: AiToolkitQueueRow): HTMLElement {
+		const btn = newBtn(q.is_running ? "⏸" : "▶");
+		btn.addClass("arthur-btn--tiny", "arthur-queue-toggle");
+		btn.setAttribute(
+			"title",
+			`${q.is_running ? "Pause" : "Resume"} the training queue on GPU${q.gpu_ids.trim()}`,
+		);
+		btn.setAttribute("aria-label", btn.getAttribute("title") ?? "");
+		btn.addEventListener("click", () =>
+			void run(
+				this.pollers(),
+				`${q.is_running ? "pause" : "resume"} queue GPU${q.gpu_ids.trim()}`,
+				() =>
+					q.is_running
+						? this.plugin.clients!.aitoolkit.queueStop(q.id)
+						: this.plugin.clients!.aitoolkit.queueStart(q.id),
+			),
+		);
+		return btn;
+	}
+
+	/** Repaint a small WS state chip (live / connecting / down / off). */
+	private paintWsChip(chip: HTMLElement, state: WsState): void {
+		chip.removeClass(
+			"arthur-ws-chip--open",
+			"arthur-ws-chip--connecting",
+			"arthur-ws-chip--backoff",
+			"arthur-ws-chip--closed",
+		);
+		chip.addClass(`arthur-ws-chip--${state}`);
+		chip.setText(
+			state === WsState.Open
+				? "ws live"
+				: state === WsState.Connecting
+					? "ws connecting"
+					: state === WsState.Backoff
+						? "ws down"
+						: "ws off",
+		);
 	}
 
 	/** Clear local run tracking (view close/reopen). */
@@ -1653,14 +1782,17 @@ export class ArthurDashboardView extends ItemView {
 	}
 
 	// ------------------------------------------------------------------
-	// ONE unified job queue — per-port comfy groups (running + pending
-	// cards) merged with ai-toolkit training cards, sorted:
+	// ONE pure job list — comfy running + pending cards merged with
+	// ai-toolkit training cards, sorted:
 	//   0. running (run duration desc, comfy before training on ties)
-	//   1. pending/queued (comfy groups, then queued training jobs)
+	//   1. pending/queued (comfy pending cards, then queued training jobs)
 	//   2. recent stopped/error training jobs (newest first, cap 5)
-	// Idle comfy instances still emit their group header (queue depth +
-	// clear-queue/free-VRAM actions stay reachable); each port's header is
-	// emitted once, directly above its first card in the sorted flow.
+	// NOTHING else renders: no group headers, no queue-toggles block, no
+	// empty-queue note — an empty queue is simply no cards (group-header
+	// actions moved to the grid cards; per-GPU-set toggles on GPU column
+	// headers / matching training cards). The stable anchor id
+	// arthur-queue-<port> sits on the instance's FIRST job card (running,
+	// else pending).
 	// ------------------------------------------------------------------
 
 	/** Cap on the ranked-2 "recent stopped/error" training tail. */
@@ -1671,28 +1803,33 @@ export class ArthurDashboardView extends ItemView {
 	}
 
 	/**
-	 * Repaint + reorder the unified queue. Cached nodes (group headers,
-	 * running cards, pending cards) are moved, not rebuilt — WS-facing
-	 * progress widgets keep their identity; training cards rebuild per tick
-	 * (their action rows depend on the job status).
+	 * Repaint + reorder the pure job list. Cached nodes (running cards,
+	 * pending cards) are moved, not rebuilt — WS-facing progress widgets keep
+	 * their identity; training cards rebuild per tick (their action rows
+	 * depend on the job status). The per-port anchor id moves to the
+	 * instance's first job card (running card, else pending card).
 	 */
 	private renderQueue(): void {
 		this.syncSectionCollapse("queue");
 		const q = this.queueEl;
 		const host = this.plugin.clients?.profile.host ?? "";
 		const entries: QueueEntry[] = [];
-		const headEmitted = new Set<number>();
-		const emitHead = (port: number, entry: QueueEntry): void => {
+		/** Attach/clear the stable anchor id on the instance's first job card. */
+		const setAnchor = (port: number, firstCard: HTMLElement | null): void => {
 			const panel = this.panels.get(port);
-			if (!panel || headEmitted.has(port)) return;
-			headEmitted.add(port);
-			panel.head.show();
-			entry.nodes.push(panel.head);
+			if (!panel) return;
+			for (const [card, isAnchor] of [
+				[panel.runningCard, firstCard === panel.runningCard],
+				[panel.pendingWrap, firstCard === panel.pendingWrap],
+			] as Array<[HTMLElement, boolean]>) {
+				if (isAnchor) card.setAttribute("id", `arthur-queue-${port}`);
+				else card.removeAttribute("id");
+			}
 		};
 
 		// comfy groups — running card first (rank 0), then pending card (rank 1);
-		// an idle instance still emits its header alone (rank 1) so the queue
-		// depth + clear-queue/free-VRAM actions remain reachable.
+		// an idle instance contributes NO cards (its clear-queue/free-VRAM
+		// actions live on the grid card).
 		this.activePorts.forEach((p, i) => {
 			const panel = this.panels.get(p.port);
 			if (!panel) return;
@@ -1702,29 +1839,23 @@ export class ArthurDashboardView extends ItemView {
 					rank: 0,
 					sort: this.runSortSeconds(`run:${p.port}`),
 					seq: i,
-					nodes: [],
+					nodes: [panel.runningCard],
 				};
-				emitHead(p.port, entry);
 				panel.runningCard.show();
-				entry.nodes.push(panel.runningCard);
+				setAnchor(p.port, panel.runningCard);
 				entries.push(entry);
 			} else {
 				panel.runningCard.hide();
 			}
 			if (counts.pending > 0) {
-				const entry: QueueEntry = { rank: 1, sort: 0, seq: i, nodes: [] };
-				emitHead(p.port, entry);
+				const entry: QueueEntry = { rank: 1, sort: 0, seq: i, nodes: [panel.pendingWrap] };
 				panel.pendingWrap.show();
-				entry.nodes.push(panel.pendingWrap);
+				setAnchor(p.port, counts.running > 0 ? panel.runningCard : panel.pendingWrap);
 				entries.push(entry);
 			} else {
 				panel.pendingWrap.hide();
 			}
-			if (counts.running + counts.pending === 0) {
-				const entry: QueueEntry = { rank: 1, sort: 0, seq: i, nodes: [] };
-				emitHead(p.port, entry);
-				entries.push(entry);
-			}
+			if (counts.running + counts.pending === 0) setAnchor(p.port, null);
 		});
 
 		// ai-toolkit training cards — running (rank 0, duration-sorted),
@@ -1776,13 +1907,6 @@ export class ArthurDashboardView extends ItemView {
 				});
 			}
 		}
-		// Per-GPU-set queue toggles render whenever /api/queue answered — even
-		// when /api/jobs failed (the two collectors are independent).
-		if (this.aiDetail.queuesOk === true) {
-			this.renderTrainingQueueToggles();
-		} else {
-			this.aiQueueToggleEl.hide();
-		}
 
 		// Rank order + running duration desc + stable tie-breaks.
 		entries.sort(
@@ -1793,36 +1917,53 @@ export class ArthurDashboardView extends ItemView {
 		for (const entry of entries) {
 			for (const node of entry.nodes) q.append(node);
 		}
-		for (const panel of this.panels.values()) {
-			if (!headEmitted.has(panel.port)) panel.head.hide();
-		}
-		// Inline degraded state for a failed ai-toolkit collector — never
-		// pretend an unreachable source is an empty queue.
+		q.append(this.aiStateEl);
+		// ONE inline degraded line for a failed source — comfy port probes, the
+		// ai-toolkit collectors, or a watchdog-stuck collector. Never pretend an
+		// unreachable source is an empty queue (an empty queue is simply NO job
+		// cards — there is no 'no jobs' note anymore).
 		const hostQ = this.plugin.clients?.profile.host ?? "";
 		const aiPort = this.plugin.clients?.profile.aiToolkitPort ?? 0;
 		const failedParts: string[] = [];
+		const failedTips: string[] = [];
+		this.activePorts.forEach((p, i) => {
+			const d = this.comfyDetail[i];
+			if (d?.online === false) {
+				failedParts.push(
+					`comfy :${p.port} unavailable — ${d.error ?? "not responding"}`,
+				);
+				failedTips.push(
+					errTooltip(hostQ ? `${hostQ}:${p.port}` : "(not configured)", d.error),
+				);
+			}
+		});
 		if (this.aiDetail.reachable === false && this.aiDetail.jobsError) {
 			failedParts.push(`training jobs unavailable — ${this.aiDetail.jobsError}`);
+			failedTips.push(
+				errTooltip(hostQ ? `${hostQ}:${aiPort}` : "(not configured)", this.aiDetail.jobsError),
+			);
 		}
 		if (this.aiDetail.queuesOk === false && this.aiDetail.queueError) {
 			failedParts.push(`queue toggles unavailable — ${this.aiDetail.queueError}`);
+			failedTips.push(
+				errTooltip(hostQ ? `${hostQ}:${aiPort}` : "(not configured)", this.aiDetail.queueError),
+			);
 		}
 		if (hostQ && failedParts.length > 0) {
-			this.aiStateEl.setText(`ai-toolkit ${failedParts.join(" · ")}`);
-			this.aiStateEl.setAttribute(
-				"title",
-				errTooltip(hostQ ? `${hostQ}:${aiPort}` : "(not configured)", this.aiDetail.jobsError ?? this.aiDetail.queueError),
-			);
+			this.aiStateEl.setText(failedParts.join(" · "));
+			this.aiStateEl.setAttribute("title", failedTips.join("\n"));
 			this.aiStateEl.show();
 		} else {
 			this.aiStateEl.hide();
 		}
-		// The 'no jobs' note only when every source answered: a failed source
-		// renders its inline error state above instead of pretending empty.
-		const bothAnswered = this.aiDetail.reachable === true && this.aiDetail.queuesOk === true;
-		if (entries.length === 0 && bothAnswered) this.queueEmptyEl.show();
-		else this.queueEmptyEl.hide();
-		this.queueEl.append(this.aiQueueToggleEl, this.aiStateEl, this.queueEmptyEl);
+	}
+
+	/** Paint the queue section's ONE degraded line (also used by the
+	 *  stuck-state watchdog between ticks). */
+	private paintDegraded(parts: string[], tooltip: string | null): void {
+		this.aiStateEl.setText(parts.join("\n"));
+		this.aiStateEl.setAttribute("title", tooltip ?? "");
+		this.aiStateEl.show();
 	}
 
 	private renderProgress(panel: GenPanel): void {
@@ -1845,7 +1986,7 @@ export class ArthurDashboardView extends ItemView {
 	 *  rebuild (no-op when the port currently has no live grid row). */
 	private updateGridProgress(port: number): void {
 		const widgets = this.gridRows.get(`run:${port}`);
-		if (!widgets) return;
+		if (!widgets?.progressFill || !widgets?.progressLabel) return;
 		this.paintProgress(
 			this.panels.get(port)?.progress ?? null,
 			widgets.progressFill,
@@ -1854,10 +1995,10 @@ export class ArthurDashboardView extends ItemView {
 	}
 
 	/**
-	 * Refresh one comfy port's cached queue widgets (header labels, dots,
-	 * queue depth, pending rows, button enablement, progress bar) against the
+	 * Refresh one comfy port's cached queue cards (inline labels, running
+	 * prompt info, pending rows, cancel enablement, progress bar) against the
 	 * latest poll data, and report its running/pending counts as the sort
-	 * input for the unified queue.
+	 * input for the pure job list (idle instances contribute no cards).
 	 */
 	private updateGenEntry(
 		panel: GenPanel,
@@ -1873,15 +2014,7 @@ export class ArthurDashboardView extends ItemView {
 			: [];
 		const online = detail?.online === true;
 
-		panel.titleEl.setText(p.label);
-		setDot(panel.genDot, detail?.online ?? null);
-		panel.genDot.setAttribute(
-			"title",
-			detail?.online === false
-				? errTooltip(host ? `${host}:${p.port}` : "(not configured)", detail.error)
-				: `${p.label} — ${online ? "ok" : "waiting for data…"}`,
-		);
-		panel.queueEl.setText(`${running.length} running · ${pending.length} pending`);
+		panel.runLabel.setText(p.label);
 
 		// running prompt info: queue entries are [exec, prompt_id, graph, extra, …]
 		const entry = (running[0] ?? null) as unknown[];
@@ -1905,11 +2038,19 @@ export class ArthurDashboardView extends ItemView {
 			panel.runningTextEl.hide();
 		}
 
-		// pending list (refilled — rows come and go)
+		// pending list (refilled — rows come and go); the card's inline label
+		// rides on top of each per-prompt delete row
 		panel.pendingIds = pending.flatMap((e) =>
 			Array.isArray(e) && typeof e[1] === "string" ? [e[1] as string] : [],
 		);
-		panel.pendingWrap.empty();
+		panel.pendingLabel.setText(p.label);
+		panel.pendingMeta.setText(
+			`${panel.pendingIds.length} pending`,
+		);
+		// remove the refilled rows but keep the card's label head
+		for (const child of [...panel.pendingWrap.children]) {
+			if (child.hasClass?.("arthur-pending-row")) (child as HTMLElement).remove();
+		}
 		for (const id of panel.pendingIds) {
 			const del = newBtn("✕");
 			del.addClass("arthur-btn--tiny");
@@ -1926,35 +2067,18 @@ export class ArthurDashboardView extends ItemView {
 		}
 
 		panel.btnCancel.disabled = !online || running.length === 0;
-		panel.btnClear.disabled = !online || pending.length === 0;
-		panel.btnFree.disabled = !online;
 
 		this.renderProgress(panel);
 		return { running: running.length, pending: pending.length };
 	}
 
 	/**
-	 * Per-GPU-set ai-toolkit queue toggles — the tail of the unified queue,
-	 * only rendered while ai-toolkit answers (elsewhere hidden; the error
-	 * banner carries the unreachable state).
-	 */
-	private renderTrainingQueueToggles(): void {
-		const wrap = this.aiQueueToggleEl;
-		wrap.show();
-		wrap.empty();
-		if (this.aiDetail.queues.length === 0) {
-			wrap.append(el("span", { cls: "arthur-card-meta", text: "no ai-toolkit queues" }));
-			return;
-		}
-		for (const q of this.aiDetail.queues) wrap.append(this.queueRow(q));
-	}
-
-	/**
 	 * One training job card of the unified queue (stable anchor id
 	 * arthur-training-row-<id>): status badge + name + GPUs + step/speed
 	 * stats, step progress bar while running, the existing action buttons,
-	 * and the chart/log accordion. Rebuilt per tick — action enablement
-	 * follows the job status.
+	 * and the chart/log accordion. A multi-GPU ai-toolkit queue set matching
+	 * this job's gpu_ids surfaces as a small queue-toggle chip on the card.
+	 * Rebuilt per tick — action enablement follows the job status.
 	 */
 	private jobQueueCard(job: AiToolkitJob): HTMLElement {
 		const clients = this.plugin.clients!;
@@ -2007,18 +2131,29 @@ export class ArthurDashboardView extends ItemView {
 			cls: `arthur-queue-job arthur-queue-job--training arthur-job--${job.status}`,
 			attrs: { id: `arthur-training-row-${job.id}` },
 		});
+		const headChildren: (Node | string)[] = [
+			el("span", { cls: `arthur-badge ${jobBadgeCls(job.status)}`, text: job.status }),
+			el("span", { cls: "arthur-card-title", text: name, attrs: { title: job.name } }),
+			el("span", { cls: "arthur-card-meta", text: `GPUs ${job.gpu_ids || "?"}` }),
+			el("span", {
+				cls: "arthur-card-meta",
+				text: `${job.step}/${job.total_steps ?? "?"} · ${job.speed_string || "—"}`,
+			}),
+		];
+		// Multi-GPU ai-toolkit queue set: a small queue-toggle chip on each
+		// matching training job card (single-GPU sets live on GPU column
+		// headers instead).
+		const jobGpus = parseGpuIds(job.gpu_ids);
+		if (jobGpus.length > 1 && this.aiDetail.queuesOk === true) {
+			const match = this.aiDetail.queues.find(
+				(q) => parseGpuIds(q.gpu_ids).join(",") === jobGpus.join(","),
+			);
+			if (match) headChildren.push(this.queueToggleChip(match));
+		}
 		card.append(
 			el("div", {
 				cls: "arthur-card-head",
-				children: [
-					el("span", { cls: `arthur-badge ${jobBadgeCls(job.status)}`, text: job.status }),
-					el("span", { cls: "arthur-card-title", text: name, attrs: { title: job.name } }),
-					el("span", { cls: "arthur-card-meta", text: `GPUs ${job.gpu_ids || "?"}` }),
-					el("span", {
-						cls: "arthur-card-meta",
-						text: `${job.step}/${job.total_steps ?? "?"} · ${job.speed_string || "—"}`,
-					}),
-				],
+				children: headChildren,
 			}),
 		);
 		if (running && pct != null) {
@@ -2193,37 +2328,6 @@ export class ArthurDashboardView extends ItemView {
 		}
 	}
 
-	private queueRow(q: AiToolkitQueueRow): HTMLElement {
-		const clients = this.plugin.clients!;
-		const pollers = this.pollers();
-		const dot = el("span", { cls: "arthur-dot" });
-		setDot(dot, q.is_running);
-		const toggle = newBtn(q.is_running ? "Stop queue" : "Start queue");
-		toggle.addClass("arthur-btn--tiny");
-		toggle.addEventListener("click", () =>
-			void run(
-				pollers,
-				`${q.is_running ? "stop" : "start"} queue ${q.gpu_ids}`,
-				() =>
-					q.is_running
-						? clients.aitoolkit.queueStop(q.id)
-						: clients.aitoolkit.queueStart(q.id),
-			),
-		);
-		return el("div", {
-			cls: "arthur-queue-row",
-			children: [
-				dot,
-				el("span", { text: `GPUs ${q.gpu_ids}` }),
-				el("span", {
-					cls: "arthur-card-meta",
-					text: q.is_running ? "running" : "paused",
-				}),
-				toggle,
-			],
-		});
-	}
-
 	// ------------------------------------------------------------------
 	// service-level controls (service bar) + instance lifecycle (rows)
 	// — all funnel through run()/toast + pollNow(): never optimistic UI
@@ -2340,6 +2444,21 @@ export class ArthurDashboardView extends ItemView {
 		);
 	}
 
+	/**
+	 * Forget a STOPPED instance (grid down-row Remove): POST .../forget drops
+	 * it from the agent's registry so it no longer shows in /api/status.
+	 * 409 while the instance is still up (the row would be a running row
+	 * anyway — the agent is the truth), 404 unknown. Toast + re-poll either
+	 * way; never optimistic.
+	 */
+	private async instanceForget(svcId: string, instId: string): Promise<void> {
+		const agent = this.plugin.clients?.agent;
+		if (!agent) return;
+		await run(this.pollers(), `remove ${instId} from the agent`, () =>
+			agent.instanceForget(svcId, instId),
+		);
+	}
+
 	private async clearQueue(port: number): Promise<void> {
 		const client = this.clientFor(port);
 		if (!client) return;
@@ -2386,28 +2505,13 @@ export class ArthurDashboardView extends ItemView {
 
 	private wsStateChanged(port: number, state: WsState): void {
 		if (!this.isOpened) return;
-		const panel = this.panels.get(port);
-		if (!panel) return;
-		switch (state) {
-			case WsState.Open:
-				setDot(panel.wsDot, true);
-				panel.wsLabel.setText("ws live");
-				// (re)connect resync: re-poll queue + progress state
-				void this.refreshData();
-				return;
-			case WsState.Connecting:
-				setDot(panel.wsDot, null);
-				panel.wsLabel.setText("ws connecting");
-				return;
-			case WsState.Backoff:
-				setDot(panel.wsDot, false);
-				panel.wsLabel.setText("ws down — reconnecting");
-				return;
-			case WsState.Closed:
-				setDot(panel.wsDot, null);
-				panel.wsLabel.setText("ws off");
-				return;
-		}
+		// WS state chip lives on the instance grid card (updated in place, no
+		// grid rebuild); with no cached chip the next grid repaint shows it.
+		const widgets = this.gridRows.get(`run:${port}`);
+		if (widgets?.wsChip) this.paintWsChip(widgets.wsChip, state);
+		// (re)connect resync: WS open → re-poll queue + progress state (previous
+		// behavior of the group header's ws dot — now the grid chip).
+		if (state === WsState.Open) void this.refreshData();
 	}
 
 	private wsProgress(port: number, data: any): void {

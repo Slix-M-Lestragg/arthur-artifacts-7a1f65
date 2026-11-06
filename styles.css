@@ -395,6 +395,55 @@
 	justify-content: flex-end;
 }
 
+/* two compact stats lines under the instance card header: VRAM + pending
+   queue depth, then the WS state chip + clear-queue/free-VRAM actions */
+.arthur-grid-stats {
+	font-variant-numeric: tabular-nums;
+}
+
+.arthur-grid-stats-row {
+	display: flex;
+	align-items: center;
+	gap: 0.5em;
+	min-width: 0;
+}
+
+/* small WS state chip on instance cards: live (green) / connecting (muted) /
+   down (red) / off (muted) */
+.arthur-ws-chip {
+	font-size: var(--font-ui-smaller);
+	line-height: 1.5;
+	padding: 0 0.45em;
+	border-radius: var(--radius-s);
+	background: var(--background-modifier-border);
+	opacity: 0.85;
+	flex: none;
+}
+
+.arthur-ws-chip--open {
+	color: var(--text-on-accent);
+	background: var(--color-green);
+	opacity: 0.9;
+}
+
+.arthur-ws-chip--connecting {
+	background: var(--background-modifier-border-hover);
+}
+
+.arthur-ws-chip--backoff {
+	color: var(--text-on-accent);
+	background: var(--text-error);
+	opacity: 0.85;
+}
+
+/* tiny play/pause chip for an ai-toolkit training queue (GPU column header,
+   or the matching training job card for multi-GPU sets) */
+.arthur-queue-toggle {
+	flex: none;
+	font-size: var(--font-ui-smaller);
+	min-width: 1.6em;
+}
+
 .arthur-grid-title {
 	font-weight: var(--font-semibold);
 	flex: none;
@@ -418,29 +467,8 @@
 	gap: 0.45em;
 }
 
-/* per-instance group header (anchor id arthur-queue-<port>): dot + label + ws
-   state + queue depth + clear-queue/free-VRAM actions, outlined like a card */
-.arthur-queue-head {
-	display: flex;
-	align-items: center;
-	gap: 0.5em;
-	padding: 0.4em 0.65em;
-	border: 1px solid var(--background-modifier-border);
-	border-radius: var(--radius-m, 10px);
-	background: var(--background-secondary);
-	min-width: 0;
-	scroll-margin-top: 4em;
-}
-
-.arthur-queue-head:hover {
-	border-color: color-mix(in srgb, var(--interactive-accent) 60%, var(--background-modifier-border));
-}
-
-.arthur-queue-head .arthur-btn-row {
-	margin-inline-start: auto;
-}
-
-.arthur-queue-title {
+/* inline instance label on the queue's job cards ('comfy-0 · :8188') */
+.arthur-queue-label {
 	font-weight: var(--font-semibold);
 	flex: none;
 	min-width: 0;
@@ -478,16 +506,8 @@
 	margin-inline-start: auto;
 }
 
-/* per-GPU-set ai-toolkit queue toggles — tail of the unified queue */
-.arthur-aiqueue {
-	display: flex;
-	flex-direction: column;
-	gap: 0.3em;
-	padding: 0.15em 0.25em;
-}
-
-/* inline degraded state for a failed ai-toolkit collector (jobs/queues) at
-   the queue tail — shown instead of a fake 'every queue is clear' note */
+/* the queue section's ONE inline degraded state for a failed source
+   (ai-toolkit collectors, unreachable comfy ports) — never a fake empty note */
 .arthur-aiqueue-state {
 	font-size: var(--font-ui-small);
 	font-style: italic;
@@ -496,8 +516,9 @@
 	cursor: default;
 }
 
-/* scroll target of the grid's 'view in queue' links */
-.arthur-queue-head[id^="arthur-queue-"],
+/* scroll target of the grid's 'view in queue' links: the instance's first
+   queue job card (running, else pending) carries the stable anchor id */
+.arthur-queue-job[id^="arthur-queue-"],
 .arthur-queue-job[id^="arthur-training-row-"] {
 	scroll-margin-top: 4em;
 }
@@ -576,12 +597,6 @@
 	display: flex;
 	gap: 0.25em;
 	flex-wrap: wrap;
-}
-
-.arthur-queue-row {
-	display: flex;
-	align-items: center;
-	gap: 0.6em;
 }
 
 /* ---------------------------------------------------------------- previews */

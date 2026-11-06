@@ -541,7 +541,16 @@ try {
 	}
 	v4 = allText(leaf.view.contentEl);
 	assert(ok, "invalid ws url did not throw");
-	assert(v4.includes("ws down — reconnecting"), "ws state degrades to backoff instead of crashing");
+	// WS state degrades without crashing; the grid's WS chip (instance cards)
+	// renders all four states via the view's chip painter:
+	const chipProbe = new StubEl("span");
+	const WsState4 = bundle.WsState;
+	leaf.view.paintWsChip(chipProbe, WsState4.Open);
+	assert(chipProbe.hasClass("arthur-ws-chip--open") === true && chipProbe.textContent === "ws live", "WS chip paints the live state");
+	leaf.view.paintWsChip(chipProbe, WsState4.Connecting);
+	assert(chipProbe.textContent === "ws connecting", "WS chip paints the connecting state");
+	leaf.view.paintWsChip(chipProbe, WsState4.Backoff);
+	assert(chipProbe.hasClass("arthur-ws-chip--backoff") === true && chipProbe.textContent === "ws down", "ws state degrades to the muted 'ws down' chip state instead of crashing");
 
 	// ---- 5. activateView (ribbon click) — real leaf contract ---------------
 	console.log("== 5. activateView (ribbon click) attaches the view ==");
@@ -659,15 +668,20 @@ try {
 	assert(v8.includes("10.0.0.9:8188") && v8.includes("10.0.0.9:8675") && v8.includes("10.0.0.9:8766"),
 		"banner names the attempted host:port per service");
 	assert(v8.includes("offline"), "banner carries the network-level failure text");
-	const genDotEl = dashLeaf.view.panels.get(8188)?.genDot;
-	assert(genDotEl?.getAttribute("title")?.includes("10.0.0.9:8188") === true, "offline card tooltip holds attempted host:port + error");
-	assert(genDotEl?.getAttribute("title")?.includes("Bearer") === false, "tooltips carry no token material");
+	const queueStateEl = dashLeaf.view.aiStateEl;
+	assert(queueStateEl?.isShown() === true
+		&& queueStateEl?.getAttribute("title")?.includes("10.0.0.9:8188") === true,
+		"offline comfy source → the queue's ONE degraded line names the attempted host:port + error");
+	assert((queueStateEl?.getAttribute("title") ?? "").includes("Bearer") === false,
+		"degraded-line tooltip carries no token material");
+	assert(allText(queueStateEl ?? new StubEl("span")).includes("offline") === true,
+		"degraded line carries the network-level failure text");
 	assert(allText(dashLeaf.view.unmanagedEl).includes("unmanaged") === true, "agent-down instance rows render as unmanaged");
 	const sbDotBtn = dashLeaf.view.serviceBar?.buttons.get("comfyui")?.btn;
 	assert(sbDotBtn?.disabled === true && sbDotBtn?.getAttribute("aria-label")?.includes("agent unreachable") === true, "agent-down service bar renders disabled buttons with the unreachable tooltip");
 
-	// ---- 9. agent v0.5.0 — service bar, dynamic instance panels, lifecycle flows
-	console.log("== 9. agent v0.5.2 service bar + dynamic instance panels ==");
+	// ---- 9. agent v0.5.0 — service bar, dynamic instance cards, lifecycle flows
+	console.log("== 9. agent v0.5.3 service bar + dynamic instance cards ==");
 	plugin.settings.profiles[0].comfyPorts = "8188,8189";
 	ok = true;
 	try {
@@ -681,7 +695,7 @@ try {
 
 	const jsonBody = (status, body) => ({ status, body });
 	const agentStatusBody = {
-		version: "0.5.2",
+		version: "0.5.3",
 		host_uptime: 123456.7,
 		services: [
 			{
@@ -705,7 +719,7 @@ try {
 	// Default handler: agent handshake + status answer; everything else offline.
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.2" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.3" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/comfyui/start")) {
 			return jsonBody(200, { action: "start", result: "started", service: agentStatusBody.services[0] });
@@ -738,13 +752,15 @@ try {
 	assert((sbAi?.icon.innerHTML ?? "").includes("<circle"), "aitoolkit mark renders as inline svg");
 	assert(sbComfy?.kill.style.display === "" && sbAi?.kill.style.display === "", "active buttons expose the red kill zone");
 	assert(view9.panels.get(8188) != null && view9.panels.get(8189) != null, "generation panels attach to agent-discovered ports");
-	assert(view9.panels.get(8189)?.titleEl.textContent.includes("comfy-1") === true
-		&& view9.panels.get(8189)?.titleEl.textContent.includes("GPU 1") === true,
-		"panel title labels instance id + GPU");
+	assert(view9.panels.get(8189)?.runLabel.textContent.includes("comfy-1") === true
+		&& view9.panels.get(8189)?.runLabel.textContent.includes(":8189") === true,
+		"queue job cards carry the inline instance label 'comfy-1 · :8189'");
 	assert(allText(view9.gridEl).includes("comfy-") === false, "grid rows show agent names, not raw comfy ports as titles");
 	assert(allText(view9.gridEl).includes("ComfyUI #1") === true, "grid rows render agent instance names");
-	assert(findById(view9.contentEl, "arthur-queue-8188") != null && findById(view9.contentEl, "arthur-queue-8189") != null,
-		"unified queue keeps the per-instance group heads (stable arthur-queue-<port> anchors)");
+	assert(findByClass(view9.contentEl, "arthur-queue-head").length === 0,
+		"queue holds NO per-instance group headers (pure job list — no queue jobs yet)");
+	assert(findByClass(view9.contentEl, "arthur-aiqueue").length === 0,
+		"queue holds NO per-GPU-set toggles block");
 
 	// B. OFFLINE service click → serviceStart + toast + re-poll
 	agentStatusBody.services[0].active = false;
@@ -768,7 +784,7 @@ try {
 	StubNotice.reset();
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.2" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.3" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/comfyui/instances")) {
 			return jsonBody(201, {
@@ -788,7 +804,7 @@ try {
 	StubNotice.reset();
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.2" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.3" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/aitoolkit/instances")) {
 			return jsonBody(409, { error: "single-instance service" });
@@ -811,7 +827,7 @@ try {
 	calls9 = [];
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.2" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.3" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/stop")) {
 			return opts.url.includes("force=1")
@@ -848,7 +864,7 @@ try {
 	assert(sbComfy?.btn.disabled === true, "service buttons disable when the agent is unreachable");
 	assert(sbComfy?.btn.hasClass("arthur-svc-btn--disabled") === true, "unreachable agent buttons get the disabled grey state");
 	assert(sbComfy?.btn.getAttribute("aria-label")?.includes("agent unreachable") === true, "unreachable buttons carry the agent-unreachable tooltip");
-	assert(view9.panels.get(8188)?.titleEl.textContent.includes("unmanaged") === true, "agent-down panels fall back to configured ports labeled unmanaged");
+	assert(view9.panels.get(8188)?.runLabel.textContent.includes("unmanaged") === true, "agent-down panels fall back to configured ports labeled unmanaged");
 	assert(allText(view9.unmanagedEl).includes("unmanaged") === true, "agent-down instance rows render unmanaged");
 
 	// restore the default offline stub for any later pollution checks
@@ -913,7 +929,7 @@ try {
 	];
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.2" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.3" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/instances/") && opts.url.endsWith("/start")) {
 			return jsonBody(200, { action: "start", result: "started", instance: { id: "comfy-2", up: true, port: 8190 } });
@@ -951,6 +967,74 @@ try {
 	await plugin.collectLightData(); // private in TS, callable from the smoke
 	assert(plugin.describeLightState().includes("P8190") === false,
 		"status bar / light cycle skip dead ports (got: " + plugin.describeLightState() + ")");
+
+	// Down row = Start + Remove (Remove FORGETS the stopped instance from the
+	// agent's registry via POST .../instances/{id}/forget).
+	const rowByKey11 = (key) => view11.gridEl.children
+		.filter((c) => c.hasClass?.("arthur-grid-row"))
+		.find((c) => c.attributes.get("data-row-key") === key) ?? null;
+	const downRow11 = rowByKey11("inst:comfy-2");
+	assert(!!downRow11, "down instance row located in the grid");
+	assert(findButton(downRow11, "Start") != null && findButton(downRow11, "Remove") != null,
+		"down instance row exposes Start + Remove (no Stop/Restart)");
+	assert(findButtons(downRow11, "Stop").length === 0 && findButtons(downRow11, "Restart").length === 0,
+		"down row carries no Stop/Restart buttons");
+	const upRow11 = rowByKey11("inst:comfy-0");
+	assert(!!upRow11 && findButton(upRow11, "Remove") === null,
+		"up/running instance rows carry NO Remove button");
+	// 409 while the instance is up → the agent's message toasts, row stays.
+	StubModal.reset();
+	StubNotice.reset();
+	calls9 = [];
+	httpResponder = (opts) => {
+		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.3" });
+		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
+		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/instances/") && opts.url.endsWith("/forget")) {
+			return jsonBody(409, { error: "instance is running" });
+		}
+		return null;
+	};
+	findButton(downRow11, "Remove").handlers.get("click")[0]?.();
+	assert(StubModal.opened.length === 1
+		&& StubModal.opened[0].titleEl.textContent.includes("Remove instance")
+		&& StubModal.opened[0].contentEl.textContent.includes("Remove comfy-2 from the agent? It will no longer be listed."),
+		"Remove opens the destructive confirm ('Remove comfy-2 from the agent? It will no longer be listed.')");
+	const removeConfirm = findButton(StubModal.opened[0].contentEl, "Confirm");
+	await removeConfirm.handlers.get("click")[0]?.();
+	await sleep(30);
+	assert(calls9.some((c) => c.method === "POST" && c.url.includes("/api/services/comfyui/instances/comfy-2/forget")) === true,
+		"confirmed remove hits the forget endpoint");
+	assert(StubNotice.shown.some((m) => m.includes("remove comfy-2 from the agent — instance is running")) === true,
+		"409 (instance is running) → the agent's message toasts the failure");
+	await view11.refreshData();
+	assert(rowByKey11("inst:comfy-2") != null, "409 keeps the down row in the grid (row stays)");
+
+	// 200 forget + the instance dropped from /api/status → row disappears
+	// from the grid after the re-poll.
+	agentStatusBody.services[0].instances = agentStatusBody.services[0].instances
+		.filter((i) => i.id !== "comfy-2");
+	httpResponder = (opts) => {
+		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.3" });
+		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
+		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/instances/") && opts.url.endsWith("/forget")) {
+			return jsonBody(200, { action: "forget", result: "forgotten", id: "comfy-2" });
+		}
+		return null;
+	};
+	StubNotice.reset();
+	StubModal.reset();
+	calls9 = [];
+	findButton(rowByKey11("inst:comfy-2"), "Remove").handlers.get("click")[0]?.();
+	await findButton(StubModal.opened[0].contentEl, "Confirm").handlers.get("click")[0]?.();
+	await sleep(30);
+	assert(calls9.some((c) => c.method === "POST" && c.url.includes("/instances/comfy-2/forget")) === true,
+		"successful remove re-hits the forget endpoint");
+	assert(StubNotice.shown.some((m) => m.includes("remove comfy-2 from the agent — done")) === true,
+		"successful forget toasts 'remove comfy-2 from the agent — done'");
+	await view11.refreshData();
+	assert(rowByKey11("inst:comfy-2") === null, "forgotten instance disappears from the grid after the repoll");
 
 	// ---- 12. WS close during CONNECTING — no error callback, no backoff
 	console.log("== 12. WS close-during-CONNECTING is swallowed silently ===");
@@ -1028,8 +1112,9 @@ try {
 	// official-icon fallback, gpus-unreachable fallback ----------------------
 	console.log("== 14. GPU instance grid ==");
 	const json14 = (status, body) => ({ status, body });
+	const calls14 = [];
 	const gridStatusBody = {
-		version: "0.5.2",
+		version: "0.5.3",
 		host_uptime: 123456.7,
 		services: [
 			{
@@ -1062,11 +1147,25 @@ try {
 	};
 	const comfyStats = { system: {}, devices: [{ name: "cuda", type: "cuda", vram_total: 12 * 1024 * 1024, vram_free: 4 * 1024 * 1024 }] };
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json14(200, { ok: true, version: "0.5.2" });
+		calls14.push({ url: opts.url, method: opts.method ?? "GET" });
+		if (opts.url.endsWith("/health")) return json14(200, { ok: true, version: "0.5.3" });
 		if (opts.url.endsWith("/api/status")) return json14(200, gridStatusBody);
 		if (opts.url.endsWith("/api/gpus")) return json14(200, gpusBody);
 		if (opts.url.endsWith("/api/jobs")) return json14(200, aiJobsBody);
-		if (opts.url.endsWith("/api/queue")) return json14(200, { queues: [] });
+		// per-GPU-set training queues: two single-GPU sets (GPU0 paused… wait,
+		// running/paused per is_running) + one multi-GPU set for jobA's cards
+		if (opts.url.endsWith("/api/queue")) {
+			return json14(200, {
+				queues: [
+					{ id: 0, gpu_ids: "0", is_running: true },
+					{ id: 1, gpu_ids: "1", is_running: false },
+					{ id: 2, gpu_ids: "0,1", is_running: false },
+				],
+			});
+		}
+		if (opts.method === "GET" && /\/api\/queue\/\d+\/(stop|start)$/.test(opts.url)) {
+			return json14(200, { ok: true });
+		}
 		if (opts.url.startsWith("http://10.0.0.9:8188/")) {
 			return opts.url.endsWith("/system_stats")
 				? json14(200, comfyStats)
@@ -1188,6 +1287,70 @@ try {
 		assert(unknownIcon.getAttribute("data-icon") === "server", "unknown service falls back to the lucide server icon");
 	}
 
+	// (f2) 'view in queue ↓' hides when an instance currently holds no queue
+	// jobs; up comfy grid cards carry the Clear-queue/Free-VRAM + WS chip.
+	{
+		comfyQueue[8188] = { queue_running: [], queue_pending: [] };
+		await view14.refreshData();
+		const idleRow = rowByKey("inst:comfy-0");
+		assert(!!idleRow && idleRow.hasClass("arthur-grid-row--idle"), "empty-queue instance renders as idle");
+		assert(findLinks(idleRow).length === 0, "idle row with no queue jobs carries no 'view in queue' link");
+		assert(findButton(idleRow, "Clear queue") != null && findButton(idleRow, "Free VRAM") != null,
+			"up comfy instance grid card carries the Clear-queue + Free-VRAM actions (moved from the queue headers)");
+		assert(findByClass(idleRow, "arthur-ws-chip").length === 1, "instance card carries the WS state chip");
+		assert(allText(idleRow).includes("VRAM 9.2G/12G"),
+			"instance card shows VRAM used/total matched from /api/gpus by the instance's gpu index");
+		const runRowF2 = rowByKey("inst:comfy-1");
+		assert(allText(runRowF2).includes("VRAM 1G/12G"), "running card matches its own gpu's VRAM");
+		assert(/\d run/.test(allText(runRowF2)), "running instance card shows its uptime stat");
+		const clearBtn = findButton(idleRow, "Clear queue");
+		StubModal.reset();
+		clearBtn.handlers.get("click")[0]?.();
+		assert(StubModal.opened.length === 1 && StubModal.opened[0].contentEl.textContent.includes("pending prompt"),
+			"Clear-queue keeps its destructive confirm on the grid card");
+		findButton(StubModal.opened[0].contentEl, "Cancel").handlers.get("click")[0]?.();
+		const freeBtn = findButton(idleRow, "Free VRAM");
+		StubModal.reset();
+		freeBtn.handlers.get("click")[0]?.();
+		assert(StubModal.opened.length === 1 && StubModal.opened[0].contentEl.textContent.includes("Unload models and free memory on port 8188?"),
+			"Free-VRAM confirm moved onto the grid card");
+		findButton(StubModal.opened[0].contentEl, "Cancel").handlers.get("click")[0]?.();
+		// restore comfy-0's running job (with one pending prompt) for (h)
+		comfyQueue[8188] = { queue_running: [["exec", "prompt-abcdef-1234", { "5": { class_type: "KSampler" } }]], queue_pending: [["exec", "prompt-depth-1", { "7": { class_type: "CheckpointLoader" } }]] };
+		await view14.refreshData();
+		assert(allText(rowByKey("inst:comfy-0")).includes("queue 1"), "instance card shows the pending queue depth");
+		// GPU column header queue-toggle chips (single-GPU ai-toolkit sets):
+		const gpu0HeadF2 = gridHead14()[0];
+		const gpu1HeadF2 = gridHead14()[1];
+		assert(findByClass(gpu0HeadF2, "arthur-queue-toggle").length === 1,
+			"GPU0 column header chip carries the queue toggle (single-GPU queue set '0')");
+		assert(findByClass(gpu1HeadF2, "arthur-queue-toggle").length === 1,
+			"GPU1 column header chip carries the queue toggle");
+	}
+
+	// (f3) queue-toggle chip click: GPU0's queue set is running → the chip
+	// pauses it via /api/queue/0/stop.
+	{
+		calls14.length = 0;
+		StubNotice.reset();
+		const gpu0Toggle = findByClass(gridHead14()[0], "arthur-queue-toggle")[0];
+		assert(gpu0Toggle.textContent === "⏸", "running queue set renders the pause glyph on the GPU0 chip");
+		gpu0Toggle.handlers.get("click")[0]?.();
+		await sleep(30);
+		assert(calls14.some((c) => /\/api\/queue\/0\/stop$/.test(c.url)) === true,
+			"GPU0 chip click pauses the single-GPU training queue");
+		assert(StubNotice.shown.some((m) => m.includes("pause queue GPU0 — done")) === true,
+			"queue chip click toasts the result");
+		const gpu1Toggle = findByClass(gridHead14()[1], "arthur-queue-toggle")[0];
+		assert(gpu1Toggle.textContent === "▶", "paused queue set renders the play glyph on the GPU1 chip");
+		calls14.length = 0;
+		StubNotice.reset();
+		gpu1Toggle.handlers.get("click")[0]?.();
+		await sleep(30);
+		assert(calls14.some((c) => /\/api\/queue\/1\/start$/.test(c.url)) === true,
+			"GPU1 chip click resumes the single-GPU training queue");
+	}
+
 	// (g) /api/gpus unreachable → derived columns + 'gpu stats unavailable' note
 	{
 		gpusBody = { gpus: [], count: 0, error: "nvidia-smi failed" };
@@ -1205,14 +1368,18 @@ try {
 		assert(view14.bannerEl._shown === true, "dead gpu collector → only then the banner shows");
 	}
 
-	// (h) unified job queue: running cards sort before pending cards; the
-	// per-instance group heads + anchors resolve
+	// (h) pure job list: running cards sort before pending cards, the queue
+	// holds NOTHING but job cards, and the per-instance anchors resolve on the
+	// instance's first job card (running, else pending)
 	{
+		comfyQueue[8188].queue_running = [["exec", "prompt-abcdef-1234", { "5": { class_type: "KSampler" } }]];
 		comfyQueue[8188].queue_pending = [["exec", "prompt-pending-1", { "7": { class_type: "CheckpointLoader" } }]];
 		view14.runStarts.set("run:8188", Date.now() - 60000);
 		view14.runStarts.set("run:8189", Date.now() - 10000);
 		view14.renderInstances();
 		view14.renderQueue();
+		assert(allText(rowByKey("inst:comfy-0")).includes("queue 1"),
+			"instance card shows the pending queue depth (1 pending)");
 		const jobCards = view14.queueEl.children.filter((c) => c.hasClass?.("arthur-queue-job"));
 		const runningIdx = jobCards.map((c, i) => (c.hasClass("arthur-queue-job--running") ? i : -1)).filter((i) => i >= 0);
 		const pendingIdx = jobCards.map((c, i) => (c.hasClass("arthur-queue-job--pending") ? i : -1)).filter((i) => i >= 0);
@@ -1220,10 +1387,43 @@ try {
 		assert(runningIdx.length >= 1 && pendingIdx.length >= 1, "queue holds both running and pending cards");
 		assert(Math.max(...runningIdx) < Math.min(...pendingIdx),
 			`unified queue orders running cards before pending cards (running=${runningIdx.join(",")}, pending=${pendingIdx.join(",")})`);
-		const heads = view14.queueEl.children.filter((c) => c.hasClass?.("arthur-queue-head"));
-		assert(heads.length === 2, "one group header per comfy instance (queue depth + clear-queue/free-VRAM actions)");
-		assert(!!findById(view14.contentEl, "arthur-queue-8188") && !!findById(view14.contentEl, "arthur-queue-8189"),
-			"queue group anchors still resolve for the grid's 'view in queue ↓' links");
+		// STRICT absence of the removed queue furniture:
+		assert(findByClass(view14.queueEl, "arthur-queue-head").length === 0,
+			"queue holds NO per-instance group headers (Clear-queue/Free-VRAM moved to the grid cards)");
+		assert(findByClass(view14.queueEl, "arthur-aiqueue").length === 0,
+			"queue holds NO ai-toolkit queue-toggles block (moving to GPU header chips + training cards)");
+		assert(findByClass(view14.queueEl, "arthur-note").length === 0,
+			"queue holds NO 'no jobs — every queue is clear' note");
+		const nonJobEls = view14.queueEl.children.filter(
+			(c) => !c.hasClass?.("arthur-queue-job") && !c.hasClass?.("arthur-aiqueue-state"),
+		);
+		assert(nonJobEls.length === 0,
+			"queue section contains ONLY job cards (+ the degraded tail line, hidden while all sources answer)");
+		view14.aiStateEl.isShown() === false
+			? null
+			: assert(false, "no degraded line while every source answers");
+		// stable anchors live on the instance's FIRST job card
+		const a8188 = findById(view14.contentEl, "arthur-queue-8188");
+		const a8189 = findById(view14.contentEl, "arthur-queue-8189");
+		assert(!!a8188 && a8188.hasClass("arthur-queue-job--running"),
+			"anchor arthur-queue-8188 sits on the running card (first job of comfy-0)");
+		assert(!!a8189 && a8189.hasClass("arthur-queue-job--running"),
+			"anchor arthur-queue-8189 sits on the running card (first job of comfy-1)");
+		// multi-GPU queue set → small toggle chip on the matching training card
+		const jobACard = findById(view14.contentEl, "arthur-training-row-jobA");
+		const chipOnJobA = jobACard ? findByClass(jobACard, "arthur-queue-toggle") : [];
+		assert(chipOnJobA.length === 1,
+			"multi-GPU queue set ('0,1') renders a queue-toggle chip on the matching training job card");
+		calls14.length = 0;
+		StubNotice.reset();
+		chipOnJobA[0].handlers.get("click")[0]?.();
+		await sleep(30);
+		assert(calls14.some((c) => /\/api\/queue\/2\/start$/.test(c.url)) === true,
+			"training card's queue chip resumes the multi-GPU queue set");
+		// anchor-only-on-first-card: the pending card of comfy-0 carries no id
+		const pendingCard8188 = view14.queueEl.children.find((c) => c.hasClass?.("arthur-queue-job--pending"));
+		assert(!!pendingCard8188 && (pendingCard8188.attributes.get("id") ?? null) === null,
+			"only the FIRST job card of an instance carries the arthur-queue-<port> anchor");
 	}
 
 	// (i) grid cards carry the outlined running/idle/down variants
@@ -1302,6 +1502,12 @@ try {
 
 	// ---- 16. training jobs in the unified queue (incl. NO comfy instance) ---
 	console.log("== 16. training jobs in the unified queue + decoupled ai-toolkit parts ===" );
+	// Detach the settings-fallback comfy ports entirely: the queue section
+	// must degrade to its ai-toolkit-only job-card content with NO comfy
+	// sources attempted (and hence no comfy degraded lines).
+	plugin.settings.profiles[0].comfyPorts = "";
+	await plugin.saveSettings();
+	await sleep(700); // debounced rebuild applies the empty port list
 	const aiJobs16 = {
 		jobs: [
 			{ id: "trainA", name: "Lora train A", gpu_ids: "0", status: "running", step: 10, total_steps: 100, speed_string: "2.0it/s", queue_position: null, pid: 4321, save_now: false, sample_now: false, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T01:00:00Z", stop: false, return_to_queue: false, job_config: "{}" },
@@ -1312,7 +1518,7 @@ try {
 	const json16 = (status, body) => ({ status, body });
 	// Agent status where NO comfy instance is alive (empty instance list).
 	const emptyStatus16 = {
-		version: "0.5.2",
+		version: "0.5.3",
 		host_uptime: 1,
 		services: [
 			{ id: "comfyui", name: "ComfyUI", active: true, multi_instance: true, max_instances: 4, default_port: 8188, unit_template: "comfy@{i}", instances: [] },
@@ -1370,12 +1576,16 @@ try {
 	findButton(findById(view16a.contentEl, "arthur-training-row-trainA"), "Chart").handlers.get("click")[0]?.();
 	assert(findByClass(findById(view16a.contentEl, "arthur-training-row-trainA"), "arthur-chart-wrap").length === 0,
 		"chart accordion collapses again");
-	assert(view16a.queueEmptyEl.isShown() === false, "no fake empty note while training jobs render");
+	assert(findByClass(view16a.contentEl, "arthur-queue-head").length === 0,
+		"no group headers in the training-only queue (pure job list)");
+	assert(findByClass(view16a.contentEl, "arthur-aiqueue").length === 0,
+		"no ai-toolkit toggles block in the training-only queue");
+	assert(view16a.queueEmptyEl === undefined, "the 'no jobs' note element is gone entirely (no fake empty note while training jobs render)");
 
 	// (b) agent UP but zero comfy instances + /api/queue broken (500):
 	// job cards must NOT disappear — only the queue toggles are lost
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.5.2" });
+		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.5.3" });
 		if (opts.url.endsWith("/api/status")) return json16(200, emptyStatus16);
 		if (opts.url.endsWith("/api/jobs")) return json16(200, aiJobs16);
 		if (opts.url.endsWith("/api/queue")) return json16(500, { error: "queue endpoint broken" });
@@ -1394,12 +1604,13 @@ try {
 		"a broken /api/queue does NOT hide the training job cards");
 	assert(view16b.aiStateEl.isShown() === true && allText(view16b.aiStateEl).includes("queue toggles unavailable"),
 		"failed ai-toolkit part shows its degraded state inline in the queue");
-	assert(view16b.queueEmptyEl.isShown() === false, "no 'every queue is clear' note while a source is degraded");
+	assert(view16b.queueEmptyEl === undefined,
+		"no 'every queue is clear' note while a source is degraded (element removed)");
 
 	// (c) /api/jobs broken (500) with zero everything: NO cards + inline error
 	// state — never a fake 'no jobs' note
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.5.2" });
+		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.5.3" });
 		if (opts.url.endsWith("/api/status")) return json16(200, emptyStatus16);
 		if (opts.url.endsWith("/api/jobs")) return json16(500, { error: "jobs endpoint broken" });
 		if (opts.url.endsWith("/api/queue")) return json16(200, { queues: [] });
@@ -1417,11 +1628,12 @@ try {
 	assert(findByClass(view16c.contentEl, "arthur-queue-job--training").length === 0, "no training cards without the jobs endpoint");
 	assert(view16c.aiStateEl.isShown() === true && allText(view16c.aiStateEl).includes("training jobs unavailable"),
 		"failed jobs collector shows its inline error state in the queue");
-	assert(view16c.queueEmptyEl.isShown() === false, "unreachable source → inline error state, NOT the empty note");
+	assert(view16c.queueEmptyEl === undefined,
+		"unreachable source → inline error state, NOT the empty note (element removed)");
 
 	// (d) every source answers + zero jobs anywhere → the clear note shows
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.5.2" });
+		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.5.3" });
 		if (opts.url.endsWith("/api/status")) return json16(200, emptyStatus16);
 		if (opts.url.endsWith("/api/jobs")) return json16(200, { jobs: [] });
 		if (opts.url.endsWith("/api/queue")) return json16(200, { queues: [] });
@@ -1437,8 +1649,12 @@ try {
 	}
 	assert(ok, "all-clear refresh did not throw");
 	assert(view16d.aiStateEl.isShown() === false, "no degraded state while every source answers");
-	assert(view16d.queueEmptyEl.isShown() === true && allText(view16d.queueEmptyEl).includes("no jobs — every queue is clear"),
-		"both sources answered + zero jobs → the 'no jobs — every queue is clear' note shows");
+	assert(findByClass(view16d.contentEl, "arthur-queue-job").length === 0,
+		"both sources answered + zero jobs → the queue is simply NO cards");
+	assert(findByClass(view16d.contentEl, "arthur-queue-head").length === 0
+		&& findByClass(view16d.contentEl, "arthur-aiqueue").length === 0
+		&& allText(view16d.contentEl).includes("no jobs — every queue is clear") === false,
+		"an empty queue holds NO group headers / toggles block / 'no jobs' note");
 
 	httpResponder = null;
 	StubNotice.reset();
@@ -1459,4 +1675,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.5.0-service-bar / hung-request-timeout-guard / down-instance-filtering / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+icons+fallback / unified-job-queue / collapsible-section-titles / training-jobs-unified-queue all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.5.3-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove / pure-job-list-queue / collapsible-section-titles / training-jobs-unified-queue all clean");

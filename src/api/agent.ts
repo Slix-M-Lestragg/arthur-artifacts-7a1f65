@@ -85,6 +85,15 @@ export interface AgentSpawnResult {
 	instance: AgentInstance;
 }
 
+/** POST /api/services/{svc}/instances/{id}/forget — drop a stopped instance
+ *  from the agent's service registry (200 {action:'forget', result:'forgotten'});
+ *  409 {error:'instance is running'} while up, 404 unknown. */
+export interface AgentForgetResult {
+	action: "forget";
+	result: "forgotten";
+	id: string;
+}
+
 /** POST /api/services/{svc}/stop — results over ALL active instances. */
 export interface AgentServiceStopResult {
 	action: "stop";
@@ -103,7 +112,7 @@ export interface AgentActionResult {
 }
 
 /** Agent version this plugin build was written against — mismatch → banner. */
-export const AGENT_VERSION = "0.5.2";
+export const AGENT_VERSION = "0.5.3";
 
 /** GET /health — unauthenticated {ok:true, version}; distinguishes "agent down" from "bad token". */
 export interface AgentHealth {
@@ -247,6 +256,18 @@ export class ArthurAgentClient {
 			`/api/services/${encodeURIComponent(svc)}/instances/${encodeURIComponent(id)}/restart`,
 			"POST",
 			force ? { force: 1 } : undefined,
+		);
+	}
+
+	/**
+	 * POST /api/services/{svc}/instances/{id}/forget — remove a STOPPED instance
+	 * from the agent's registry so it no longer shows in /api/status. 409 while
+	 * the instance is up (stop it first), 404 for an unknown id.
+	 */
+	async instanceForget(svc: string, id: string): Promise<AgentForgetResult> {
+		return this.call<AgentForgetResult>(
+			`/api/services/${encodeURIComponent(svc)}/instances/${encodeURIComponent(id)}/forget`,
+			"POST",
 		);
 	}
 }
