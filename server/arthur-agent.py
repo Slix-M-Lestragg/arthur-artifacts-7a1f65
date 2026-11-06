@@ -3,13 +3,16 @@
 
 Single-file Python 3 stdlib HTTP server (zero pip deps). Runs on the LAN
 home server, token-gated, and drives a *service registry* of systemd units
-(v0.5.0):
+(v0.5.2):
 
   services (from /etc/arthur-agent/config.json):
     comfyui    multi-instance  → template unit comfy@{i}
                  index i = lowest free index in 0..max_instances-1,
-                 port = default_port + i, gpu = i % NUM_GPUS
+                 port = default_port + i, gpus = [i % NUM_GPUS]
                  (NUM_GPUS detected live via `nvidia-smi -L` at spawn time)
+               plus optional named *extra instances* (config: extra_instances)
+                 that ride their own units, e.g. comfy-dual.service =
+                 ComfyUI on port 8190 spanning ALL GPUs (gpus [0, 1])
     aitoolkit  single-instance → ai-toolkit.service (must never be duplicated:
                  shared SQLite state)
 
@@ -20,6 +23,7 @@ timeouts. Every mutation lands in the JSONL audit log.
 
 API (see server/README-install.md for the full documented surface):
   GET  /health                                  → unauthenticated {ok, version}
+  GET  /api/gpus                                → live nvidia-smi per-GPU stats
   GET  /api/status                              → live per-service/instance state
   GET  /api/services                            → registry + live state
   GET  /api/services/{svc}                      → one service: registry + live
@@ -45,7 +49,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-AGENT_VERSION = "0.5.0"
+AGENT_VERSION = "0.5.2"
 
 CONFIG_PATH = os.environ.get("ARTHUR_AGENT_CONFIG", "/etc/arthur-agent/config.json")
 TOKEN_PATH = os.environ.get("ARTHUR_AGENT_TOKEN_FILE", "/etc/arthur-agent/token")
@@ -75,7 +79,7 @@ _gpu_cache = {"ts": 0.0, "n": None}
 # --------------------------------------------------------------------------
 
 def load_config():
-    """Load and validate the service registry (config.json v2 schema).
+    """Load and validate the service registry (config.json schema v2.1).
 
     {
       "services": {
@@ -87,7 +91,17 @@ def load_config():
           "unit_template": "comfy@{i}", # multi only; {i} → instance index
           "unit": "ai-toolkit.service", # single only
           "instance_prefix": "comfy",   # multi only; instance id "<prefix>-<i>"
-          "probe_path": "/system_stats" # optional, HTTP liveness path (default /)
+          "probe_path": "/system_stats", # optional, HTTP liveness path (def /)
+
+          # multi only, optional (v0.5.2): named instances BEYOND the spawned
+          # range. Ride their own units, are listed like spawned instances
+          # (start/stop/restart + up/down probing work on them) but are NOT
+          # part of template spawn allocation (spawn keeps using indexes
+          # 0..max_instances-1 regardless of extras).
+          "extra_instances": [
+            {"id": "comfy-dual", "port": 8190, "gpus": [0, 1],
+             "unit": "comfy-dual.service"}
+          ]
         }
       },
       "num_gpus": 2,          # optional static fallback hint
@@ -124,6 +138,41 @@ def load_config():
                 raise ValueError("bad unit_template/instance_prefix for service %r" % svc_id)
             out["unit_template"] = unit_tpl
             out["instance_prefix"] = prefix
+            extras = spec.get("extra_instances", [])
+            if not isinstance(extras, list):
+                raise ValueError("extra_instances for %r must be a list" % svc_id)
+            parsed = []
+            seen_extra = set()
+            for e in extras:
+                if not isinstance(e, dict):
+                    raise ValueError("extra_instances entries must be objects")
+                eid = str(e.get("id", ""))
+                if not ID_RE.match(eid) or eid in seen_extra:
+                    raise ValueError("bad or duplicate extra instance id %r of %s"
+                                     % (eid, svc_id))
+                seen_extra.add(eid)
+                try:
+                    eport = int(e["port"])
+                except (KeyError, TypeError, ValueError):
+                    raise ValueError("extra instance %r needs an integer port"
+                                     % eid)
+                if eport <= 0 or eport > 65535:
+                    raise ValueError("bad port for extra instance %r" % eid)
+                egpus = e.get("gpus")
+                if not isinstance(egpus, list) or not egpus or \
+                   not all(isinstance(g, int) and 0 <= g < 4096 for g in egpus):
+                    raise ValueError("extra instance %r needs gpus: [int, ...] "
+                                     "(non-empty)" % eid)
+                eunit = str(e.get("unit", ""))
+                if not UNIT_RE.match(eunit) or "/" in eunit:
+                    raise ValueError("bad unit for extra instance %r" % eid)
+                ename = e.get("name")
+                if ename is not None and not isinstance(ename, str):
+                    raise ValueError("bad name for extra instance %r" % eid)
+                parsed.append({"id": eid, "port": eport, "gpus": list(egpus),
+                               "unit": eunit,
+                               **({"name": ename} if ename is not None else {})})
+            out["extra_instances"] = parsed
         else:
             unit = str(spec["unit"])
             if not UNIT_RE.match(unit) or "/" in unit:
@@ -235,6 +284,44 @@ def num_gpus():
         return _gpu_cache["n"]
 
 
+def gpu_stats():
+    """Live per-GPU stats via nvidia-smi (5 s timeout).
+    Returns (gpus, error): on success error is None; on failure gpus is []
+    and error carries the message (the endpoint stays 200/degradable)."""
+    rc, out, err = run_cmd(
+        ["nvidia-smi", "--query-gpu=index,name,memory.total,memory.used,"
+                        "utilization.gpu,temperature.gpu",
+         "--format=csv,noheader,nounits"],
+        timeout=5,
+    )
+    if rc != 0:
+        return [], (err or "nvidia-smi exited with status %d" % rc)
+    gpus = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 6:
+            return [], "could not parse nvidia-smi output: %r" % line
+        try:
+            gpus.append({
+                "index": int(parts[0]),
+                # name may itself contain a comma — everything between the
+                # first field and the four trailing numeric fields is the name
+                "name": ", ".join(parts[1:len(parts) - 4]),
+                "mem_total_mb": int(parts[-4]),
+                "mem_used_mb": int(parts[-3]),
+                "util_percent": int(parts[-2]),
+                "temp_c": int(parts[-1]),
+            })
+        except ValueError:
+            return [], "could not parse nvidia-smi output: %r" % line
+    if not gpus:
+        return [], "nvidia-smi returned no data"
+    return gpus, None
+
+
 def probe_port(port, path="/system_stats"):
     """True if 127.0.0.1:port answers 200 on the service's probe path."""
     try:
@@ -341,34 +428,54 @@ def tail_audit(offset):
 # service / instance model (computed from the registry — never from requests)
 # --------------------------------------------------------------------------
 
-def make_instance(svc, idx):
-    """Internal representation of instance `idx` of service `svc` (spec dict)."""
+def make_instance(svc, idx=None, extra=None):
+    """Internal representation of one instance of service `svc` (spec dict).
+    Template-spawned instances pass idx; named extra instances pass extra
+    (v0.5.2). gpus is always a list; single-instance services carry []."""
+    if extra is not None:
+        return {
+            "service": svc["id"],
+            "spec": svc,
+            "id": extra["id"],
+            "index": None,
+            "name": extra.get("name") or extra["id"],
+            "port": extra["port"],
+            "unit": extra["unit"],
+            "gpus": list(extra["gpus"]),
+        }
     if svc["multi_instance"]:
         iid = "%s-%d" % (svc["instance_prefix"], idx)
         unit = svc["unit_template"].replace("{i}", str(idx))
+        gpus = [idx % num_gpus()]
+        name = "%s #%d" % (svc["name"], idx)
     else:
-        iid = svc["id"]
-        unit = svc["unit"]
+        iid, unit, gpus, name = svc["id"], svc["unit"], [], svc["name"]
     return {
         "service": svc["id"],
         "spec": svc,
         "id": iid,
         "index": idx,
+        "name": name,
         "port": svc["default_port"] + idx,
         "unit": unit,
-        "gpu": (idx % num_gpus()) if svc["multi_instance"] else None,
+        "gpus": gpus,
     }
 
 
-def parse_instance_id(svc, iid):
-    """Map a request-supplied instance id to an index, or None if invalid."""
-    if svc["multi_instance"]:
-        m = re.match(r"^%s-(\d+)$" % re.escape(svc["instance_prefix"]), iid or "")
-        if not m:
-            return None
+def find_instance(svc, iid):
+    """Resolve a request-supplied instance id: named extra instances first
+    (config extra_instances units), then template-spawned indexes, else None."""
+    if not svc["multi_instance"]:
+        return make_instance(svc, 0) if iid == svc["id"] else None
+    for extra in svc.get("extra_instances", []):
+        if iid == extra["id"]:
+            return make_instance(svc, extra=extra)
+    m = re.match(r"^%s-(\d+)$" % re.escape(svc["instance_prefix"]), iid or "")
+    if m:
         idx = int(m.group(1))
-        return idx if 0 <= idx < svc["max_instances"] else None
-    return 0 if iid == svc["id"] else None
+        if 0 <= idx < svc["max_instances"]:
+            return make_instance(svc, idx)
+    return None
 
 
 def active_indexes(svc):
@@ -380,12 +487,15 @@ def active_indexes(svc):
 
 def service_instances(svc):
     """Instances worth listing: the default (index 0) plus every active unit
-    plus every previously spawned index (state file; shows stopped ones)."""
+    plus every previously spawned index (state file; shows stopped ones),
+    plus config-declared extra instances (v0.5.2) at the end."""
     if not svc["multi_instance"]:
         return [make_instance(svc, 0)]
     known = set(load_state().get(svc["id"], []))
     idxs = sorted({0} | set(active_indexes(svc)) | known)
-    return [make_instance(svc, i) for i in idxs]
+    return [make_instance(svc, i) for i in idxs] + \
+           [make_instance(svc, extra=e)
+            for e in svc.get("extra_instances", [])]
 
 
 def default_instance(svc):
@@ -395,13 +505,14 @@ def default_instance(svc):
 def instance_summary(inst):
     unit_up = unit_is_active(inst["unit"])
     live = probe_port(inst["port"], inst["spec"]["probe_path"])
+    gpus = inst["gpus"]
     return {
         "id": inst["id"],
         "service": inst["service"],
-        "name": ("%s #%d" % (inst["spec"]["name"], inst["index"]))
-                if inst["spec"]["multi_instance"] else inst["spec"]["name"],
+        "name": inst["name"],
         "port": inst["port"],
-        "gpu": inst["gpu"],
+        "gpu": gpus[0] if len(gpus) == 1 else None,
+        "gpus": gpus,
         "up": bool(unit_up and live),
         "uptime": unit_uptime(inst["unit"]) if unit_up else None,
     }
@@ -569,8 +680,8 @@ def action_spawn(svc, ip):
             return 502, {"error": "unit started but port %d did not come up"
                                  % inst["port"]}
         remember_instance(svc["id"], idx)
-        audit(svc["id"], inst["id"], "spawn", "spawned:port=%d,gpu=%s"
-              % (inst["port"], inst["gpu"]), ip)
+        audit(svc["id"], inst["id"], "spawn", "spawned:port=%d,gpus=%s"
+              % (inst["port"], inst["gpus"]), ip)
         return 201, {"action": "spawn", "result": "spawned",
                      "instance": instance_detail(inst)}
 
@@ -628,12 +739,12 @@ class Handler(BaseHTTPRequestHandler):
         return svc
 
     def instance(self, svc, inst_id):
-        idx = parse_instance_id(svc, inst_id)
-        if idx is None:
+        inst = find_instance(svc, inst_id)
+        if inst is None:
             self.respond(404, {"error": "unknown instance %r of service %r"
                                        % (inst_id, svc["id"])})
             return None
-        return make_instance(svc, idx)
+        return inst
 
     # --- verbs ------------------------------------------------------------
     def do_GET(self):
@@ -671,6 +782,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # ---- status / registry ----------------------------------------
+        if path == "/api/gpus" and verb == "GET":
+            gpus, err = gpu_stats()
+            if gpus:
+                return self.respond(200, {"gpus": gpus, "count": len(gpus)})
+            # degradable, not fatal: still 200 with the failure reason
+            return self.respond(200, {"gpus": [], "count": 0,
+                                      "error": err or "nvidia-smi failed"})
+
         if path == "/api/status" and verb == "GET":
             return self.respond(200, {
                 "version": AGENT_VERSION,

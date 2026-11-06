@@ -8,22 +8,25 @@ hosting ComfyUI + ai-toolkit), not the Obsidian plugin itself:
 | `arthur-agent.py`     | `/opt/arthur-agent/arthur-agent.py`    | companion agent: service registry, dynamic instances, lifecycle control, audit log |
 | `config.json`         | `/etc/arthur-agent/config.json`        | the service registry (schema v2, below) |
 | `comfy@.service`      | `/etc/systemd/system/comfy@.service`   | multi-instance ComfyUI template unit: port = `8188+i`, GPU = `i % NUM_GPUS` (computed at start) |
+| `comfy-dual.service`  | `/etc/systemd/system/comfy-dual.service` | dual-GPU ComfyUI unit (v0.5.2): one process on **both** GPUs (`CUDA_VISIBLE_DEVICES=0,1` + `--cuda-device 0,1`), port `8190`; installed **enabled but stopped** |
 | `arthur-agent.service`| `/etc/systemd/system/arthur-agent.service` | agent unit, listens on `0.0.0.0:8766` |
 
-The agent is a **single-file Python 3 stdlib server** (no pip deps, v0.5.0).
+The agent is a **single-file Python 3 stdlib server** (no pip deps, v0.5.2).
 It exposes a *service registry* — services are defined once in config.json and
 instances are **computed**, never stored from requests. Request data is never
 interpolated into shell commands; the agent only ever runs `systemctl
-start/stop/is-active|show <unit-from-config>` and `nvidia-smi -L`, all with
+start/stop/is-active|show <unit-from-config>`, `nvidia-smi -L` (GPU count)
+and the read-only `nvidia-smi --query-gpu=...` stats query, all with
 subprocess timeouts. Every mutation appends one JSON line to the audit log.
 
-## Semantics (v0.5.0 model)
+## Semantics (v0.5.0 model, extended in v0.5.2)
 
 - **Service** = a systemd-managed app from the registry. Two kinds:
   - `multi_instance: true` (comfyui): runs a **template unit** `comfy@{i}`.
-    Instance *i* listens on `default_port + i`, uses GPU `i % NUM_GPUS`
-    (NUM_GPUS detected live via `nvidia-smi -L` at each status/spawn).
-    Instance ids are `<instance_prefix>-<i>`, e.g. `comfy-0`, `comfy-2`.
+    Instance *i* listens on `default_port + i`, and its GPU list is
+    `[i % NUM_GPUS]` (NUM_GPUS detected live via `nvidia-smi -L` at each
+    status/spawn). Instance ids are `<instance_prefix>-<i>`, e.g. `comfy-0`,
+    `comfy-2`.
   - `multi_instance: false` (aitoolkit): exactly one instance, id = service id
     (`aitoolkit`), fixed unit `ai-toolkit.service`. **Spawning returns 409** —
     ai-toolkit has shared SQLite state and must never be duplicated.
@@ -32,21 +35,38 @@ subprocess timeouts. Every mutation appends one JSON line to the audit log.
 - **Spawn** picks the lowest index in `0..max_instances-1` whose unit is not
   currently active. A stopped spawned instance's port/id may be reused by the
   next spawn. Instance indexes remembered as *spawned* persist (state file)
-  so the instance stays listed while stopped.
+  so the instance stays listed while stopped. **Extra instances do NOT
+  consume spawn indexes** — spawn allocation only ever walks the template
+  index range.
+- **Extra instances (v0.5.2)**: config-declared named instances on units
+  outside the template (`extra_instances`, e.g. `comfy-dual` on
+  `comfy-dual.service`). They appear in status/instance lists exactly like
+  spawned ones, and start/stop/restart work via their unit — but they are
+  never part of spawn allocation and are not remembered in the state file
+  (they come from config, so they always stay listed).
+- **`gpus` vs `gpu`**: every instance carries `"gpus": number[]` — the list of
+  GPUs it uses. For template-spawned instances this is the single-element
+  array `[i % NUM_GPUS]`; for multi-GPU extras (comfy-dual) it is the full
+  list, e.g. `[0, 1]`. The legacy `gpu` field is kept for backward
+  compatibility: it equals `gpus[0]` when the array has exactly one element
+  and `"gpu": null` otherwise (multi-GPU instance). The plugin should read
+  `gpus` going forward; `gpu` remains a convenience singular.
 - **`up`** = systemd unit active **and** the instance answers HTTP 200 on its
   `probe_path` (`/system_stats` for ComfyUI, `/` for ai-toolkit).
 - **`active`** (service level) = any instance up.
 
-## Deploy (v0.5.0)
+## Deploy (v0.5.2)
 
 ```sh
 sudo install -m 755 arthur-agent.py /opt/arthur-agent/arthur-agent.py
 sudo install -m 644 config.json /etc/arthur-agent/config.json
 sudo install -d -m 755 /var/lib/arthur-agent          # spawn-state file
-sudo install -m 644 comfy@.service arthur-agent.service /etc/systemd/system/
+sudo install -m 644 comfy@.service comfy-dual.service arthur-agent.service \
+  /etc/systemd/system/
 sudo systemctl daemon-reload
+sudo systemctl enable comfy-dual.service   # enabled but NOT started
 sudo systemctl restart arthur-agent
-curl -s http://127.0.0.1:8766/health   # → {"ok": true, "version": "0.5.0"}
+curl -s http://127.0.0.1:8766/health   # → {"ok": true, "version": "0.5.2"}
 ```
 
 Token lives in `/etc/arthur-agent/token` (root 0600) and `/etc/arthur-agent/env`
@@ -54,7 +74,10 @@ Token lives in `/etc/arthur-agent/token` (root 0600) and `/etc/arthur-agent/env`
 Migrating from v0.4 config keeps the token unchanged; the plugin uses the same
 token.
 
-## config.json — schema v2 (/etc/arthur-agent/config.json)
+## config.json — schema v2.1 (/etc/arthur-agent/config.json)
+
+Same as schema v2 plus the optional per-service `extra_instances` array
+(v0.5.2):
 
 ```json
 {
@@ -66,7 +89,11 @@ token.
       "instance_prefix": "comfy",
       "max_instances": 4,
       "multi_instance": true,
-      "probe_path": "/system_stats"
+      "probe_path": "/system_stats",
+      "extra_instances": [
+        {"id": "comfy-dual", "port": 8190, "gpus": [0, 1],
+         "unit": "comfy-dual.service"}
+      ]
     },
     "aitoolkit": {
       "name": "AI Toolkit",
@@ -90,27 +117,41 @@ token.
 | `unit_template` | multi only — systemd template unit, `{i}` = instance index |
 | `unit` | single only — fixed unit name |
 | `instance_prefix` | multi only — instance ids are `<prefix>-<i>` |
+| `extra_instances[]` | multi only, **optional (v2.1)** — named instances on units outside the template, listed + controllable like spawned ones but never part of spawn allocation. Each entry: `id` (`[a-z0-9-]+`, unique), `port`, `gpus` (non-empty `number[]`), `unit`, optional `name` |
 | `probe_path` | HTTP path used for the liveness probe (default `/`) |
 | `num_gpus` | fallback GPU count if `nvidia-smi -L` fails |
 | `bind` / `port` | optional; `ARTHUR_AGENT_BIND` / `ARTHUR_AGENT_PORT` env win |
 
 ---
 
-## API surface (v0.5.0 — FINAL; plugin code targets exactly this)
+## API surface (v0.5.2; plugin code targets exactly this)
 
 `GET /health` is unauthenticated. **Everything under `/api/` requires
 `Authorization: Bearer <token>`.** All responses are JSON; errors are always
 `{"error": "message"}` with a fitting HTTP code.
 
 ### GET /health (no auth)
-`{"ok": true, "version": "0.5.0"}`
+`{"ok": true, "version": "0.5.2"}`
+
+### GET /api/gpus
+Live GPU stats straight from `nvidia-smi --query-gpu=...` (5 s subprocess
+timeout):
+
+```json
+{"gpus": [{"index": 0, "name": "NVIDIA GeForce RTX 3060",
+           "mem_total_mb": 12288, "mem_used_mb": 1878,
+           "util_percent": 12, "temp_c": 36}, …], "count": 2}
+```
+
+Degradable, not fatal: if nvidia-smi fails/returns nothing the answer is still
+HTTP 200 with `{"gpus": [], "count": 0, "error": "<reason>"}`.
 
 ### GET /api/status
 Live state of everything:
 
 ```json
 {
-  "version": "0.5.0",
+  "version": "0.5.2",
   "host_uptime": 123456.7,
   "services": [
     {
@@ -119,9 +160,12 @@ Live state of everything:
       "unit_template": "comfy@{i}",
       "instances": [
         {"id": "comfy-0", "service": "comfyui", "name": "ComfyUI #0",
-         "port": 8188, "gpu": 0, "up": true, "uptime": 169000.0},
+         "port": 8188, "gpu": 0, "gpus": [0], "up": true, "uptime": 169000.0},
         {"id": "comfy-1", "service": "comfyui", "name": "ComfyUI #1",
-         "port": 8189, "gpu": 1, "up": true, "uptime": 168000.0}
+         "port": 8189, "gpu": 1, "gpus": [1], "up": true, "uptime": 168000.0},
+        {"id": "comfy-dual", "service": "comfyui", "name": "comfy-dual",
+         "port": 8190, "gpu": null, "gpus": [0, 1], "up": false,
+         "uptime": null}
       ]
     },
     {
@@ -130,7 +174,7 @@ Live state of everything:
       "unit": "ai-toolkit.service",
       "instances": [
         {"id": "aitoolkit", "service": "aitoolkit", "name": "AI Toolkit",
-         "port": 8675, "gpu": null, "up": true, "uptime": 180000.0}
+         "port": 8675, "gpu": null, "gpus": [], "up": true, "uptime": 180000.0}
       ]
     }
   ]
@@ -138,7 +182,8 @@ Live state of everything:
 ```
 
 Stopped instances stay listed with `"up": false, "uptime": null` (a freshly
-deployed multi-instance service always lists its default `comfy-0`).
+deployed multi-instance service always lists its default `comfy-0`; config
+declared extra instances always stay listed too).
 
 ### GET /api/services
 Same shape as `/api/status.services` but **detailed**: each instance additionally
@@ -173,12 +218,13 @@ Multi-instance services only:
 ```json
 {"action": "spawn", "result": "spawned",
  "instance": {"id": "comfy-2", "service": "comfyui", "name": "ComfyUI #2",
-              "port": 8190, "gpu": 0, "unit": "comfy@2", "up": true,
-              "live": true, "uptime": 1.2}}
+              "port": 8190, "gpu": 0, "gpus": [0], "unit": "comfy@2",
+              "up": true, "live": true, "uptime": 1.2}}
 ```
 
 - Index = lowest inactive index in `0..max-1`; port = `8188+i`;
-  gpu = `i % NUM_GPUS` (live-detected).
+  `gpus` = `[i % NUM_GPUS]` (live-detected); `gpu` = `gpus[0]`.
+  **Extra instances do not consume spawn indexes.**
 - Single-instance service → **409 `{"error": "single-instance service"}`**.
 - All indexes active → **409 `{"error": "max instances reached (4)"}`**.
 - Unit start failed → 500; unit up but port never served → 502.
@@ -191,8 +237,13 @@ Live detail for one instance (both spellings accepted):
 
 ```json
 {"id": "comfy-1", "service": "comfyui", "name": "ComfyUI #1", "port": 8189,
- "gpu": 1, "unit": "comfy@1", "up": true, "live": true, "uptime": 1234.5}
+ "gpu": 1, "gpus": [1], "unit": "comfy@1", "up": true, "live": true,
+ "uptime": 1234.5}
 ```
+
+Extra instances resolve by their config id (e.g. `comfy-dual`) and behave
+identically here — `unit` is their declared unit, `gpus` their declared list,
+`gpu` null when more than one GPU.
 
 ### POST /api/services/{svc}/instances/{id}/start
 Idempotent start of ONE instance (`already-running` if active).
@@ -228,9 +279,11 @@ same: `comfy-0`, `comfy-1`, `aitoolkit`).
 - Token + env file are `root:root 0600`; the token never appears in the repo.
 - **No request data in shell commands.** Service/instance ids are validated
   against the registry (and `^[a-z0-9-]+$`); units/ports/probes are always
-  computed from config.json. `comfy@.service` is the only code-execution path
-  (plus the read-only `nvidia-smi -L` GPU probe). All subprocess calls use
-  30 s timeouts. Spawn index selection is lock-protected.
+  computed from config.json. `comfy@.service` / `comfy-dual.service` are the
+  only code-execution paths (plus the read-only `nvidia-smi` GPU probes: a
+  cached `-L` count and the per-GPU stats query behind `/api/gpus`). All
+  subprocess calls use 30 s timeouts (`/api/gpus`: 5 s). Spawn index selection
+  is lock-protected.
 - The agent unit runs as root (it must control system units) and is hardened
   with `NoNewPrivileges`, `ProtectSystem=full`, `ProtectHome=read-only`,
   `PrivateTmp`. Audit log: `/var/log/arthur-agent/audit.jsonl`; spawn-state:

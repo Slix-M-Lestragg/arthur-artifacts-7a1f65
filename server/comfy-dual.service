@@ -1,0 +1,39 @@
+# ComfyUI dual-GPU instance — managed by the arthur project.
+#
+# ONE ComfyUI process using BOTH GPUs: CUDA_VISIBLE_DEVICES=0,1 +
+# --cuda-device 0,1, port 8190. (Revives the old launch-dualgpu.sh pattern
+# as a systemd unit; declared to the agent as an extra_instance
+# {"id": "comfy-dual", "port": 8190, "gpus": [0, 1],
+#  "unit": "comfy-dual.service"} in /etc/arthur-agent/config.json.)
+#
+#   systemctl start comfy-dual   → both GPUs, port 8190
+#
+# NOT started by the deploy — the user starts/stops it from the arthur UI
+# (it competes with comfy-0/comfy-1 for GPU memory; enable it so it comes
+# back on boot if it was running).
+#
+# Deploys to /etc/systemd/system/comfy-dual.service. Needs root:
+#   sudo install -m 644 comfy-dual.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#
+# Environment is inherited from the ecosystem's shared paths.sh (single
+# source of truth: HF_HOME / model paths etc.), plus the Vulkan system-memory
+# fallback llama.cpp custom nodes need. CUDA_VISIBLE_DEVICES is exported
+# BEFORE sourcing paths.sh (which only defaults it when unset — our value
+# wins).
+
+[Unit]
+Description=ComfyUI dual-GPU (CUDA_VISIBLE_DEVICES=0,1, port 8190)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/work/00-TOOLS/comfyui
+Environment=GGML_VK_ALLOW_SYSMEM_FALLBACK=1
+ExecStart=/bin/bash -c 'export CUDA_VISIBLE_DEVICES=0,1; source /mnt/work/00-TOOLS/paths.sh; exec venv/bin/python main.py --listen 0.0.0.0 --port 8190 --cuda-device 0,1 --preview-method auto --reserve-vram 2'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

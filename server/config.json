@@ -7,7 +7,15 @@
       "instance_prefix": "comfy",
       "max_instances": 4,
       "multi_instance": true,
-      "probe_path": "/system_stats"
+      "probe_path": "/system_stats",
+      "extra_instances": [
+        {
+          "id": "comfy-dual",
+          "port": 8190,
+          "gpus": [0, 1],
+          "unit": "comfy-dual.service"
+        }
+      ]
     },
     "aitoolkit": {
       "name": "AI Toolkit",
