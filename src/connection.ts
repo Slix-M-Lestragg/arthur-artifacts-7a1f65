@@ -1,7 +1,9 @@
 /**
  * WsConnection — wraps window.WebSocket for ComfyUI's /ws endpoint with
- * auto-reconnect (exponential backoff, 1s → 30s cap). Desktop only; no node
- * imports. Parses JSON text frames shaped {type, data} and dispatches them to
+ * auto-reconnect (exponential backoff, 1s → 30s cap; after 3 consecutive
+ * failed connects the socket settles at the 30s max backoff — dead ports
+ * never spin fast retries or log extra lines of their own). Desktop only; no
+ * node imports. Parses JSON text frames shaped {type, data} and dispatches them to
  * typed callbacks; binary frames (live preview JPEGs) arrive as ArrayBuffer.
  */
 
@@ -40,6 +42,10 @@ export interface WsHandlers {
 
 const BASE_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 30000;
+/** Consecutive failed connect attempts (device report v0.7.1: WS churn on a
+ *  port kept spinning 1s/2s/4s… retries against a dead instance) before the
+ *  socket stops escalating and waits the full 30s backoff before retrying. */
+const MAX_CONSECUTIVE_FAILS = 3;
 
 export class WsConnection {
 	private readonly handlers: WsHandlers;
@@ -149,12 +155,16 @@ export class WsConnection {
 	private handleSocketGone(): void {
 		this.ws = null;
 		if (this.closing) return;
-		// Exponential backoff: 1s, 2s, 4s, … capped at 30s.
-		const delay = Math.min(
-			BASE_BACKOFF_MS * Math.pow(2, this.attempts),
-			MAX_BACKOFF_MS,
-		);
 		this.attempts++;
+		// Exponential backoff: 1s, 2s, 4s, … capped at 30s — after three
+		// consecutive failed connects a port is (still) down: settle at the
+		// 30s cap instead of hammering it with ever-escalating retries. The
+		// failed connects themselves are logged by the browser engine; this
+		// class adds no log lines of its own.
+		const delay =
+			this.attempts >= MAX_CONSECUTIVE_FAILS
+				? MAX_BACKOFF_MS
+				: Math.min(BASE_BACKOFF_MS * Math.pow(2, this.attempts), MAX_BACKOFF_MS);
 		this.setState(WsState.Backoff);
 		this.reconnectTimer = setTimeout(() => {
 			this.reconnectTimer = null;

@@ -1923,6 +1923,163 @@ try {
 	StubModal.reset();
 	await app.workspace.detachLeavesOfType("arthur-dashboard");
 
+	// ---- 18. v0.7.1 service-inactive grid + WS-on-up-instances contract ---
+	console.log("== 18. service-inactive grid + WS-up-ports + default-instance Remove ==");
+	plugin.settings.profiles[0].comfyPorts = "8188,8189";
+	await plugin.saveSettings();
+	await sleep(700);
+
+	const json18 = (status, body) => ({ status, body });
+	const inst18 = (id, port, gpu, up) => ({
+		id, service: "comfyui", name: `ComfyUI #${id.slice(-1)}`,
+		port, gpu, gpus: gpu != null ? [gpu] : [], up, uptime: up ? 100.0 : null,
+	});
+	const status18 = {
+		version: "0.5.4",
+		host_uptime: 1,
+		services: [
+			{
+				id: "comfyui", name: "ComfyUI", active: true, multi_instance: true,
+				max_instances: 4, default_port: 8188, unit_template: "comfy@{i}",
+				instances: [inst18("comfy-0", 8188, 0, true), inst18("comfy-1", 8189, 1, true)],
+			},
+			{
+				id: "aitoolkit", name: "AI Toolkit", active: true, multi_instance: false,
+				max_instances: 1, default_port: 8675, unit: "ai-toolkit.service",
+				instances: [{ id: "aitoolkit", service: "aitoolkit", name: "AI Toolkit", port: 8675, gpu: null, gpus: [], up: true, uptime: 10.0 }],
+			},
+		],
+	};
+	httpResponder = (opts) => {
+		if (opts.url.endsWith("/health")) return json18(200, { ok: true, version: "0.5.4" });
+		if (opts.url.endsWith("/api/status")) return json18(200, status18);
+		if (opts.url.endsWith("/api/gpus")) return json18(200, { gpus: [
+			{ index: 0, name: "NVIDIA GeForce RTX 3060", mem_total_mb: 12288, mem_used_mb: 1000, util_percent: 0, temp_c: 35 },
+			{ index: 1, name: "NVIDIA GeForce RTX 3060", mem_total_mb: 12288, mem_used_mb: 500, util_percent: 0, temp_c: 34 },
+		], count: 2 });
+		if (opts.url.endsWith("/api/jobs")) return json18(200, { jobs: [] });
+		if (opts.url.endsWith("/api/queue")) return json18(200, { queues: [] });
+		for (const port of [8188, 8189]) {
+			if (opts.url.startsWith(`http://10.0.0.9:${port}/`)) {
+				return opts.url.endsWith("/system_stats")
+					? json18(200, { system: {}, devices: [{ name: "cuda", type: "cuda", vram_total: 12 * 1024 * 1024, vram_free: 4 * 1024 * 1024 }] })
+					: json18(200, { queue_running: [], queue_pending: [] });
+			}
+		}
+		return null;
+	};
+	app.workspace.detachLeavesOfType("arthur-dashboard");
+	let view18;
+	ok = true;
+	try {
+		await plugin.activateView();
+		view18 = app.workspace.getLeavesOfType("arthur-dashboard")[0]?.view;
+		await view18.refreshData();
+	} catch (err) {
+		ok = false;
+		console.error(`    view18 attach threw: ${err?.stack ?? err}`);
+	}
+	assert(ok, "view18 attach + refresh did not throw");
+	const rows18 = () => view18.gridEl.children.filter((c) => c.hasClass?.("arthur-grid-row"));
+	const rowByKey18 = (key) => rows18().find((r) => r.attributes.get("data-row-key") === key) ?? null;
+	const comfyRows18 = () => rows18().filter((r) => (r.attributes.get("data-row-key") ?? "").startsWith("inst:"));
+
+	// (a) service active + both instances up → rows render, sockets attach ONLY
+	// to the up agent instances (never the aitoolkit port)
+	assert(comfyRows18().length === 2, "both up instances render grid rows");
+	assert(view18.wss.has(8188) === true && view18.wss.has(8189) === true,
+		"WS sockets attach to up:true agent instances");
+	assert(view18.wss.has(8675) === false, "no WS socket for a non-comfy port");
+	assert(findButton(rowByKey18("inst:comfy-0"), "Remove") === null, "up rows carry no Remove button");
+
+	// (b) stop-all → service INACTIVE, only the default comfy-0 remains (down):
+	// zero comfy rows/cards, every comfy WS socket closed + dropped
+	status18.services[0].active = false;
+	status18.services[0].instances = [inst18("comfy-0", 8188, 0, false)];
+	await view18.refreshData();
+	assert(comfyRows18().length === 0, "service inactive → ZERO comfy instance rows in the grid");
+	assert(view18.panels.size === 0, "service inactive → no comfy generation cards");
+	assert(view18.wss.size === 0, "service inactive → every comfy WS socket closed + dropped (no dead-port churn)");
+	assert(findByClass(view18.queueEl, "arthur-queue-job").length === 0, "service inactive → no comfy queue cards");
+	assert(view18.serviceBar.buttons.get("comfyui").btn.hasClass("arthur-svc-btn--offline") === true,
+		"the stopped service renders its grey offline pill");
+	assert(allText(view18.gridNoteEl).includes("ComfyUI service stopped"), "the grid note says the service is stopped");
+
+	// (c) service ACTIVE again with one DOWN non-default instance → its down
+	// row renders with Start + Remove, and stopping the instance closed its
+	// socket (only the up port holds a socket)
+	status18.services[0].active = true;
+	status18.services[0].instances = [inst18("comfy-0", 8188, 0, true), inst18("comfy-1", 8189, 1, false)];
+	await view18.refreshData();
+	const downRow18c = rowByKey18("inst:comfy-1");
+	assert(downRow18c != null && downRow18c.hasClass("arthur-grid-row--down"),
+		"service-active down non-default instance renders its down row");
+	assert(findButton(downRow18c, "Start") != null && findButton(downRow18c, "Remove") != null,
+		"down non-default row exposes Start + Remove");
+	assert(view18.wss.has(8188) === true && view18.wss.has(8189) === false,
+		"stopping an instance closes its WS socket (socket map holds only up ports)");
+	assert(!view18.panels.has(8189) && view18.panels.has(8188), "no generation card for a stopped instance");
+
+	// (d) the DEFAULT instance down → Start only, NO Remove (the agent 409s
+	// 'default instance cannot be forgotten' — the button must not exist)
+	status18.services[0].instances = [inst18("comfy-0", 8188, 0, false), inst18("comfy-1", 8189, 1, false)];
+	await view18.refreshData();
+	const downDefault18d = rowByKey18("inst:comfy-0");
+	assert(downDefault18d != null && downDefault18d.hasClass("arthur-grid-row--down"), "default instance renders its down row");
+	assert(findButton(downDefault18d, "Start") != null, "default-instance down row keeps Start");
+	assert(findButton(downDefault18d, "Remove") === null, "default-instance down row hides Remove (agent would 409)");
+	assert(findButton(rowByKey18("inst:comfy-1"), "Remove") != null, "config extras keep the Remove button");
+	assert(view18.wss.size === 0,
+		"both instances down → no sockets in the map (only up ports ever hold one)");
+
+	// (e) agent stops answering → settings-port fallback: NO new WS sockets
+	// (dead-port churn killer — the fallback port list is not up-probed, so
+	// the view must never spin sockets against it). Sockets attached while
+	// the agent answered are kept across a transient agent outage (the
+	// instances may still be up), but nothing NEW is ever opened.
+	status18.services[0].instances = [inst18("comfy-0", 8188, 0, false), inst18("comfy-1", 8189, 1, false)];
+	await view18.refreshData(); // agent answers, both instances down → sockets dropped
+	assert(view18.wss.size === 0, "down instances → sockets dropped before the outage");
+	httpResponder = null;
+	await view18.refreshData();
+	assert(view18.wss.size === 0, "agent-unknown fallback opens NO WS sockets");
+	assert(allText(view18.unmanagedEl).includes("unmanaged"), "agent-unknown fallback still renders the unmanaged rows");
+
+	httpResponder = null;
+	StubNotice.reset();
+	await app.workspace.detachLeavesOfType("arthur-dashboard");
+
+	// ---- 19. WS backoff cap: 3 consecutive failed connects → 30s settle ---
+	console.log("== 19. WS backoff settles at 30s after 3 consecutive failed connects ==");
+	class FailWs19 {
+		constructor() {
+			throw new Error("connect failed (stub)");
+		}
+	}
+	const realWs19 = globalThis.WebSocket;
+	globalThis.WebSocket = FailWs19;
+	const conn19 = new bundleWs("ws://10.0.0.9:8188/ws?clientId=smoke19", {});
+	conn19.open();
+	// The stub's constructor throws synchronously → the first failed connect
+	// has already landed in Backoff by the time open() returns.
+	assert(conn19.currentState === "backoff" || conn19.currentState === "connecting",
+		`failing socket transitions into its backoff reconnect state (got ${conn19.currentState})`);
+	// 1s + 2s backoff steps bring the counter to 3 within ~3s wall time
+	{
+		const deadline = Date.now() + 6000;
+		while (conn19.attempts < 3 && Date.now() < deadline) await sleep(100);
+	}
+	assert(conn19.attempts === 3 && conn19.currentState === "backoff",
+		`3 consecutive failed connects reached (got attempts=${conn19.attempts}, state=${conn19.currentState})`);
+	// Capped: the 4th retry waits the full 30s — a 5s quiet window must see
+	// zero new attempts (the uncapped scheme retries here on its 4s step).
+	const frozen19 = conn19.attempts;
+	await sleep(5000);
+	assert(conn19.attempts === frozen19, "no further retry attempts inside the 5s window (30s settle cap active)");
+	conn19.close();
+	assert(conn19.currentState === "closed", "close() cancels the capped backoff timer");
+	globalThis.WebSocket = realWs19;
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();
@@ -1938,4 +2095,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.5.4-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove / pure-job-list-queue / collapsible-section-titles / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.5.4-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove / pure-job-list-queue / collapsible-section-titles / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap all clean");

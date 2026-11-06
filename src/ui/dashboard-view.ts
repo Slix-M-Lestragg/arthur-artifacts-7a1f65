@@ -20,14 +20,19 @@
  *                    set (instances whose GPU sets don't overlap share a
  *                    visual row via the packer; multi-GPU/dual spans get their
  *                    own full row) for each GPU-owning comfy instance
- *                    queued/running ai-toolkit training job. Rows are
+ *                    queued/running ai-toolkit training job — HIDDEN entirely
+ *                    while the comfyui service is inactive (v0.7.1: stop-all
+ *                    leaves only the grey service pill; a stopped service's
+ *                    leftover default instance renders no row). Rows are
  *                    self-contained outlined cards (running = accent tint,
  *                    idle = neutral, down = dashed muted + grayscale),
  *                    carrying a state badge (running/idle/down), quick run
  *                    stats for running rows (WS progress / job step+speed),
  *                    lifecycle + queue buttons for instances (down rows get
  *                    Start + Remove — remove forgets the stopped instance via
- *                    /forget; up comfy rows get Clear-queue + Free-VRAM), a
+ *                    /forget; the agent's DEFAULT instance is never forgettable
+ *                    and gets Start only; up comfy rows get Clear-queue +
+ *                    Free-VRAM), a
  *                    two-line stats block (VRAM used/total matched from
  *                    /api/gpus + pending queue depth + a small WS state chip),
  *                    and a 'view in queue ↓' link for running rows WITH queue
@@ -164,6 +169,10 @@ interface GridRowSpec {
 	// lifecycle wiring (instance rows only)
 	svcId: string | null;
 	instId: string | null;
+	/** True when this is the agent's default instance (index-0 of a template
+	 *  service / the single-instance service itself) — the agent refuses to
+	 *  forget it (409), so its down rows hide the Remove button. */
+	isDefault: boolean;
 	/** Instance port (instance rows only) — run tracking + panel lookup. */
 	port: number | null;
 	/** systemd unit name (instance rows only, when the agent reports it). */
@@ -846,6 +855,9 @@ export class ArthurDashboardView extends ItemView {
 			desired.map((p) => p.port).join(",") !==
 				this.activePorts.map((p) => p.port).join(",");
 		if (stale) this.rebuildPortPanels(desired);
+		// An instance that just went down / was dropped from the registry must
+		// lose its socket at this tick, even when no rebuild fired.
+		this.syncWss();
 
 		// Inner promises never reject; per-port failures land in .error. Each
 		// port settles its own watch as soon as its result is known — one hung
@@ -1349,10 +1361,17 @@ export class ArthurDashboardView extends ItemView {
 		};
 
 		for (const inst of comfy?.instances ?? []) {
+			// Service-inactive grid (device report v0.7.0): when the agent reports
+			// the comfyui service INACTIVE (stop-all), its instance rows are
+			// hidden from the grid entirely — the greyed service-bar pill already
+			// represents the stopped service, and the leftover default remains
+			// listed (up:false) but must not render. A merely DOWN instance while
+			// the service is still active keeps its down row (Start + Remove).
+			const serviceActive = comfy?.active !== false;
 			// Non-GPU instances (e.g. the aitoolkit UI service) are not grid
 			// rows — they live in the service bar.
 			const gpuList = inst.gpus?.length ? inst.gpus : inst.gpu != null ? [inst.gpu] : [];
-			if (gpuList.length === 0) continue;
+			if (!serviceActive || gpuList.length === 0) continue;
 			const idx = this.activePorts.findIndex((p) => p.port === inst.port);
 			const detail = idx >= 0 ? this.comfyDetail[idx] ?? null : null;
 			const runningCount =
@@ -1390,8 +1409,15 @@ export class ArthurDashboardView extends ItemView {
 				// 'view in queue ↓' only while the queue section actually holds
 				// a job card at that anchor (running or pending > 0).
 				linkable: running && runningCount + pendingCount > 0,
-					svcId: inst.service,
+				svcId: inst.service,
 				instId: inst.id,
+				// The agent's default instance (index-0 of a template service —
+				// e.g. comfy-0 on the default port — or the sole instance of a
+				// single-unit service) cannot be forgotten — /forget 409s
+				// 'default instance cannot be forgotten' — so its down rows hide
+				// the Remove button. Detection signal: the SERVICE model's
+				// default_port (the default instance is always spawned on it).
+				isDefault: comfy != null && inst.port === comfy.default_port,
 				port: inst.port,
 				unit: inst.unit ?? null,
 			});
@@ -1426,6 +1452,7 @@ export class ArthurDashboardView extends ItemView {
 					linkable: true,
 					svcId: null,
 					instId: null,
+					isDefault: false,
 					port: null,
 				});
 			}
@@ -1495,6 +1522,15 @@ export class ArthurDashboardView extends ItemView {
 				"title",
 				errTooltip(host ? `${host}:${agentPort}` : "(not configured)", this.gpuDetail.error),
 			);
+			this.gridNoteEl.show();
+		}
+
+		// Service-inactive note (device report v0.7.0): the comfyui service is
+		// stopped (stop-all) — its rows are hidden; the grey service pill owns
+		// the lifecycle, so the grid says so instead of rendering leftovers.
+		const comfySvc = this.agentDetail.status?.services.find((s) => s.id === "comfyui") ?? null;
+		if (comfySvc && comfySvc.active === false) {
+			this.gridNoteEl.setText("ComfyUI service stopped — click the grey ComfyUI pill above to start it");
 			this.gridNoteEl.show();
 		}
 
@@ -1909,9 +1945,11 @@ export class ArthurDashboardView extends ItemView {
 				),
 			);
 			buttons.push(btnStop, btnRestart);
-		} else if (spec.svcId && spec.instId) {
+		} else if (spec.svcId && spec.instId && !spec.isDefault) {
 			// DOWN row: destructive remove — forgets the stopped instance from
-			// the agent's registry (409 while it is still up; 404 unknown).
+			// the agent's registry (409 while it is still up; 404 unknown). The
+			// agent's DEFAULT instance is never forgettable (409 'default
+			// instance cannot be forgotten') — its down rows carry no Remove.
 			const btnRemove = newBtn("Remove");
 			btnRemove.addClass("arthur-btn--tiny");
 			btnRemove.addEventListener("click", () =>
@@ -2765,6 +2803,14 @@ export class ArthurDashboardView extends ItemView {
 	private openWss(): void {
 		const clients = this.plugin.clients;
 		if (!clients) return;
+		// Device report v0.7.1 (WS churn against dead 8188/8189 after stop-all):
+		// a socket may only exist for an up:true agent instance. While
+		// /api/status has not answered (or is failing → the settings-fallback
+		// 'unmanaged' port list) the view cannot know which ports are alive, so
+		// it opens NOTHING — the first answering poll tick attaches sockets to
+		// the live instances instead of spinning reconnect loops against dead
+		// ports.
+		if (this.agentDetail.statusOk !== true) return;
 		const profile = clients.profile;
 		for (const p of this.activePorts) {
 			const port = p.port;
@@ -2788,6 +2834,27 @@ export class ArthurDashboardView extends ItemView {
 	private closeWss(): void {
 		for (const conn of this.wss.values()) conn.close();
 		this.wss.clear();
+	}
+
+	/**
+	 * WS sockets exist ONLY for up:true agent instances: with the agent
+	 * answering, close + drop every socket whose port is not in the current
+	 * up-instance port set — an instance going down or being forgotten kills
+	 * its socket at the next poll tick, never leaving a backoff loop against
+	 * a dead port (device report v0.7.1). The port-set rebuild in syncSkeleton
+	 * already tears the whole socket set down on any port change; this is the
+	 * belt-and-braces sweep when the socket map has drifted from the desired
+	 * set.
+	 */
+	private syncWss(): void {
+		if (this.agentDetail.statusOk !== true) return;
+		const desired = new Set(this.activePorts.map((p) => p.port));
+		for (const [port, conn] of [...this.wss]) {
+			if (!desired.has(port)) {
+				conn.close();
+				this.wss.delete(port);
+			}
+		}
 	}
 
 	private wsStateChanged(port: number, state: WsState): void {
