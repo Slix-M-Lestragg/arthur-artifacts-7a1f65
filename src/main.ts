@@ -76,6 +76,8 @@ function clampInt(raw: unknown, fallback: number, min: number, max: number): num
 
 const LIGHT_INTERVAL_MS = 12_000;
 const DETAIL_INTERVAL_MS = 3_000;
+/** Debounce window for runtime rebuilds triggered from settings edits. */
+const REBUILD_DEBOUNCE_MS = 400;
 
 /** Light-cycle snapshot — status bar input, kept for inspection/debugging. */
 export interface LightState {
@@ -243,6 +245,9 @@ export default class ArthurPlugin extends Plugin {
 		lastUpdated: null,
 	};
 
+	/** Debounce timer for settings-driven runtime rebuilds. */
+	private rebuildTimer: number | null = null;
+
 	/** Status bar pill wrapper; owns the DOM element we created. */
 	private statusPill: StatusBarPill | null = null;
 	/** The status bar item (removed on unload). */
@@ -271,26 +276,53 @@ export default class ArthurPlugin extends Plugin {
 		// Settings tab.
 		this.addSettingTab(new ArthurSettingTab(this.app, this));
 
-		// Clients + pollers.
+		// Clients + pollers (also rebuilt on every relevant settings change).
+		this.rebuildRuntime();
+	}
+
+	/**
+	 * (Re)build the live runtime — API clients + pollers — from the active
+	 * profile. Runs at onload and after every relevant settings save, so the
+	 * components never need a plugin reload to pick up new values. The old
+	 * pollers are stopped first; the dashboard view resyncs its cards + WS
+	 * sockets on the refresh this triggers (ports/host may have changed).
+	 */
+	rebuildRuntime(): void {
+		this.clients?.lightPoller.stop();
+		this.clients?.detailPoller.stop();
 		this.rebuildClients();
+
 		const clients = this.clients;
-		if (clients) {
-			clients.lightPoller.registerCollector("light-summary", async () => {
-				await this.collectLightData();
-			});
-			clients.detailPoller.registerCollector("dashboard-detail", async () => {
-				// The view no-ops when closed/hidden (its own visibility gate).
-				await this.dashboardView?.refreshData();
-			});
-			clients.lightPoller.start();
-			clients.detailPoller.start();
-			// Belt-and-braces: registerInterval reaps the timers even if a
-			// future edit forgets poller.stop() in onunload.
-			const lightId = clients.lightPoller.intervalId;
-			const detailId = clients.detailPoller.intervalId;
-			if (lightId !== null) this.registerInterval(lightId);
-			if (detailId !== null) this.registerInterval(detailId);
-		}
+		if (!clients) return;
+		clients.lightPoller.registerCollector("light-summary", async () => {
+			await this.collectLightData();
+		});
+		clients.detailPoller.registerCollector("dashboard-detail", async () => {
+			// The view no-ops when closed/hidden (its own visibility gate).
+			await this.dashboardView?.refreshData();
+		});
+		clients.lightPoller.start();
+		clients.detailPoller.start();
+		// Belt-and-braces: registerInterval reaps the timers even if a future
+		// edit forgets poller.stop() — stale duplicate ids clear to no-ops.
+		const lightId = clients.lightPoller.intervalId;
+		const detailId = clients.detailPoller.intervalId;
+		if (lightId !== null) this.registerInterval(lightId);
+		if (detailId !== null) this.registerInterval(detailId);
+
+		// Immediate paints so the status pill + open dashboard reflect the new
+		// profile without waiting a full light (12s) / detail (3s) cycle.
+		void this.collectLightData();
+		void this.dashboardView?.onRuntimeChanged();
+	}
+
+	/** Debounced rebuild — settings text inputs fire onChange per keystroke. */
+	private scheduleRuntimeRebuild(): void {
+		if (this.rebuildTimer !== null) window.clearTimeout(this.rebuildTimer);
+		this.rebuildTimer = window.setTimeout(() => {
+			this.rebuildTimer = null;
+			this.rebuildRuntime();
+		}, REBUILD_DEBOUNCE_MS);
 	}
 
 	/** Build API clients from the active profile; replaces any previous set. */
@@ -409,6 +441,12 @@ export default class ArthurPlugin extends Plugin {
 	}
 
 	onunload(): void {
+		// Drop any pending debounced rebuild.
+		if (this.rebuildTimer !== null) {
+			window.clearTimeout(this.rebuildTimer);
+			this.rebuildTimer = null;
+		}
+
 		// Detaching the leaf closes the view → WS sockets + dashboardView ref.
 		this.app.workspace.detachLeavesOfType(VIEW_TYPE_ARTHUR_DASHBOARD);
 		this.dashboardView = null;
@@ -436,6 +474,9 @@ export default class ArthurPlugin extends Plugin {
 
 	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
+		// Every live component (clients, pollers, dashboard, status pill)
+		// follows the new profile immediately, debounced across keystrokes.
+		this.scheduleRuntimeRebuild();
 	}
 
 	/** Open (or reveal) the dashboard view. */

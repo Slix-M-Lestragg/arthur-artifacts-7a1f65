@@ -103,7 +103,16 @@ export class WsConnection {
 			throw new Error("WebSocket is unavailable in this environment");
 		}
 		this.setState(WsState.Connecting);
-		const ws = new WebSocket(this.url);
+		let ws: WebSocket;
+		try {
+			ws = new WebSocket(this.url);
+		} catch {
+			// Invalid URL (e.g. empty/partially configured host while settings
+			// are still being typed) behaves like a failed connect: fall into
+			// the backoff retry instead of throwing into the caller's render.
+			this.handleSocketGone();
+			return;
+		}
 		ws.binaryType = "arraybuffer";
 		this.ws = ws;
 

@@ -171,6 +171,10 @@ export class ArthurDashboardView extends ItemView {
 	private readonly panels = new Map<number, ComfyPanel>();
 	private readonly wss = new Map<number, WsConnection>();
 	private readonly comfyByPort = new Map<number, ComfyUIClient>();
+	/** Host the current cards + WS sockets were built for (staleness check). */
+	private wsHost: string | null = null;
+	/** Port cards actually rendered? (empty profile → placeholder note). */
+	private cardsRendered = false;
 
 	// cached section roots
 	private profileEl!: HTMLElement;
@@ -233,6 +237,14 @@ export class ArthurDashboardView extends ItemView {
 		return this.open && this.contentEl.isShown();
 	}
 
+	/**
+	 * The plugin runtime was rebuilt (settings change) — repaint immediately
+	 * so an open dashboard never needs manual refresh / view recreation.
+	 */
+	onRuntimeChanged(): Promise<void> {
+		return this.refreshData();
+	}
+
 	private comfyPorts(): number[] {
 		return this.plugin.comfyPorts;
 	}
@@ -257,6 +269,7 @@ export class ArthurDashboardView extends ItemView {
 		this.contentEl.empty();
 		this.panels.clear();
 		this.comfyByPort.clear();
+		this.wsHost = null;
 		this.buildSkeleton();
 		this.openWss();
 		this.plugin.dashboardView = this;
@@ -267,6 +280,10 @@ export class ArthurDashboardView extends ItemView {
 			this.clearAllPreviews();
 			this.clearTrainingState();
 		});
+		// Immediate first fill after the synchronously rendered skeleton: without
+		// this, the user's first paint of data waits for the next 3s detail tick
+		// (and the gate below no-ops that tick if layout isn't finished yet).
+		void this.refreshData();
 	}
 
 	async onClose(): Promise<void> {
@@ -283,6 +300,40 @@ export class ArthurDashboardView extends ItemView {
 		const clients = this.plugin.clients;
 		if (!this.visible() || !clients) return;
 		const profile = clients.profile;
+		const ports = clients.comfyPorts;
+
+		// Settings may have changed while the view sat open — resync the cached
+		// cards + WS sockets with the current host/port set before fetching.
+		const staleHost = profile.host !== this.wsHost;
+		const stalePorts = !this.cardsRendered ||
+			ports.length !== this.panels.size ||
+			ports.some((p) => !this.panels.has(p));
+		if (staleHost || stalePorts) this.rebuildPortPanels();
+
+		// Not configured yet (still empty host) — paint the placeholder state,
+		// never the network. The skeleton + cards above are already up.
+		if (!profile.host) {
+			this.comfyDetail = [];
+			this.agentDetail = {
+				healthOk: null,
+				statusOk: null,
+				status: null,
+				error: null,
+			};
+			this.aiDetail = {
+				reachable: false,
+				jobs: [],
+				queues: [],
+				error: "not configured",
+			};
+			this.lastTick = null;
+			this.renderTopBar(profile.name, "");
+			this.renderBanner();
+			this.renderInstances();
+			this.renderGeneration();
+			this.renderTraining();
+			return;
+		}
 
 		// Inner promises never reject; per-port failures land in .error.
 		this.comfyDetail = await Promise.all(
@@ -350,7 +401,24 @@ export class ArthurDashboardView extends ItemView {
 	// skeleton
 	// ------------------------------------------------------------------
 
+	/**
+	 * Tear down and rebuild the port cards + WS sockets so they match the
+	 * current profile (host or port set changed in settings while open).
+	 * Called from refreshData before any fetch — the poll cycle fills in data.
+	 */
+	private rebuildPortPanels(): void {
+		this.closeWss();
+		this.clearAllPreviews();
+		this.panels.clear();
+		this.comfyByPort.clear();
+		this.contentEl.empty();
+		this.buildSkeleton();
+		this.openWss();
+		this.wsHost = this.plugin.clients?.profile.host ?? null;
+	}
+
 	private buildSkeleton(): void {
+		this.topDots.clear();
 		const root = this.contentEl.createEl("div", { cls: "arthur-dashboard" });
 
 		// thin top summary bar
@@ -392,6 +460,14 @@ export class ArthurDashboardView extends ItemView {
 			const [instCard, genCard] = this.buildPortCards(port);
 			instancesBox.append(instCard);
 			generationBox.append(genCard);
+		}
+		// Empty port set (nothing configured yet) — keep the section headers so
+		// the dashboard is never blank, and tell the user what's missing.
+		this.cardsRendered = this.comfyPorts().length > 0;
+		if (!this.cardsRendered) {
+			const note = "no ComfyUI instances configured — set Host and ComfyUI ports in the arthur settings";
+			instancesBox.append(el("p", { cls: "arthur-note", text: note }));
+			generationBox.append(el("p", { cls: "arthur-note", text: note }));
 		}
 
 		// training section
@@ -551,7 +627,7 @@ export class ArthurDashboardView extends ItemView {
 	// ------------------------------------------------------------------
 
 	private renderTopBar(profileName: string, host: string): void {
-		this.profileEl.setText(`${profileName} @ ${host}`);
+		this.profileEl.setText(host ? `${profileName} @ ${host}` : profileName);
 		this.comfyPorts().forEach((port, i) => {
 			const dot = this.topDots.get(`c${port}`);
 			if (dot) setDot(dot, this.comfyDetail[i]?.online ?? null);
@@ -564,6 +640,14 @@ export class ArthurDashboardView extends ItemView {
 	}
 
 	private renderBanner(): void {
+		const clients = this.plugin.clients;
+		if (clients && !clients.profile.host) {
+			this.bannerEl.setText(
+				"arthur is not configured — set the server host in the plugin settings",
+			);
+			this.bannerEl.show();
+			return;
+		}
 		const ad = this.agentDetail;
 		let message: string | null = null;
 		if (ad.healthOk === false) {
@@ -1088,11 +1172,13 @@ export class ArthurDashboardView extends ItemView {
 	// ------------------------------------------------------------------
 
 	private openWss(): void {
-		const ports = this.comfyPorts();
-		const clients = this.plugin.clients?.comfy ?? [];
-		ports.forEach((port, i) => {
-			const client = clients[i];
+		const clients = this.plugin.clients;
+		if (!clients) return;
+		const profile = clients.profile;
+		clients.comfyPorts.forEach((port, i) => {
+			const client = clients.comfy[i];
 			if (!client || this.wss.has(port)) return;
+			if (!profile.host) return; // nothing to connect to without a host
 			this.comfyByPort.set(port, client);
 			const clientId = `arthur-${port}-${Math.random().toString(36).slice(2, 8)}`;
 			const url = `${client.baseUrl.replace(/^http:/, "ws:")}/ws?clientId=${clientId}`;
