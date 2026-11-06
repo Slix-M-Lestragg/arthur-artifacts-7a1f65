@@ -80,16 +80,33 @@ export interface AiToolkitCpuStats {
 	currentLoad: number;
 }
 
-/** GET /api/jobs/{id}/loss (verified live) — chartable metric series. */
+/** One chartable metric series: parallel steps/values arrays (null = value_text row). */
+export interface AiToolkitLossSeries {
+	steps: number[];
+	values: Array<number | null>;
+}
+
+/**
+ * GET /api/jobs/{id}/loss?since_step=N — chartable metric series. Shape verified
+ * against the server source (ui/src/app/api/jobs/[jobID]/loss/route.ts): points
+ * with step >= since_step are included per key; values may be null (non-numeric).
+ */
 export interface AiToolkitLossResponse {
 	keys: string[];
 	since_step: number;
-	series: Record<string, Array<{ step: number; value: number }>>;
+	series: Record<string, AiToolkitLossSeries>;
 }
 
-/** GET /api/jobs/{id}/log (verified live) — incremental log tail. */
+/**
+ * GET /api/jobs/{id}/log?offset=N — incremental byte tail. offset is the byte
+ * position to pass back on the next call; reset=true means the log was
+ * (re)written and the client must reset its buffer (shape verified live and
+ * against ui/src/app/api/jobs/[jobID]/log/route.ts).
+ */
 export interface AiToolkitLogResponse {
 	log: string;
+	offset: number;
+	reset: boolean;
 }
 
 export class AiToolkitClient {

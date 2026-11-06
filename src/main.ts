@@ -31,6 +31,10 @@ export interface ServerProfile {
 
 export interface ArthurSettings {
 	profiles: ServerProfile[];
+	/** Live preview ring buffer size per ComfyUI instance (default 4). */
+	previewCount: number;
+	/** Max metric lines drawn in a job loss chart (default 4). */
+	maxChartKeys: number;
 }
 
 /** Clients built from the active profile — rebuilt when settings change. */
@@ -60,7 +64,15 @@ const DEFAULT_PROFILE: ServerProfile = {
 
 const DEFAULT_SETTINGS: ArthurSettings = {
 	profiles: [{ ...DEFAULT_PROFILE }],
+	previewCount: 4,
+	maxChartKeys: 4,
 };
+
+/** Parse a bounded positive int; invalid/missing → fallback. */
+function clampInt(raw: unknown, fallback: number, min: number, max: number): number {
+	const n = typeof raw === "number" ? raw : parseInt(String(raw ?? ""), 10);
+	return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : fallback;
+}
 
 const LIGHT_INTERVAL_MS = 12_000;
 const DETAIL_INTERVAL_MS = 3_000;
@@ -184,6 +196,27 @@ class ArthurSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				});
 			});
+
+		const s = this.plugin.settings;
+		containerEl.createEl("h3", { text: "Dashboard display" });
+		new Setting(containerEl)
+			.setName("Preview strip size")
+			.setDesc("Mid-generation live preview thumbnails kept per ComfyUI instance (1–12, default 4).")
+			.addText((text) =>
+				text.setValue(String(s.previewCount)).onChange(async (value) => {
+					s.previewCount = clampInt(value, 4, 1, 12);
+					await this.plugin.saveSettings();
+				})
+			);
+		new Setting(containerEl)
+			.setName("Loss chart keys")
+			.setDesc("Maximum metric lines drawn in a training loss chart (1–8, default 4).")
+			.addText((text) =>
+				text.setValue(String(s.maxChartKeys)).onChange(async (value) => {
+					s.maxChartKeys = clampInt(value, 4, 1, 8);
+					await this.plugin.saveSettings();
+				})
+			);
 	}
 }
 
@@ -396,6 +429,8 @@ export default class ArthurPlugin extends Plugin {
 		const data = (await this.loadData()) as Partial<ArthurSettings> | null;
 		this.settings = {
 			profiles: [{ ...DEFAULT_PROFILE, ...(data?.profiles?.[0] ?? {}) }],
+			previewCount: clampInt(data?.previewCount, DEFAULT_SETTINGS.previewCount, 1, 12),
+			maxChartKeys: clampInt(data?.maxChartKeys, DEFAULT_SETTINGS.maxChartKeys, 1, 8),
 		};
 	}
 

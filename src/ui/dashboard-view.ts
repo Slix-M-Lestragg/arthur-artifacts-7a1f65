@@ -30,7 +30,9 @@ import { AGENT_VERSION } from "../api/agent";
 import type { AgentInstanceSummary, AgentStatus } from "../api/agent";
 import type { AiToolkitJob } from "../api/aitoolkit";
 import type { ComfyUIClient, QueueResponse, SystemStats } from "../api/comfy";
+import { parseComfyBinaryFrame } from "../comfy-frame";
 import { WsConnection, WsState } from "../connection";
+import { renderLossChart } from "./loss-chart";
 import { el, fmtBytes, fmtClockTime, fmtDuration, truncate } from "../util";
 import { confirmModal, describeError, run, toastErr } from "./actions";
 
@@ -92,12 +94,41 @@ interface ComfyPanel {
 	btnFree: HTMLButtonElement;
 	btnClear: HTMLButtonElement;
 	pendingWrap: HTMLElement;
+	previewStrip: HTMLElement;
 	// bookkeeping
 	progress: GenProgress | null;
 	/** node id → node definition of the running prompt (from /queue). */
 	promptGraph: Record<string, any> | null;
 	runningPromptId: string | null;
 	pendingIds: string[];
+	/** Live preview object URLs, newest first (ring buffer, revoked on evict). */
+	previewUrls: string[];
+}
+
+/** Accordion state for one training job row (local to the view, not persisted). */
+interface JobPanelUi {
+	chart: boolean;
+	logs: boolean;
+}
+
+/** Accumulated (incremental) one metric key of a training job's loss series. */
+interface JobLossEntry {
+	steps: number[];
+	values: Array<number | null>;
+	/** Highest step merged so far — dedupe floor for incremental appends. */
+	lastStep: number;
+}
+
+interface JobLossCache {
+	keys: string[];
+	series: Map<string, JobLossEntry>;
+}
+
+/** Incrementally tailed training log, capped to the newest lines. */
+interface JobLogCache {
+	/** Byte offset to pass back as ?offset= on the next poll. */
+	offset: number;
+	text: string;
 }
 
 /** Per-GPU-set queue row as consumed by the training queue list. */
@@ -166,6 +197,18 @@ export class ArthurDashboardView extends ItemView {
 	};
 	private lastTick: number | null = null;
 
+	// training accordion state (job id → state; cleared on close/unload/job delete)
+	private readonly jobUi = new Map<string, JobPanelUi>();
+	private readonly jobLoss = new Map<string, JobLossCache>();
+	private readonly jobLog = new Map<string, JobLogCache>();
+	/** In-flight guard per loss/log fetch ("loss:<id>" / "log:<id>"). */
+	private readonly jobFetchBusy = new Set<string>();
+	/** Mounted accordion containers per job id, replaced on each tbody refill. */
+	private readonly jobPanelEls = new Map<
+		string,
+		{ chart?: HTMLElement; log?: HTMLElement }
+	>();
+
 	constructor(
 		leaf: WorkspaceLeaf,
 		private readonly plugin: ArthurPlugin,
@@ -217,13 +260,20 @@ export class ArthurDashboardView extends ItemView {
 		this.buildSkeleton();
 		this.openWss();
 		this.plugin.dashboardView = this;
-		// Belt-and-braces: if teardown ever skips onClose, sockets still close.
-		this.register(() => this.closeWss());
+		// Belt-and-braces: if teardown ever skips onClose, sockets and caches
+		// (object URLs, loss series, log tails) still get released.
+		this.register(() => {
+			this.closeWss();
+			this.clearAllPreviews();
+			this.clearTrainingState();
+		});
 	}
 
 	async onClose(): Promise<void> {
 		this.open = false;
 		this.closeWss();
+		this.clearAllPreviews();
+		this.clearTrainingState();
 		if (this.plugin.dashboardView === this) this.plugin.dashboardView = null;
 		this.contentEl.empty();
 	}
@@ -420,6 +470,8 @@ export class ArthurDashboardView extends ItemView {
 		runningEl.hide();
 		const pendingWrap = el("div", { cls: "arthur-pending-list" });
 		pendingWrap.hide();
+		const previewStrip = el("div", { cls: "arthur-preview-strip" });
+		previewStrip.hide();
 		const btnCancel = newBtn("Cancel");
 		const btnClear = newBtn("Clear queue");
 		const btnFree = newBtn("Free VRAM");
@@ -459,6 +511,7 @@ export class ArthurDashboardView extends ItemView {
 			progressLabel,
 			runningEl,
 			pendingWrap,
+			previewStrip,
 			buttonRow(btnCancel, btnClear, btnFree),
 		);
 
@@ -483,10 +536,12 @@ export class ArthurDashboardView extends ItemView {
 			btnFree,
 			btnClear,
 			pendingWrap,
+			previewStrip,
 			progress: null,
 			promptGraph: null,
 			runningPromptId: null,
 			pendingIds: [],
+			previewUrls: [],
 		});
 		return [instanceCard, genCard];
 	}
@@ -683,8 +738,16 @@ export class ArthurDashboardView extends ItemView {
 			return;
 		}
 		this.trainingNoteEl.hide();
+		// Drop caches/state for jobs that no longer exist (deleted or job list rebuilt).
+		this.pruneTrainingState();
 		this.trainingBodyEl.empty();
-		this.trainingBodyEl.append(...detail.jobs.map((job) => this.jobRow(job)));
+		this.jobPanelEls.clear();
+		for (const job of detail.jobs) {
+			this.trainingBodyEl.append(this.jobRow(job));
+			const ui = this.jobUi.get(job.id);
+			if (ui?.chart === true) void this.fetchJobLoss(job.id);
+			if (ui?.logs === true) void this.fetchJobLog(job.id);
+		}
 		this.trainingQueueEl.empty();
 		if (detail.queues.length === 0) {
 			this.trainingQueueEl.append(
@@ -695,11 +758,12 @@ export class ArthurDashboardView extends ItemView {
 		for (const q of detail.queues) this.trainingQueueEl.append(this.queueRow(q));
 	}
 
-	private jobRow(job: AiToolkitJob): HTMLElement {
+	private jobRow(job: AiToolkitJob): DocumentFragment {
 		const clients = this.plugin.clients!;
 		const pollers = this.pollers();
 		const name = truncate(job.name, 28);
 		const label = (action: string) => `${action} ${name}`;
+		const ui = this.jobUiState(job.id);
 
 		const btn = (
 			text: string,
@@ -723,7 +787,14 @@ export class ArthurDashboardView extends ItemView {
 
 		const running = job.status === "running";
 		const actions = el("td", { cls: "arthur-actions" });
+		const toggle = (key: "chart" | "logs", text: string) => {
+			const b = btn(text, () => this.toggleJobPanel(job.id, key), false);
+			if (ui[key] === true) b.addClass("arthur-btn--active");
+			return b;
+		};
 		actions.append(
+			toggle("chart", "Chart"),
+			toggle("logs", "Logs"),
 			btn("Start", () => void run(pollers, label("Start"), () => clients.aitoolkit.jobStart(job.id)), running || job.status === "stopping"),
 			btn("Stop", () => void run(pollers, label("Stop (graceful)"), () => clients.aitoolkit.jobStop(job.id)), !running && job.status !== "stopping"),
 			btn("Kill", () => confirmRun("Kill job", `Force-kill "${job.name}" (SIGKILL)? The trainer gets no chance to save or clean up.`, () => clients.aitoolkit.jobKill(job.id)), job.pid == null),
@@ -733,7 +804,7 @@ export class ArthurDashboardView extends ItemView {
 			btn("Sample now", () => void run(pollers, label("Sample now"), () => clients.aitoolkit.jobSampleNow(job.id)), !running || job.sample_now),
 		);
 
-		return el("tr", {
+		const row = el("tr", {
 			cls: `arthur-job--${job.status}`,
 			children: [
 				el("td", { text: name, attrs: { title: job.name } }),
@@ -749,6 +820,172 @@ export class ArthurDashboardView extends ItemView {
 				actions,
 			],
 		});
+
+		const frag = document.createDocumentFragment();
+		frag.append(row);
+		if (ui.chart || ui.logs) frag.append(this.jobPanelRow(job.id, ui));
+		return frag;
+	}
+
+	// ------------------------------------------------------------------
+	// training accordion — loss chart + incremental log tail
+	// ------------------------------------------------------------------
+
+	private jobUiState(jobId: string): JobPanelUi {
+		let ui = this.jobUi.get(jobId);
+		if (!ui) {
+			ui = { chart: false, logs: false };
+			this.jobUi.set(jobId, ui);
+		}
+		return ui;
+	}
+
+	private toggleJobPanel(jobId: string, key: "chart" | "logs"): void {
+		const ui = this.jobUiState(jobId);
+		ui[key] = !ui[key];
+		this.renderTraining();
+	}
+
+	/** Drop caches + accordion state for jobs that no longer exist. */
+	private pruneTrainingState(): void {
+		const ids = new Set(this.aiDetail.jobs.map((j) => j.id));
+		for (const map of [this.jobUi, this.jobLoss, this.jobLog]) {
+			for (const id of map.keys()) {
+				if (!ids.has(id)) map.delete(id);
+			}
+		}
+		for (const busy of [...this.jobFetchBusy]) {
+			const id = busy.split(":")[1];
+			if (id && !ids.has(id)) this.jobFetchBusy.delete(busy);
+		}
+	}
+
+	/** Clear all accordion caches/state (view close / plugin unload). */
+	private clearTrainingState(): void {
+		this.jobUi.clear();
+		this.jobLoss.clear();
+		this.jobLog.clear();
+		this.jobFetchBusy.clear();
+		this.jobPanelEls.clear();
+	}
+
+	/** Expandable <tr> under a job row, holding the chart and/or log panels. */
+	private jobPanelRow(jobId: string, ui: JobPanelUi): HTMLElement {
+		const mounted: { chart?: HTMLElement; log?: HTMLElement } = {};
+		const stack = el("div", { cls: "arthur-panel-stack" });
+		if (ui.chart) {
+			mounted.chart = el("div", { cls: "arthur-chart-wrap" });
+			stack.append(mounted.chart);
+		}
+		if (ui.logs) {
+			mounted.log = el("div", { cls: "arthur-log-panel" });
+			stack.append(mounted.log);
+		}
+		const cell = el("td", {
+			cls: "arthur-job-panel-cell",
+			attrs: { colspan: "7" },
+			children: [stack],
+		});
+		this.jobPanelEls.set(jobId, mounted);
+		if (mounted.chart) this.renderJobChart(mounted.chart, jobId);
+		if (mounted.log) this.renderJobLog(mounted.log, jobId);
+		return el("tr", { cls: "arthur-job-panel-row", children: [cell] });
+	}
+
+	/** Paint the loss chart panel from the accumulated cache (no fetch). */
+	private renderJobChart(container: HTMLElement, jobId: string): void {
+		container.empty();
+		const cache = this.jobLoss.get(jobId);
+		if (!cache) {
+			container.createEl("div", { cls: "arthur-note", text: "loading loss data…" });
+			return;
+		}
+		const maxKeys = this.plugin.settings.maxChartKeys;
+		const series = cache.keys
+			.filter((key) => cache.series.has(key))
+			.slice(0, maxKeys)
+			.map((key) => ({ key, data: cache.series.get(key)! }));
+		renderLossChart(container, series);
+	}
+
+	/** Paint the log tail panel from the accumulated cache (no fetch). */
+	private renderJobLog(container: HTMLElement, jobId: string): void {
+		container.empty();
+		const cache = this.jobLog.get(jobId);
+		const pre = container.createEl("pre", { cls: "arthur-log-pre" });
+		pre.textContent = cache ? (cache.text || "log is empty") : "loading log…";
+		// Tail behavior: keep the newest lines in view while expanded.
+		container.scrollTop = container.scrollHeight;
+	}
+
+	/**
+	 * Incremental loss fetch (runs on each detail tick while expanded). Request
+	 * floor = min over keys of the merged highest step: keys that update on a
+	 * slower cadence (per-epoch metrics) re-deliver the span since their last
+	 * step, which the merge dedupes; keeps byte traffic bounded per key.
+	 */
+	private async fetchJobLoss(jobId: string): Promise<void> {
+		const busyKey = `loss:${jobId}`;
+		if (this.jobFetchBusy.has(busyKey)) return;
+		this.jobFetchBusy.add(busyKey);
+		try {
+			const clients = this.plugin.clients;
+			if (!clients) return;
+			const cache = this.jobLoss.get(jobId) ?? { keys: [], series: new Map<string, JobLossEntry>() };
+			if (!this.jobLoss.has(jobId)) this.jobLoss.set(jobId, cache);
+			let sinceStep = 0;
+			for (const entry of cache.series.values()) {
+				sinceStep = sinceStep === 0 ? entry.lastStep : Math.min(sinceStep, entry.lastStep);
+			}
+			const resp = await clients.aitoolkit.jobLoss(jobId, sinceStep);
+			cache.keys = resp.keys;
+			for (const [key, incoming] of Object.entries(resp.series)) {
+				let entry = cache.series.get(key);
+				if (!entry) {
+					entry = { steps: [], values: [], lastStep: -1 };
+					cache.series.set(key, entry);
+				}
+				for (let i = 0; i < incoming.steps.length; i++) {
+					const step = incoming.steps[i];
+					if (step <= entry.lastStep) continue; // already merged
+					entry.steps.push(step);
+					entry.values.push(incoming.values[i] ?? null);
+					entry.lastStep = step;
+				}
+			}
+			const mounted = this.jobPanelEls.get(jobId);
+			if (mounted?.chart) this.renderJobChart(mounted.chart, jobId);
+		} catch {
+			// Offline / transient failure — next tick retries.
+		} finally {
+			this.jobFetchBusy.delete(busyKey);
+		}
+	}
+
+	/** Incremental log tail (runs on each detail tick while expanded). */
+	private async fetchJobLog(jobId: string): Promise<void> {
+		const busyKey = `log:${jobId}`;
+		if (this.jobFetchBusy.has(busyKey)) return;
+		this.jobFetchBusy.add(busyKey);
+		try {
+			const clients = this.plugin.clients;
+			if (!clients) return;
+			const cache = this.jobLog.get(jobId) ?? { offset: 0, text: "" };
+			if (!this.jobLog.has(jobId)) this.jobLog.set(jobId, cache);
+			const resp = await clients.aitoolkit.jobLog(jobId, cache.offset);
+			if (resp.reset) cache.text = resp.log; // file truncated/rewritten — fresh tail
+			else cache.text += resp.log;
+			cache.offset = resp.offset;
+			// Cap the panel to the newest ~200 lines.
+			const lines = cache.text.split("\n");
+			if (lines.length > 200) cache.text = lines.slice(-200).join("\n");
+			const mounted = this.jobPanelEls.get(jobId);
+			if (mounted?.log) this.renderJobLog(mounted.log, jobId);
+		} catch {
+			// Offline / transient failure — next tick retries.
+		} finally {
+			this.jobFetchBusy.delete(busyKey);
+		}
 	}
 
 	private queueRow(q: AiToolkitQueueRow): HTMLElement {
@@ -861,6 +1098,7 @@ export class ArthurDashboardView extends ItemView {
 			const url = `${client.baseUrl.replace(/^http:/, "ws:")}/ws?clientId=${clientId}`;
 			const conn = new WsConnection(url, {
 				onProgress: (data) => this.wsProgress(port, data),
+				onBinary: (data) => this.wsBinary(port, data),
 				onEvent: (type, data) => this.wsEvent(port, type, data),
 				onStateChanged: (state) => this.wsStateChanged(port, state),
 			});
@@ -977,10 +1215,61 @@ export class ArthurDashboardView extends ItemView {
 				panel.progress = null;
 				panel.runningPromptId = null;
 				panel.promptGraph = null;
+				// Terminal event: generation is over — clear the preview strip too.
+				this.clearPreviews(port);
 				this.renderProgress(panel);
 				return;
 			default:
 				return;
 		}
+	}
+
+	// ------------------------------------------------------------------
+	// websocket — live preview strip (typed binary frames)
+	// ------------------------------------------------------------------
+
+	/** Parse a typed ComfyUI binary frame and slot it into the preview ring. */
+	private wsBinary(port: number, buffer: ArrayBuffer): void {
+		if (!this.open) return;
+		const panel = this.panels.get(port);
+		if (!panel) return;
+		const frame = parseComfyBinaryFrame(buffer);
+		if (!frame) return; // text frames / unknown types are not renderable
+		const url = URL.createObjectURL(new Blob([frame.data], { type: frame.mimeType }));
+		panel.previewUrls.unshift(url); // newest first
+		const max = Math.max(1, this.plugin.settings.previewCount);
+		while (panel.previewUrls.length > max) {
+			const evicted = panel.previewUrls.pop();
+			if (evicted) URL.revokeObjectURL(evicted);
+		}
+		this.renderPreviewStrip(panel);
+	}
+
+	private renderPreviewStrip(panel: ComfyPanel): void {
+		panel.previewStrip.empty();
+		if (panel.previewUrls.length === 0) {
+			panel.previewStrip.hide();
+			return;
+		}
+		for (const url of panel.previewUrls) {
+			const img = document.createElement("img");
+			img.className = "arthur-preview-thumb";
+			img.src = url;
+			panel.previewStrip.append(img);
+		}
+		panel.previewStrip.show();
+	}
+
+	/** Drop one instance's preview ring, revoking every object URL. */
+	private clearPreviews(port: number): void {
+		const panel = this.panels.get(port);
+		if (!panel) return;
+		for (const url of panel.previewUrls) URL.revokeObjectURL(url);
+		panel.previewUrls = [];
+		this.renderPreviewStrip(panel);
+	}
+
+	private clearAllPreviews(): void {
+		for (const port of [...this.panels.keys()]) this.clearPreviews(port);
 	}
 }
