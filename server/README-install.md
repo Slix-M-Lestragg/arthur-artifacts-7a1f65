@@ -11,7 +11,7 @@ hosting ComfyUI + ai-toolkit), not the Obsidian plugin itself:
 | `comfy-dual.service`  | `/etc/systemd/system/comfy-dual.service` | dual-GPU ComfyUI unit (v0.5.2): one process on **both** GPUs (`CUDA_VISIBLE_DEVICES=0,1` + `--cuda-device 0,1`), port `8190`; installed **enabled but stopped** |
 | `arthur-agent.service`| `/etc/systemd/system/arthur-agent.service` | agent unit, listens on `0.0.0.0:8766` |
 
-The agent is a **single-file Python 3 stdlib server** (no pip deps, v0.5.3).
+The agent is a **single-file Python 3 stdlib server** (no pip deps, v0.5.4).
 It exposes a *service registry* — services are defined once in config.json and
 instances are **computed**, never stored from requests. Request data is never
 interpolated into shell commands; the agent only ever runs `systemctl
@@ -55,7 +55,7 @@ subprocess timeouts. Every mutation appends one JSON line to the audit log.
   `probe_path` (`/system_stats` for ComfyUI, `/` for ai-toolkit).
 - **`active`** (service level) = any instance up.
 
-## Deploy (v0.5.3)
+## Deploy (v0.5.4)
 
 ```sh
 sudo install -m 755 arthur-agent.py /opt/arthur-agent/arthur-agent.py
@@ -66,7 +66,7 @@ sudo install -m 644 comfy@.service comfy-dual.service arthur-agent.service \
 sudo systemctl daemon-reload
 sudo systemctl enable comfy-dual.service   # enabled but NOT started
 sudo systemctl restart arthur-agent
-curl -s http://127.0.0.1:8766/health   # → {"ok": true, "version": "0.5.3"}
+curl -s http://127.0.0.1:8766/health   # → {"ok": true, "version": "0.5.4"}
 ```
 
 Token lives in `/etc/arthur-agent/token` (root 0600) and `/etc/arthur-agent/env`
@@ -124,14 +124,14 @@ Same as schema v2 plus the optional per-service `extra_instances` array
 
 ---
 
-## API surface (v0.5.3; plugin code targets exactly this)
+## API surface (v0.5.4; plugin code targets exactly this)
 
 `GET /health` is unauthenticated. **Everything under `/api/` requires
 `Authorization: Bearer <token>`.** All responses are JSON; errors are always
 `{"error": "message"}` with a fitting HTTP code.
 
 ### GET /health (no auth)
-`{"ok": true, "version": "0.5.3"}`
+`{"ok": true, "version": "0.5.4"}`
 
 ### GET /api/gpus
 Live GPU stats straight from `nvidia-smi --query-gpu=...` (5 s subprocess
@@ -151,7 +151,7 @@ Live state of everything:
 
 ```json
 {
-  "version": "0.5.3",
+  "version": "0.5.4",
   "host_uptime": 123456.7,
   "services": [
     {
@@ -202,15 +202,32 @@ Idempotent: ensures the service's **default instance is up** (`comfy-0` /
 ```
 
 ### POST /api/services/{svc}/stop[?force=1]
-Stops **ALL** active instances of the service. Without `?force=1` it refuses
-with **409** if any ComfyUI instance has a generation running
+Stops **ALL** active instances of the service, then **forgets** every spawned
+or non-default roster instance of that service automatically (v0.5.4):
+the same bookkeeping as the forget endpoint drops the spawn-state entries
+(config-declared extra instances are kept; the default index-0 instance is
+never forgotten). The service therefore shows **cleanly down** afterwards —
+only the default instance remains, listed as the single `up:false` row.
+Without `?force=1` it refuses with **409** if any ComfyUI instance has a
+generation running
 (`{"error": "generation running: comfy-0 (1); pass ?force=1 to stop anyway"}`).
 
 ```json
-{"action": "stop", "result": "stopped", "stopped": ["comfy-0", "comfy-1"], "service": {…}}
+{"action": "stop", "result": "stopped", "stopped": ["comfy-0", "comfy-1", "comfy-2"],
+ "forgotten": ["comfy-1", "comfy-2"], "service": {…}}
 ```
 
-`result` is `"already-stopped"` (with empty `stopped`) when nothing was active.
+- `stopped`: ids of the instances that were running and got stopped.
+- `forgotten`: ids whose listing was removed (spawn-state dropped) — every
+  spawned/non-default roster instance, running or merely remembered down.
+  The default instance (`comfy-0`) always stays listed (`up:false`).
+
+`result` is `"already-stopped"` (with empty `stopped`) when nothing was
+active; the forget-cleanup still runs in that case.
+
+The per-instance endpoint `POST /api/services/{svc}/instances/{id}/stop`
+keeps its old semantics — **no auto-forget**: a stopped single instance
+stays listed as `up:false`; users stop-and-keep one instance on purpose.
 
 ### POST /api/services/{svc}/instances  (spawn)
 Multi-instance services only:

@@ -3,7 +3,7 @@
 
 Single-file Python 3 stdlib HTTP server (zero pip deps). Runs on the LAN
 home server, token-gated, and drives a *service registry* of systemd units
-(v0.5.3):
+(v0.5.4):
 
   services (from /etc/arthur-agent/config.json):
     comfyui    multi-instance  → template unit comfy@{i}
@@ -28,7 +28,10 @@ API (see server/README-install.md for the full documented surface):
   GET  /api/services                            → registry + live state
   GET  /api/services/{svc}                      → one service: registry + live
   POST /api/services/{svc}/start                → ensure default instance up
-  POST /api/services/{svc}/stop[?force=1]       → stop ALL instances
+  POST /api/services/{svc}/stop[?force=1]       → stop ALL instances and forget
+                 every spawned / non-default roster instance (v0.5.4: the
+                 service then shows cleanly down — only the default index-0
+                 instance stays listed, as its single down row)
   POST /api/services/{svc}/instances            → spawn new instance (multi only)
   GET  /api/services/{svc}/instances            → instances of one service
   GET  /api/services/{svc}/instances/{id}/status
@@ -53,7 +56,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-AGENT_VERSION = "0.5.3"
+AGENT_VERSION = "0.5.4"
 
 CONFIG_PATH = os.environ.get("ARTHUR_AGENT_CONFIG", "/etc/arthur-agent/config.json")
 TOKEN_PATH = os.environ.get("ARTHUR_AGENT_TOKEN_FILE", "/etc/arthur-agent/token")
@@ -656,7 +659,10 @@ def action_start_service(svc, ip):
 
 def action_stop_service(svc, force, ip):
     """Stop ALL active instances of the service (graceful guard per instance,
-    skipped with ?force=1). Returns the list of stopped instance ids."""
+    skipped with ?force=1). Afterwards (v0.5.4) every spawned or non-default
+    roster instance is FORGOTTEN, reusing the forget bookkeeping: spawn-state
+    entries are dropped, config-declared extras are kept and the default
+    index-0 instance stays listed as the service's single down row."""
     insts = [make_instance(svc, i) for i in active_indexes(svc)]
     if not force:
         busy = []
@@ -678,10 +684,27 @@ def action_stop_service(svc, force, ip):
         else:
             stopped.append(inst["id"])
     if not errors:
+        # v0.5.4 stop-all semantics: also FORGET every spawned / non-default
+        # roster instance so the service ends up cleanly down in the UI.
+        # Same bookkeeping as the forget endpoint: drop spawn-state entries
+        # for every non-default index (remembered or running). Config-declared
+        # extras are kept (no config rewrite) and index 0 is never forgotten
+        # (the default instance stays listed as the single down row).
+        known = set(load_state().get(svc["id"], []))
+        running_idxs = {i["index"] for i in insts}
+        forgotten = []
+        for idx in sorted((known | running_idxs) - {0}):
+            iid = "%s-%d" % (svc["instance_prefix"], idx)
+            forget_spawn_index(svc["id"], idx)
+            audit(svc["id"], iid, "forget", "forgotten:spawn-state:auto-stop-all", ip)
+            forgotten.append(iid)
+        if 0 in known:  # index 0 is always listed anyway; empty the spawn state
+            forget_spawn_index(svc["id"], 0)
         result = "stopped:%s" % ",".join(stopped) if stopped else "already-stopped"
         audit(svc["id"], None, "service-stop", result, ip)
         return 200, {"action": "stop", "result": "stopped" if stopped
                      else "already-stopped", "stopped": stopped,
+                     "forgotten": forgotten,
                      "service": service_summary(svc)}
     audit(svc["id"], None, "service-stop", "partial:" +
           ";".join(e["id"] for e in errors), ip)
