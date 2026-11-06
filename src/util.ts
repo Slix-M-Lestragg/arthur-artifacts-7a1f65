@@ -42,6 +42,31 @@ export function truncate(text: string, n: number): string {
 }
 
 /**
+ * Normalize a user-entered server host into a bare hostname/IP suitable for
+ * building URLs like `http://${host}:${port}`. Real users type hosts as
+ * "http://10.0.0.5", "10.0.0.5/", " 10.0.0.5 " (or paste "10.0.0.5:8766") —
+ * any of those verbatim would produce e.g. 'http://http://10.0.0.5:8766' and
+ * silently break EVERY request. Strips: surrounding whitespace, a leading
+ * scheme (http://, https://, shorthand "scheme:/" forms), any accidental
+ * path/query/fragment, a stray trailing ":port" (the app adds its own port),
+ * and trailing dots/slashes/colons. Lowercases (hostnames are case-agnostic).
+ * Pure + dependency-free so node test scripts can unit-test it directly.
+ */
+export function normalizeHost(raw: string): string {
+	let host = String(raw ?? "").trim().toLowerCase();
+	const scheme = host.match(/^[a-z][a-z0-9+.-]*:\/?\/?/);
+	if (scheme) host = host.slice(scheme[0].length);
+	// Cut anything that snuck in after a path/query/fragment separator.
+	const cut = host.search(/[/?#]/);
+	if (cut !== -1) host = host.slice(0, cut);
+	// Drop a stray "host:port" suffix — the port is configured separately.
+	host = host.replace(/:\d+$/, "");
+	// Drop trailing separators/dots left from partial input.
+	host = host.replace(/[./:\-]+$/g, "");
+	return host;
+}
+
+/**
  * Tiny DOM helper — creates an element, applies classes/attributes/text and
  * appends children (strings become text nodes). Keeps UI code terse without
  * pulling in any framework.

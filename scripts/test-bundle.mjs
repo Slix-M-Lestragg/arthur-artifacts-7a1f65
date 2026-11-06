@@ -477,6 +477,76 @@ try {
 	assert(app.workspace.getLeavesOfType("arthur-dashboard").length === 1, "repeated click reuses the leaf (no duplicate)");
 	assert(app.workspace.getLeavesOfType("arthur-dashboard")[0]?.view === ribbonView, "repeated click keeps the same view instance");
 
+	// ---- 6. host normalizer unit tests (via the bundle export) ----------
+	console.log("== 6. host normalizer unit tests ==");
+	const norm = bundle.normalizeHost;
+	assert(typeof norm === "function", "bundle exports normalizeHost");
+	const cases = [
+		// [input, expected]
+		["100.90.92.1", "100.90.92.1"],
+		["http://100.90.92.1", "100.90.92.1"],
+		["https://100.90.92.1", "100.90.92.1"],
+		["HTTP://100.90.92.1/", "100.90.92.1"],
+		[" https://Home.Server.local/ ", "home.server.local"],
+		["100.90.92.1/", "100.90.92.1"],
+		["100.90.92.1:8766", "100.90.92.1"], // stray port suffix → dropped
+		["http:/10.0.0.5", "10.0.0.5"], // mangled scheme form
+		["https://10.0.0.5/dashboard?x=1", "10.0.0.5"],
+		["10.0.0.", "10.0.0"], // partially typed trailing dot
+		["", ""],
+		["   ", ""],
+		["MyHost.Example", "myhost.example"],
+	];
+	for (const [input, expected] of cases) {
+		assert(norm(input) === expected, `normalizeHost(${JSON.stringify(input)}) === ${JSON.stringify(expected)} (got ${JSON.stringify(norm(input))})`);
+	}
+
+	// ---- 7. saved host with a scheme normalizes through the full chain --
+	console.log("== 7. scheme-carrying host normalizes on load/save/build ==");
+	const saved = {
+		profiles: [{
+			name: "home server",
+			host: "  HTTPS://10.0.0.5/ ",
+			comfyPorts: "8188",
+			aiToolkitPort: 8675,
+			agentPort: 8766,
+			aiToolkitToken: "",
+			agentToken: "",
+		}],
+	};
+	plugin._data = saved; // stale pre-0.4.3-style data.json
+	await plugin.loadSettings();
+	assert(plugin.settings.profiles[0].host === "10.0.0.5", "loadSettings normalizes a scheme/slash/space host (got " + JSON.stringify(plugin.settings.profiles[0].host) + ")");
+	// And client construction from a raw host with a scheme stays clean:
+	plugin.settings.profiles[0].host = "http://10.0.0.9";
+	await plugin.saveSettings();
+	await sleep(700); // debounced rebuild
+	assert(plugin.clients.profile.host === "10.0.0.9", "rebuildRuntime snapshots a normalized host (got " + JSON.stringify(plugin.clients.profile.host) + ")");
+	assert(plugin.clients.agent.baseUrl === "http://10.0.0.9:8766", "agent baseUrl is well-formed (got " + plugin.clients.agent.baseUrl + ")");
+	assert(plugin.clients.aitoolkit.baseUrl === "http://10.0.0.9:8675", "aitoolkit baseUrl is well-formed");
+	assert(plugin.clients.comfy[0].baseUrl === "http://10.0.0.9:8188", "comfy baseUrl is well-formed");
+	assert(plugin._data?.profiles?.[0]?.host === "10.0.0.9", "saved settings persisted normalized (got " + JSON.stringify(plugin._data?.profiles?.[0]?.host) + ")");
+
+	// ---- 8. offline probes surface their last error + attempted URL -----
+	console.log("== 8. dashboard surfaces last errors + attempted host:port ==");
+	// The section-3 leaf was detached in section 5 — use the active dashboard view.
+	const dashLeaf = app.workspace.getLeavesOfType("arthur-dashboard")[0];
+	assert(!!dashLeaf?.view, "active dashboard leaf still attached for section 8");
+	ok = true;
+	try {
+		await dashLeaf.view.refreshData(); // stub requestUrl rejects → error paths
+	} catch (err) {
+		ok = false;
+		console.error(`    refreshData (all probes failing) threw: ${err?.stack ?? err}`);
+	}
+	let v8 = allText(dashLeaf.view.contentEl);
+	assert(/errors:\s+\S/.test(v8) === true, "topbar shows a one-line last-errors summary");
+	assert(v8.includes("10.0.0.9:8188") && v8.includes("10.0.0.9:8675") && v8.includes("10.0.0.9:8766"), "errors line names the attempted host:port per service");
+	assert(v8.includes("offline"), "errors line carries the network-level failure text");
+	const instMetaEl = dashLeaf.view.panels.get(8188)?.instMeta;
+	assert(instMetaEl?.getAttribute("title")?.includes("10.0.0.9:8188") === true, "offline card meta tooltip holds attempted host:port + error");
+	assert(instMetaEl?.getAttribute("title")?.includes("Bearer") === false, "tooltips carry no token material");
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();
@@ -492,4 +562,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-tooltips all clean");

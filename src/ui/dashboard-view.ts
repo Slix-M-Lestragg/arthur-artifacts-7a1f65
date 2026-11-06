@@ -138,13 +138,21 @@ interface AiToolkitQueueRow {
 	is_running: boolean;
 }
 
-/** Never-throw wrapper for best-effort probes. */
-async function safeCall<T>(fn: () => Promise<T>): Promise<T | null> {
+/** Never-throw wrapper for best-effort probes — keeps the error for diagnostics. */
+async function tryCall<T>(fn: () => Promise<T>): Promise<{ value: T | null; error: unknown }> {
 	try {
-		return await fn();
-	} catch {
-		return null;
+		return { value: await fn(), error: null };
+	} catch (err) {
+		return { value: null, error: err };
 	}
+}
+
+/**
+ * Offline tooltip text for a failed service probe: WHAT failed, WHY (last
+ * error) and WHERE (the host:port actually attempted — no token material).
+ */
+function errTooltip(hostPort: string, error: string | null): string {
+	return `last attempt ${hostPort} — ${error ?? "not responding"}`;
 }
 
 function newBtn(text: string): HTMLButtonElement {
@@ -185,6 +193,8 @@ export class ArthurDashboardView extends ItemView {
 	private profileEl!: HTMLElement;
 	private readonly topDots = new Map<string, HTMLElement>();
 	private updatedEl!: HTMLElement;
+	/** One-line last-errors summary (hidden while everything answers). */
+	private lastErrorsEl!: HTMLElement;
 	private bannerEl!: HTMLElement;
 	private trainingBodyEl!: HTMLElement;
 	private trainingQueueEl!: HTMLElement;
@@ -358,14 +368,25 @@ export class ArthurDashboardView extends ItemView {
 			}),
 		);
 
-		const healthOk = (await safeCall(() => clients.agent.health())) !== null;
-		let status: AgentStatus | null = null;
-		if (healthOk) status = await safeCall(() => clients.agent.status());
+		const health = await tryCall(() => clients.agent.health());
+		const healthOk = health.value !== null;
+		const statusRes = healthOk
+			? await tryCall(() => clients.agent.status())
+			: { value: null as AgentStatus | null, error: null as unknown };
+		const status: AgentStatus | null = statusRes.value;
 		this.agentDetail = {
 			healthOk,
 			statusOk: status !== null,
 			status,
-			error: healthOk ? (status ? null : "token rejected") : "unreachable",
+			error: !healthOk
+				? health.error
+					? describeError(health.error)
+					: "unreachable"
+				: status !== null
+					? null
+					: statusRes.error
+						? describeError(statusRes.error)
+						: "status failed (token rejected?)",
 		};
 
 		try {
@@ -448,6 +469,8 @@ export class ArthurDashboardView extends ItemView {
 			);
 			this.topDots.set(key, dot);
 		}
+		this.lastErrorsEl = top.createEl("span", { cls: "arthur-topbar-errors" });
+		this.lastErrorsEl.hide();
 		this.updatedEl = top.createEl("span", { cls: "arthur-topbar-updated" });
 
 		// banner slot (agent unreachable / token / version mismatch)
@@ -633,14 +656,65 @@ export class ArthurDashboardView extends ItemView {
 
 	private renderTopBar(profileName: string, host: string): void {
 		this.profileEl.setText(host ? `${profileName} @ ${host}` : profileName);
+		const clients = this.plugin.clients;
+		const hostPort = (port: number) => (host ? `${host}:${port}` : "(not configured)");
 		this.comfyPorts().forEach((port, i) => {
 			const dot = this.topDots.get(`c${port}`);
-			if (dot) setDot(dot, this.comfyDetail[i]?.online ?? null);
+			const d = this.comfyDetail[i] ?? null;
+			if (dot) {
+				setDot(dot, d?.online ?? null);
+				// Offline diagnostics: why the dot is red + the URL attempted.
+				dot.setAttribute(
+					"title",
+					(d?.online === false
+						? errTooltip(hostPort(port), d.error)
+						: `ComfyUI :${port} — ${d?.online === true ? "ok" : "waiting for data…"}`),
+				);
+			}
 		});
 		const aitk = this.topDots.get("aitk");
-		if (aitk) setDot(aitk, this.aiDetail.reachable);
+		const aiReachable = this.aiDetail.reachable ?? null;
+		if (aitk) {
+			setDot(aitk, aiReachable);
+			aitk.setAttribute(
+				"title",
+				aiReachable === false
+					? errTooltip(hostPort(clients?.profile.aiToolkitPort ?? 0), this.aiDetail.error)
+					: `ai-toolkit — ${aiReachable === true ? "ok" : "waiting for data…"}`,
+			);
+		}
 		const agent = this.topDots.get("agent");
-		if (agent) setDot(agent, this.agentDetail.statusOk ?? this.agentDetail.healthOk);
+		const agentOk = this.agentDetail.statusOk ?? this.agentDetail.healthOk;
+		if (agent) {
+			setDot(agent, agentOk);
+			agent.setAttribute(
+				"title",
+				agentOk === false
+					? errTooltip(hostPort(clients?.profile.agentPort ?? 0), this.agentDetail.error)
+					: `arthur-agent — ${agentOk === true ? "ok" : "waiting for data…"}`,
+			);
+		}
+
+		// One-line last-errors summary: every service that failed on the last
+		// tick with its last error + attempted host:port (no token material).
+		const errors: string[] = [];
+		this.comfyPorts().forEach((port, i) => {
+			const d = this.comfyDetail[i];
+			if (d?.online === false) errors.push(`ComfyUI ${hostPort(port)} — ${d.error ?? "not responding"}`);
+		});
+		if (this.aiDetail.reachable === false && this.aiDetail.error) {
+			errors.push(`ai-toolkit ${hostPort(clients?.profile.aiToolkitPort ?? 0)} — ${this.aiDetail.error}`);
+		}
+		if (this.agentDetail.error) {
+			errors.push(`agent ${hostPort(clients?.profile.agentPort ?? 0)} — ${this.agentDetail.error}`);
+		}
+		if (errors.length > 0) {
+			this.lastErrorsEl.setText(`errors: ${errors.join(" · ")}`);
+			this.lastErrorsEl.setAttribute("title", errors.join("\n"));
+			this.lastErrorsEl.show();
+		} else {
+			this.lastErrorsEl.hide();
+		}
 		this.updatedEl.setText(`upd ${fmtClockTime(this.lastTick)}`);
 	}
 
@@ -656,7 +730,7 @@ export class ArthurDashboardView extends ItemView {
 		const ad = this.agentDetail;
 		let message: string | null = null;
 		if (ad.healthOk === false) {
-			message = "agent unreachable — instance lifecycle disabled";
+			message = `agent unreachable (${ad.error ?? "offline"}) — instance lifecycle disabled`;
 		} else if (ad.healthOk === true && ad.statusOk === false) {
 			message = "agent token rejected — check Agent token in settings";
 		} else if (ad.status && ad.status.version !== AGENT_VERSION) {
@@ -684,13 +758,17 @@ export class ArthurDashboardView extends ItemView {
 	}
 
 	private renderInstances(): void {
+		const host = this.plugin.clients?.profile.host ?? "";
 		this.comfyPorts().forEach((port, i) => {
 			const panel = this.panels.get(port);
 			if (!panel) return;
 			const detail = this.comfyDetail[i] ?? null;
 			const inst = this.agentInstanceFor(port);
+			const hostPort = host ? `${host}:${port}` : "(not configured)";
+			const offlineTip = errTooltip(hostPort, detail?.error ?? null);
 
 			setDot(panel.instDot, detail?.online ?? null);
+			panel.instDot.setAttribute("title", detail?.online === false ? offlineTip : `ComfyUI :${port} HTTP — ok`);
 
 			if (inst) {
 				panel.instName.setText(inst.name ?? inst.id);
@@ -701,6 +779,7 @@ export class ArthurDashboardView extends ItemView {
 					`GPU ${inst.gpu ?? "?"} · agent: ${agentText}` +
 						(detail?.online === false ? " · HTTP not responding" : ""),
 				);
+				panel.instMeta.setAttribute("title", detail?.online === false ? offlineTip : "");
 			} else {
 				panel.instName.setText(`ComfyUI :${port}`);
 				panel.instMeta.setText(
@@ -711,6 +790,10 @@ export class ArthurDashboardView extends ItemView {
 							: detail?.online === false
 								? "not responding"
 								: "waiting for data…",
+				);
+				panel.instMeta.setAttribute(
+					"title",
+					this.agentDetail.statusOk === true ? "" : offlineTip,
 				);
 			}
 
@@ -725,6 +808,7 @@ export class ArthurDashboardView extends ItemView {
 				panel.vramLabel.setText(
 					detail?.online === false ? "VRAM n/a — not responding" : "VRAM ?",
 				);
+				panel.vramLabel.setAttribute("title", detail?.online === false ? offlineTip : "");
 			}
 
 			this.setLifecycleGating(panel);
@@ -732,6 +816,7 @@ export class ArthurDashboardView extends ItemView {
 	}
 
 	private renderGeneration(): void {
+		const host = this.plugin.clients?.profile.host ?? "";
 		this.comfyPorts().forEach((port, i) => {
 			const panel = this.panels.get(port);
 			if (!panel) return;
@@ -745,6 +830,12 @@ export class ArthurDashboardView extends ItemView {
 				: [];
 
 			setDot(panel.genDot, detail?.online ?? null);
+			panel.genDot.setAttribute(
+				"title",
+				detail?.online === false
+					? errTooltip(host ? `${host}:${port}` : "(not configured)", detail.error)
+					: `ComfyUI :${port} — ${detail?.online === true ? "ok" : "waiting for data…"}`,
+			);
 			panel.queueEl.setText(`${running.length} running · ${pending.length} pending`);
 
 			// running prompt info: queue entries are [exec, prompt_id, graph, extra, …]
@@ -817,9 +908,15 @@ export class ArthurDashboardView extends ItemView {
 	private renderTraining(): void {
 		const detail = this.aiDetail;
 		if (detail.reachable !== true) {
+			const host = this.plugin.clients?.profile.host ?? "";
+			const aiPort = this.plugin.clients?.profile.aiToolkitPort ?? 0;
 			this.trainingNoteEl.setText(
 				`ai-toolkit not responding — ${detail.error ?? "no data"}` +
 					(detail.error?.includes("401") === true ? " · check ai-toolkit token in settings" : ""),
+			);
+			this.trainingNoteEl.setAttribute(
+				"title",
+				`${host ? `${host}:${aiPort}` : "(not configured)"} — ${detail.error ?? "no data"}`,
 			);
 			this.trainingNoteEl.show();
 			this.trainingBodyEl.empty();

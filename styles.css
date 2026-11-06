@@ -70,6 +70,18 @@
 	font-variant-numeric: tabular-nums;
 }
 
+/* one-line last-errors diagnostics (offline probes + the URLs attempted) */
+.arthur-topbar-errors {
+	flex: 1 1 100%;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	opacity: 0.85;
+	color: var(--text-error, #e93147);
+	cursor: default;
+}
+
 /* ---------------------------------------------------------------- dots */
 
 .arthur-dot {

@@ -15,7 +15,11 @@ import {
 	VIEW_TYPE_ARTHUR_DASHBOARD,
 } from "./ui/dashboard-view";
 import { StatusBarPill, StatusBarState } from "./ui/status-bar";
-import { fmtBytes } from "./util";
+import { fmtBytes, normalizeHost } from "./util";
+
+// Re-exported for bundle smoke tests (scripts/test-bundle.mjs asserts the
+// normalizer directly against the compiled main.js export surface).
+export { normalizeHost };
 
 /** One server profile — host + which ports the services live on + tokens. */
 export interface ServerProfile {
@@ -125,7 +129,7 @@ class ArthurSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Host")
-			.setDesc("Hostname or IP of the home server.")
+			.setDesc("Hostname or IP of the home server (a scheme like http:// is stripped automatically).")
 			.addText((text) =>
 				text
 					.setValue(profile.host)
@@ -327,7 +331,11 @@ export default class ArthurPlugin extends Plugin {
 
 	/** Build API clients from the active profile; replaces any previous set. */
 	private rebuildClients(): void {
-		const profile = this.settings.profiles[0];
+		const raw = this.settings.profiles[0];
+		// Snapshot (never hand live settings objects into the runtime — text-field
+		// edits would mutate an in-flight profile) with the host normalized so
+		// every client URL is built from a clean scheme-free bare host.
+		const profile: ServerProfile = { ...raw, host: normalizeHost(raw.host) };
 		const comfyPorts = profile.comfyPorts
 			.split(",")
 			.map((p) => parseInt(p.trim(), 10))
@@ -463,16 +471,23 @@ export default class ArthurPlugin extends Plugin {
 		this.clients = null;
 	}
 
-	private async loadSettings(): Promise<void> {
+	async loadSettings(): Promise<void> {
 		const data = (await this.loadData()) as Partial<ArthurSettings> | null;
+		const profile = { ...DEFAULT_PROFILE, ...(data?.profiles?.[0] ?? {}) };
+		// Normalize on load too: a host saved by an older version (or by hand in
+		// data.json) could carry a scheme/slashes; never let it reach URL building.
+		profile.host = normalizeHost(profile.host);
 		this.settings = {
-			profiles: [{ ...DEFAULT_PROFILE, ...(data?.profiles?.[0] ?? {}) }],
+			profiles: [profile],
 			previewCount: clampInt(data?.previewCount, DEFAULT_SETTINGS.previewCount, 1, 12),
 			maxChartKeys: clampInt(data?.maxChartKeys, DEFAULT_SETTINGS.maxChartKeys, 1, 8),
 		};
 	}
 
 	async saveSettings(): Promise<void> {
+		// Persist a normalized host: whatever ended up in the field (typed with a
+		// scheme, trailing slash, spaces) never reaches disk or URL building.
+		this.settings.profiles[0].host = normalizeHost(this.settings.profiles[0].host);
 		await this.saveData(this.settings);
 		// Every live component (clients, pollers, dashboard, status pill)
 		// follows the new profile immediately, debounced across keystrokes.

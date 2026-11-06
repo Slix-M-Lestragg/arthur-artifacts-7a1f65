@@ -98,7 +98,11 @@ export class StatusBarPill {
 		this.el.setAttribute(
 			"aria-label",
 			`arthur ${state.profileName} @ ${state.host}` +
-				(state.lastUpdated ? ` · updated ${fmtClockTime(state.lastUpdated)}` : ""),
+				(state.lastUpdated ? ` · updated ${fmtClockTime(state.lastUpdated)}` : "") +
+				// All configured instances dead? Point at the dashboard diagnostics.
+				(state.gpus.length > 0 && state.gpus.every((g) => g.online === false)
+					? " · no response — open dashboard for last errors"
+					: ""),
 		);
 	}
 }
