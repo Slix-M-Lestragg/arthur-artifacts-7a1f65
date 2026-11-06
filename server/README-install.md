@@ -11,7 +11,7 @@ hosting ComfyUI + ai-toolkit), not the Obsidian plugin itself:
 | `comfy-dual.service`  | `/etc/systemd/system/comfy-dual.service` | dual-GPU ComfyUI unit (v0.5.2): one process on **both** GPUs (`CUDA_VISIBLE_DEVICES=0,1` + `--cuda-device 0,1`), port `8190`; installed **enabled but stopped** |
 | `arthur-agent.service`| `/etc/systemd/system/arthur-agent.service` | agent unit, listens on `0.0.0.0:8766` |
 
-The agent is a **single-file Python 3 stdlib server** (no pip deps, v0.5.2).
+The agent is a **single-file Python 3 stdlib server** (no pip deps, v0.5.3).
 It exposes a *service registry* — services are defined once in config.json and
 instances are **computed**, never stored from requests. Request data is never
 interpolated into shell commands; the agent only ever runs `systemctl
@@ -55,7 +55,7 @@ subprocess timeouts. Every mutation appends one JSON line to the audit log.
   `probe_path` (`/system_stats` for ComfyUI, `/` for ai-toolkit).
 - **`active`** (service level) = any instance up.
 
-## Deploy (v0.5.2)
+## Deploy (v0.5.3)
 
 ```sh
 sudo install -m 755 arthur-agent.py /opt/arthur-agent/arthur-agent.py
@@ -66,7 +66,7 @@ sudo install -m 644 comfy@.service comfy-dual.service arthur-agent.service \
 sudo systemctl daemon-reload
 sudo systemctl enable comfy-dual.service   # enabled but NOT started
 sudo systemctl restart arthur-agent
-curl -s http://127.0.0.1:8766/health   # → {"ok": true, "version": "0.5.2"}
+curl -s http://127.0.0.1:8766/health   # → {"ok": true, "version": "0.5.3"}
 ```
 
 Token lives in `/etc/arthur-agent/token` (root 0600) and `/etc/arthur-agent/env`
@@ -124,14 +124,14 @@ Same as schema v2 plus the optional per-service `extra_instances` array
 
 ---
 
-## API surface (v0.5.2; plugin code targets exactly this)
+## API surface (v0.5.3; plugin code targets exactly this)
 
 `GET /health` is unauthenticated. **Everything under `/api/` requires
 `Authorization: Bearer <token>`.** All responses are JSON; errors are always
 `{"error": "message"}` with a fitting HTTP code.
 
 ### GET /health (no auth)
-`{"ok": true, "version": "0.5.2"}`
+`{"ok": true, "version": "0.5.3"}`
 
 ### GET /api/gpus
 Live GPU stats straight from `nvidia-smi --query-gpu=...` (5 s subprocess
@@ -151,7 +151,7 @@ Live state of everything:
 
 ```json
 {
-  "version": "0.5.2",
+  "version": "0.5.3",
   "host_uptime": 123456.7,
   "services": [
     {
@@ -256,6 +256,30 @@ Graceful stop of ONE instance: **409** if a generation is running unless
 ### POST /api/services/{svc}/instances/{id}/restart[?force=1]
 Stop → wait port free (≤30 s) → start → wait port serving (≤90 s).
 → `{"action": "restart", "result": "restarted", "instance": {…}}`
+
+### POST /api/services/{svc}/instances/{id}/forget  (v0.5.3)
+Forget a **STOPPED** instance — remove it from the agent's world so it stops
+appearing in status/instance lists:
+
+```json
+{"action": "forget", "result": "forgotten", "id": "comfy-2"}
+```
+
+- **Spawned instance** (`comfy-2`): deleted from the spawn-state file
+  (`/var/lib/arthur-agent/instances.json`) — its index/port become free for
+  the next spawn.
+- **Config-declared extra instance** (e.g. `comfy-dual`): the entry is
+  removed from `/etc/arthur-agent/config.json` (atomic rewrite, file stays
+  valid, rest untouched) and the live registry hot-reloads — after a forget
+  the instance is gone until it is re-added to the config.
+- **Default instance** (index 0, `comfy-0` / `aitoolkit`) is never
+  forgettable → **409** `{"error": "default instance cannot be forgotten"}`.
+- **Running instance** → **409** `{"error": "instance is running"}` (stop it
+  first).
+- Unknown id → **404** `{"error": "unknown instance 'x' of service 'comfyui'"}`.
+- Single-instance services only ever have the default instance, so forget
+  always 409s there.
+- Every forget attempt (success or refusal) lands in the audit log.
 
 ### GET /api/log?offset=N
 Byte-offset tail of the JSONL audit log:

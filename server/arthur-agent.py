@@ -3,7 +3,7 @@
 
 Single-file Python 3 stdlib HTTP server (zero pip deps). Runs on the LAN
 home server, token-gated, and drives a *service registry* of systemd units
-(v0.5.2):
+(v0.5.3):
 
   services (from /etc/arthur-agent/config.json):
     comfyui    multi-instance  → template unit comfy@{i}
@@ -35,6 +35,10 @@ API (see server/README-install.md for the full documented surface):
   POST /api/services/{svc}/instances/{id}/start
   POST /api/services/{svc}/instances/{id}/stop[?force=1]
   POST /api/services/{svc}/instances/{id}/restart[?force=1]
+  POST /api/services/{svc}/instances/{id}/forget → forget a STOPPED instance
+                 (spawned: dropped from spawn-state, index/port free again;
+                 extras: entry removed from config.json, live rewrite;
+                 the default instance (index 0) is never forgettable)
   GET  /api/log?offset=N                        → JSONL audit tail
 """
 
@@ -49,7 +53,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-AGENT_VERSION = "0.5.2"
+AGENT_VERSION = "0.5.3"
 
 CONFIG_PATH = os.environ.get("ARTHUR_AGENT_CONFIG", "/etc/arthur-agent/config.json")
 TOKEN_PATH = os.environ.get("ARTHUR_AGENT_TOKEN_FILE", "/etc/arthur-agent/token")
@@ -67,6 +71,7 @@ PROBE_RE = re.compile(r"^/[A-Za-z0-9._~:/-]*$")
 
 _audit_lock = threading.Lock()
 _state_lock = threading.Lock()
+_config_lock = threading.Lock()  # config.json rewrites (instance forget)
 _spawn_lock = threading.Lock()   # spawns pick indexes one at a time
 _gpu_lock = threading.Lock()
 _config = None
@@ -221,6 +226,30 @@ def remember_instance(svc_id, idx):
         if idx not in idxs:
             idxs.append(idx)
         state[svc_id] = sorted(idxs)
+        try:
+            os.makedirs(os.path.dirname(STATE_PATH), mode=0o755, exist_ok=True)
+            tmp = STATE_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"known": state}, f)
+            os.replace(tmp, STATE_PATH)
+        except OSError:
+            pass
+
+
+def forget_spawn_index(svc_id, idx):
+    """Drop a spawned instance index from the persisted state so the stopped
+    instance disappears from listings and its index/port become free for a
+    future spawn. Best-effort."""
+    with _state_lock:
+        state = load_state()
+        idxs = state.get(svc_id)
+        if idxs is None:
+            return
+        kept = [i for i in idxs if i != idx]
+        if kept:
+            state[svc_id] = kept
+        else:
+            state.pop(svc_id, None)
         try:
             os.makedirs(os.path.dirname(STATE_PATH), mode=0o755, exist_ok=True)
             tmp = STATE_PATH + ".tmp"
@@ -686,6 +715,67 @@ def action_spawn(svc, ip):
                      "instance": instance_detail(inst)}
 
 
+def remove_extra_instance(svc_id, extra_id):
+    """Remove an extra instance entry from config.json on disk (atomic
+    rewrite, everything else preserved) and hot-reload the registry. Returns
+    True on success, False if the service/entry is not in the on-disk file.
+    Raises on unreadable/broken on-disk config."""
+    with _config_lock:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        svc = raw.get("services", {}).get(svc_id)
+        if not isinstance(svc, dict):
+            return False
+        extras = svc.get("extra_instances", [])
+        kept = [e for e in extras if not (isinstance(e, dict)
+                                          and str(e.get("id")) == extra_id)]
+        if len(kept) == len(extras):
+            return False
+        if kept:
+            svc["extra_instances"] = kept
+        else:
+            svc.pop("extra_instances", None)
+        tmp = CONFIG_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(raw, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, CONFIG_PATH)
+        global _config
+        _config = load_config()  # hot-reload; raises if the rewrite is invalid
+        return True
+
+
+def action_forget_instance(inst, ip):
+    """Forget a STOPPED instance (v0.5.3): spawned ones are dropped from the
+    spawn-state (their index/port are free again); config-declared extras are
+    removed from config.json (atomic rewrite + hot reload). The default
+    instance (index 0) is never forgettable; a running instance is refused."""
+    svc = inst["spec"]
+    if inst["index"] == 0:  # covers single-instance services too
+        audit(svc["id"], inst["id"], "forget", "refused-default", ip)
+        return 409, {"error": "default instance cannot be forgotten"}
+    if unit_is_active(inst["unit"]) or \
+            probe_port(inst["port"], svc["probe_path"]):
+        audit(svc["id"], inst["id"], "forget", "refused-running", ip)
+        return 409, {"error": "instance is running"}
+    if inst["index"] is None:
+        # config-declared extra instance: remove it from config.json
+        try:
+            changed = remove_extra_instance(svc["id"], inst["id"])
+        except (OSError, ValueError, TypeError) as exc:
+            audit(svc["id"], inst["id"], "forget", "failed:" + str(exc), ip)
+            return 500, {"error": "config rewrite failed: %s" % exc}
+        if not changed:  # pragma: no cover — inst came from the live config
+            audit(svc["id"], inst["id"], "forget", "not-in-config", ip)
+            return 404, {"error": "unknown instance %r of service %r"
+                                  % (inst["id"], svc["id"])}
+        audit(svc["id"], inst["id"], "forget", "forgotten:config", ip)
+    else:
+        forget_spawn_index(svc["id"], inst["index"])
+        audit(svc["id"], inst["id"], "forget", "forgotten:spawn-state", ip)
+    return 200, {"action": "forget", "result": "forgotten", "id": inst["id"]}
+
+
 # --------------------------------------------------------------------------
 # HTTP layer
 # --------------------------------------------------------------------------
@@ -862,7 +952,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(200, instance_detail(inst))
 
         m = re.match(r"^/api/services/([^/]+)/instances/([^/]+)"
-                     r"/(start|stop|restart)$", path)
+                     r"/(start|stop|restart|forget)$", path)
         if m and verb == "POST":
             svc = self.service(m.group(1))
             if svc is None:
@@ -871,11 +961,14 @@ class Handler(BaseHTTPRequestHandler):
             if inst is None:
                 return
             action = m.group(3)
-            code, body = (
-                action_start_instance(inst, self.client_ip()) if action == "start" else
-                action_stop_instance(inst, force, self.client_ip()) if action == "stop" else
-                action_restart_instance(inst, force, self.client_ip())
-            )
+            if action == "forget":
+                code, body = action_forget_instance(inst, self.client_ip())
+            else:
+                code, body = (
+                    action_start_instance(inst, self.client_ip()) if action == "start" else
+                    action_stop_instance(inst, force, self.client_ip()) if action == "stop" else
+                    action_restart_instance(inst, force, self.client_ip())
+                )
             return self.respond(code, body)
 
         if path == "/api/log" and verb == "GET":
