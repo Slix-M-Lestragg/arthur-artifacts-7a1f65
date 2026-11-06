@@ -20,10 +20,13 @@ Restart=on-failure
 RestartSec=3
 
 # Hardening. The agent runs as root because it controls system units; it
-# needs to write only its audit log under /var/log and only read /etc.
+# needs to write only its audit log under /var/log, only read /etc — and
+# rewrite its own config (config-extra forget → atomic tmp+rename in
+# /etc/arthur-agent), which ReadWritePaths carves out of ProtectSystem.
 NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=read-only
+ReadWritePaths=/etc/arthur-agent
 PrivateTmp=true
 
 [Install]
