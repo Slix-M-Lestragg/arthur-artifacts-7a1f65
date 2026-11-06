@@ -55,8 +55,15 @@ class StubEl extends StubNode {
 	createEl(tag, opts = {}) { return appendTo(this, new StubEl(tag), opts); }
 	setText(text) { this.textContent = text; return this; }
 	empty() { this.children = []; this._text = null; }
-	addClass(...cls) { for (const c of cls) if (!this._classes()?.includes(c)) this._classes().push(c); }
-	removeClass(...cls) { this._classes().list = this._classes()?.filter?.(c => !cls.includes(c)) ?? []; }
+	addClass(...cls) {
+		const set = new Set(this._classes() ?? []);
+		for (const c of cls) set.add(c);
+		this.className = [...set].join(" ");
+	}
+	removeClass(...cls) {
+		const removed = new Set(cls);
+		this.className = (this._classes() ?? []).filter((c) => !removed.has(c)).join(" ");
+	}
 	hasClass(cls) { return (this._classes() ?? []).includes(cls); }
 	_classes() { return (this.className ?? "").split(/\s+/).filter(Boolean); }
 	get className() { return this._className ?? ""; }
@@ -355,6 +362,25 @@ function findButtons(node, text, out = []) {
 	return out;
 }
 
+/** Find ONE element by attribute id inside a stub element tree. */
+function findById(node, id) {
+	if (node == null || typeof node !== "object") return null;
+	if ((node.attributes?.get?.("id") ?? null) === id) return node;
+	for (const child of node.children ?? []) {
+		const hit = findById(child, id);
+		if (hit) return hit;
+	}
+	return null;
+}
+
+/** Find all <a> elements inside a stub element tree. */
+function findLinks(node, out = []) {
+	if (node == null || typeof node !== "object") return out;
+	if (node.tagName === "A") out.push(node);
+	for (const child of node.children ?? []) findLinks(child, out);
+	return out;
+}
+
 // ------------------------------------------------------------------- run -----
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -446,7 +472,7 @@ try {
 	const viewText = allText(leaf.view.contentEl);
 	assert(ok, "onOpen with empty profile did not throw");
 	assert(viewText.includes("Instances"), "skeleton contains Instances header");
-	assert(viewText.includes("Generation"), "skeleton contains Generation header");
+	assert(viewText.includes("Job queue"), "skeleton contains Job queue header");
 	assert(viewText.includes("Training (ai-toolkit)"), "skeleton contains Training header");
 	assert(viewText.includes("not configured"), "empty profile paints 'not configured' state");
 	assert(leaf.view.contentEl.isShown(), "contentEl isShown() gate is true for the open view");
@@ -519,7 +545,7 @@ try {
 	assert(ribbonView?.isOpened === true, "internal open() ran → view reports open/onOpen() executed");
 	let v5 = allText(ribbonView?.contentEl);
 	assert(v5.includes("Instances"), "attached view renders Instances header");
-	assert(v5.includes("Generation"), "attached view renders Generation header");
+	assert(v5.includes("Job queue"), "attached view renders Job queue header");
 	assert(v5.includes("Training (ai-toolkit)"), "attached view renders Training header");
 
 	// Second click must reuse the existing leaf, never open a duplicate.
@@ -603,12 +629,12 @@ try {
 	const genDotEl = dashLeaf.view.panels.get(8188)?.genDot;
 	assert(genDotEl?.getAttribute("title")?.includes("10.0.0.9:8188") === true, "offline card tooltip holds attempted host:port + error");
 	assert(genDotEl?.getAttribute("title")?.includes("Bearer") === false, "tooltips carry no token material");
-	assert(allText(dashLeaf.view.instanceCardsEl).includes("unmanaged") === true, "agent-down instance rows render as unmanaged");
+	assert(allText(dashLeaf.view.unmanagedEl).includes("unmanaged") === true, "agent-down instance rows render as unmanaged");
 	const sbDotBtn = dashLeaf.view.serviceBar?.buttons.get("comfyui")?.btn;
 	assert(sbDotBtn?.disabled === true && sbDotBtn?.getAttribute("aria-label")?.includes("agent unreachable") === true, "agent-down service bar renders disabled buttons with the unreachable tooltip");
 
 	// ---- 9. agent v0.5.0 — service bar, dynamic instance panels, lifecycle flows
-	console.log("== 9. agent v0.5.0 service bar + dynamic instance panels ==");
+	console.log("== 9. agent v0.5.2 service bar + dynamic instance panels ==");
 	plugin.settings.profiles[0].comfyPorts = "8188,8189";
 	ok = true;
 	try {
@@ -622,22 +648,22 @@ try {
 
 	const jsonBody = (status, body) => ({ status, body });
 	const agentStatusBody = {
-		version: "0.5.0",
+		version: "0.5.2",
 		host_uptime: 123456.7,
 		services: [
 			{
 				id: "comfyui", name: "ComfyUI", active: true, multi_instance: true,
 				max_instances: 4, default_port: 8188, unit_template: "comfy@{i}",
 				instances: [
-					{ id: "comfy-0", service: "comfyui", name: "ComfyUI #0", port: 8188, gpu: 0, up: true, uptime: 169000.0 },
-					{ id: "comfy-1", service: "comfyui", name: "ComfyUI #1", port: 8189, gpu: 1, up: true, uptime: 168000.0 },
+					{ id: "comfy-0", service: "comfyui", name: "ComfyUI #0", port: 8188, gpu: 0, gpus: [0], up: true, uptime: 169000.0 },
+					{ id: "comfy-1", service: "comfyui", name: "ComfyUI #1", port: 8189, gpu: 1, gpus: [1], up: true, uptime: 168000.0 },
 				],
 			},
 			{
 				id: "aitoolkit", name: "AI Toolkit", active: true, multi_instance: false,
 				max_instances: 1, default_port: 8675, unit: "ai-toolkit.service",
 				instances: [
-					{ id: "aitoolkit", service: "aitoolkit", name: "AI Toolkit", port: 8675, gpu: null, up: true, uptime: 180000.0 },
+					{ id: "aitoolkit", service: "aitoolkit", name: "AI Toolkit", port: 8675, gpu: null, gpus: [], up: true, uptime: 180000.0 },
 				],
 			},
 		],
@@ -646,7 +672,7 @@ try {
 	// Default handler: agent handshake + status answer; everything else offline.
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.2" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/comfyui/start")) {
 			return jsonBody(200, { action: "start", result: "started", service: agentStatusBody.services[0] });
@@ -673,15 +699,17 @@ try {
 	assert(!!sb && sb.buttons.size === 2, "service bar renders one button per agent service");
 	assert(sbComfy?.btn.hasClass("arthur-svc-btn--active") === true, "active service button gets the accent/active state");
 	assert(sbAi?.btn.hasClass("arthur-svc-btn--active") === true, "second active service button gets the active state");
-	assert(sbComfy?.icon.getAttribute("data-icon") === "sparkles", "comfyui button uses the mapped service icon");
-	assert(sbAi?.icon.getAttribute("data-icon") === "brain-circuit", "aitoolkit button uses the mapped service icon");
+	assert((sbComfy?.icon.innerHTML ?? "").includes('viewBox="0 0 520 520"'), "comfyui button embeds the official ComfyUI mark");
+	assert((sbComfy?.icon.innerHTML ?? "").includes("#F2FF59"), "comfyui mark keeps its official colors");
+	assert((sbAi?.icon.innerHTML ?? "").includes('viewBox="0 0 1024 1024"'), "aitoolkit button embeds the official ai-toolkit mark");
+	assert((sbAi?.icon.innerHTML ?? "").includes("<circle"), "aitoolkit mark renders as inline svg");
 	assert(sbComfy?.kill.style.display === "" && sbAi?.kill.style.display === "", "active buttons expose the red kill zone");
 	assert(view9.panels.get(8188) != null && view9.panels.get(8189) != null, "generation panels attach to agent-discovered ports");
 	assert(view9.panels.get(8189)?.titleEl.textContent.includes("comfy-1") === true
 		&& view9.panels.get(8189)?.titleEl.textContent.includes("GPU 1") === true,
 		"panel title labels instance id + GPU");
-	assert(allText(view9.instanceCardsEl).includes("comfy-") === false, "instance rows show agent names, not raw comfy ports as titles");
-	assert(allText(view9.instanceCardsEl).includes("ComfyUI #1") === true, "instance rows render agent instance names");
+	assert(allText(view9.gridEl).includes("comfy-") === false, "grid rows show agent names, not raw comfy ports as titles");
+	assert(allText(view9.gridEl).includes("ComfyUI #1") === true, "grid rows render agent instance names");
 	assert(view9.trainingSvcEl.textContent.includes("agent: active") === true, "training header shows aitoolkit service state from the agent");
 
 	// B. OFFLINE service click → serviceStart + toast + re-poll
@@ -703,7 +731,7 @@ try {
 	StubNotice.reset();
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.2" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/comfyui/instances")) {
 			return jsonBody(201, {
@@ -723,7 +751,7 @@ try {
 	StubNotice.reset();
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.2" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/aitoolkit/instances")) {
 			return jsonBody(409, { error: "single-instance service" });
@@ -746,7 +774,7 @@ try {
 	calls9 = [];
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.2" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/stop")) {
 			return opts.url.includes("force=1")
@@ -784,7 +812,7 @@ try {
 	assert(sbComfy?.btn.hasClass("arthur-svc-btn--disabled") === true, "unreachable agent buttons get the disabled grey state");
 	assert(sbComfy?.btn.getAttribute("aria-label")?.includes("agent unreachable") === true, "unreachable buttons carry the agent-unreachable tooltip");
 	assert(view9.panels.get(8188)?.titleEl.textContent.includes("unmanaged") === true, "agent-down panels fall back to configured ports labeled unmanaged");
-	assert(allText(view9.instanceCardsEl).includes("unmanaged") === true, "agent-down instance rows render unmanaged");
+	assert(allText(view9.unmanagedEl).includes("unmanaged") === true, "agent-down instance rows render unmanaged");
 
 	// restore the default offline stub for any later pollution checks
 	httpResponder = null;
@@ -842,13 +870,13 @@ try {
 	console.log("== 11. down instances: no generation panels/ws for dead ports ===");
 	httpResponder = null;
 	agentStatusBody.services[0].instances = [
-		{ id: "comfy-0", service: "comfyui", name: "ComfyUI #0", port: 8188, gpu: 0, up: true, uptime: 169000.0 },
-		{ id: "comfy-1", service: "comfyui", name: "ComfyUI #1", port: 8189, gpu: 1, up: true, uptime: 168000.0 },
-		{ id: "comfy-2", service: "comfyui", name: "ComfyUI #2", port: 8190, gpu: null, up: false, uptime: null },
+		{ id: "comfy-0", service: "comfyui", name: "ComfyUI #0", port: 8188, gpu: 0, gpus: [0], up: true, uptime: 169000.0 },
+		{ id: "comfy-1", service: "comfyui", name: "ComfyUI #1", port: 8189, gpu: 1, gpus: [1], up: true, uptime: 168000.0 },
+		{ id: "comfy-2", service: "comfyui", name: "ComfyUI #2", port: 8190, gpu: null, gpus: [0], up: false, uptime: null },
 	];
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.2" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/instances/") && opts.url.endsWith("/start")) {
 			return jsonBody(200, { action: "start", result: "started", instance: { id: "comfy-2", up: true, port: 8190 } });
@@ -871,11 +899,11 @@ try {
 	assert(view11.panels.get(8188) != null && view11.panels.get(8189) != null, "generation panels attach only to up:true instances");
 	assert(view11.panels.get(8190) === undefined, "no generation panel for a down instance (up:false)");
 	assert(!view11.wss.has(8190), "no WS connection opened to a dead port");
-	let v11 = allText(view11.instanceCardsEl);
-	assert(v11.includes("ComfyUI #2"), "down instance renders as a row in the lifecycle section");
-	assert(v11.includes("down"), "down instance row carries the 'down' badge");
+	let v11 = allText(view11.gridEl);
+	assert(v11.includes("ComfyUI #2"), "down instance renders as a row in the instance grid");
+	assert(v11.includes("down"), "down instance grid row carries the 'down' badge");
 	// The down row's start button hits the per-instance start endpoint.
-	const downStartBtns = findButtons(view11.instanceCardsEl, "Start");
+	const downStartBtns = findButtons(view11.gridEl, "Start");
 	assert(downStartBtns.length >= 1, "down instance row exposes a start button");
 	calls9 = [];
 	for (const btn of downStartBtns) btn.handlers.get("click")[0]?.();
@@ -958,6 +986,189 @@ try {
 	assert(debugLines.some((l) => l.includes("arthur dashboard-detail") && l.includes("10.0.0.9:8766")),
 		"dashboard breadcrumb: per-service outcomes with host:port");
 
+
+	// ---- 14. instance grid: columns, placement, sort, quick stats, anchors,
+	// official-icon fallback, gpus-unreachable fallback ----------------------
+	console.log("== 14. GPU instance grid ==");
+	const json14 = (status, body) => ({ status, body });
+	const gridStatusBody = {
+		version: "0.5.2",
+		host_uptime: 123456.7,
+		services: [
+			{
+				id: "comfyui", name: "ComfyUI", active: true, multi_instance: true,
+				max_instances: 4, default_port: 8188, unit_template: "comfy@{i}",
+				instances: [
+					{ id: "comfy-0", service: "comfyui", name: "ComfyUI #0", port: 8188, gpu: 0, gpus: [0], up: true, uptime: 3600.0 },
+					{ id: "comfy-1", service: "comfyui", name: "ComfyUI #1", port: 8189, gpu: 1, gpus: [1], up: true, uptime: 120.0 },
+					{ id: "comfy-dual", service: "comfyui", name: "comfy-dual", port: 8190, gpu: null, gpus: [0, 1], up: false, uptime: null },
+				],
+			},
+		],
+	};
+	let comfyQueue = {
+		8188: { queue_running: [["exec", "prompt-abcdef-1234", { "5": { class_type: "KSampler" } }]], queue_pending: [] },
+		8189: { queue_running: [], queue_pending: [] },
+	};
+	let gpusBody = {
+		gpus: [
+			{ index: 0, name: "NVIDIA GeForce RTX 3060", mem_total_mb: 12288, mem_used_mb: 9420, util_percent: 36, temp_c: 41 },
+			{ index: 1, name: "NVIDIA GeForce RTX 3060", mem_total_mb: 12288, mem_used_mb: 1000, util_percent: 0, temp_c: 35 },
+		],
+		count: 2,
+	};
+	const aiJobsBody = {
+		jobs: [
+			{ id: "jobA", name: "LoRA run alpha", gpu_ids: "0,1", status: "running", step: 50, total_steps: 200, speed_string: "1.20it/s", queue_position: null, pid: 123 },
+			{ id: "jobB", name: "queued job", gpu_ids: "1", status: "queued", step: 0, total_steps: 100, speed_string: "", queue_position: 1, pid: null },
+		],
+	};
+	const comfyStats = { system: {}, devices: [{ name: "cuda", type: "cuda", vram_total: 12 * 1024 * 1024, vram_free: 4 * 1024 * 1024 }] };
+	httpResponder = (opts) => {
+		if (opts.url.endsWith("/health")) return json14(200, { ok: true, version: "0.5.2" });
+		if (opts.url.endsWith("/api/status")) return json14(200, gridStatusBody);
+		if (opts.url.endsWith("/api/gpus")) return json14(200, gpusBody);
+		if (opts.url.endsWith("/api/jobs")) return json14(200, aiJobsBody);
+		if (opts.url.endsWith("/api/queue")) return json14(200, { queues: [] });
+		if (opts.url.startsWith("http://10.0.0.9:8188/")) {
+			return opts.url.endsWith("/system_stats")
+				? json14(200, comfyStats)
+				: opts.url.endsWith("/queue")
+					? json14(200, comfyQueue[8188])
+					: null;
+		}
+		if (opts.url.startsWith("http://10.0.0.9:8189/")) {
+			return opts.url.endsWith("/system_stats")
+				? json14(200, comfyStats)
+				: opts.url.endsWith("/queue")
+					? json14(200, comfyQueue[8189])
+					: null;
+		}
+		return null;
+	};
+
+	app.workspace.detachLeavesOfType("arthur-dashboard");
+	let view14;
+	ok = true;
+	try {
+		await plugin.activateView();
+		view14 = app.workspace.getLeavesOfType("arthur-dashboard")[0]?.view;
+		await view14.refreshData();
+	} catch (err) {
+		ok = false;
+		console.error(`    grid view attach threw: ${err?.stack ?? err}`);
+	}
+	assert(ok, "grid view attach + refresh did not throw");
+	assert(view14.gridEl.isShown() === true, "grid is visible while the agent answers");
+	const gridRows14 = () =>
+		view14.gridEl.children.filter((c) => c.hasClass?.("arthur-grid-row"));
+	const gridHead14 = () =>
+		view14.gridEl.children.filter((c) => c.hasClass?.("arthur-grid-colhead"));
+	const rowByKey = (key) => gridRows14().find((r) => r.attributes.get("data-row-key") === key) ?? null;
+
+	// (a) one column per /api/gpus entry with header stats
+	assert(gridHead14().length === 2, "one column per /api/gpus entry (2 GPUs)");
+	assert(allText(gridHead14()[0]).includes("RTX 3060"), "column header shows the GPU name");
+	assert(allText(gridHead14()[0]).includes("9.2G/12G"), "column header shows VRAM used/total");
+	assert(allText(gridHead14()[0]).includes("util 36%") && allText(gridHead14()[0]).includes("41°"),
+		"column header shows utilization + temperature");
+
+	// (b) placement: single-GPU in its column, comfy-dual spans both
+	{
+		const r0 = rowByKey("inst:comfy-0");
+		const rd = rowByKey("inst:comfy-dual");
+		assert(!!r0 && r0.style.gridColumn === "1 / span 1", "single-GPU instance sits in its own column");
+		assert(!!rd && rd.style.gridColumn === "1 / span 2", "multi-GPU instance spans both columns");
+	}
+	// aitoolkit-like non-GPU services are not grid rows
+	assert(rowByKey("inst:aitoolkit") === null, "non-GPU service instance is not a grid row");
+
+	// (e) training rows per gpu_ids (before mutating queue state further)
+	{
+		const ra = rowByKey("job:jobA");
+		const rb = rowByKey("job:jobB");
+		assert(!!ra && ra.style.gridColumn === "1 / span 2", "running training job spans its gpu_ids columns (0,1)");
+		assert(!!rb && rb.style.gridColumn === "2 / span 1", "queued training job sits in its gpu column (1)");
+		assert(allText(ra).includes("50/200") && allText(ra).includes("1.20it/s"),
+			"training row shows step/total + speed_string quick stats");
+	}
+
+	// (c) sort: idle before running, running by run duration desc
+	comfyQueue[8189] = { queue_running: [["exec", "prompt-two", { "9": { class_type: "VAEDecode" } }]], queue_pending: [] };
+	await view14.refreshData();
+	// Deterministic durations: comfy-0 started 60s ago, comfy-1 10s ago.
+	view14.runStarts.set("run:8188", Date.now() - 60000);
+	view14.runStarts.set("run:8189", Date.now() - 10000);
+	view14.renderInstances();
+	{
+		const order = gridRows14().map((r) => r.attributes.get("data-row-key"));
+		const running = gridRows14()
+			.filter((r) => r.hasClass("arthur-grid-row--running"))
+			.map((r) => r.attributes.get("data-row-key"));
+		const idle = order.filter((k) => !running.includes(k));
+		assert(idle.every((k) => order.indexOf(k) < order.indexOf(running[0])),
+			`idle rows sort before running rows (idle=${idle.join(",")}, running=${running.join(",")})`);
+		assert(order.indexOf("inst:comfy-0") < order.indexOf("inst:comfy-1"),
+			"running rows ordered by run duration desc (60s before 10s)");
+		assert(order.indexOf("inst:comfy-1") < order.indexOf("job:jobA"),
+			"longer-running rows come first across instance + training rows");
+	}
+
+	// (d) running comfy row quick stats + 'view in queue' link
+	{
+		const r0 = rowByKey("inst:comfy-0");
+		assert(allText(r0).includes("prompt prompt-abc"), "running row shows the prompt short-id");
+		assert(allText(r0).includes("KSampler 3/20") === false, "no stale progress before the WS tick");
+		view14.wsProgress(8188, { value: 3, max: 20, node: "5" });
+		assert(allText(r0).includes("KSampler 3/20"), "WS progress tick updates the row's step progress + node label");
+		const links = findLinks(r0);
+		assert(links.length >= 1, "running row carries a 'view in queue' link");
+		assert(links.every((l) => l.textContent.includes("view in queue")), "link is labeled 'view in queue'");
+		const link = links[0];
+		assert(link.attributes.get("href") === "#arthur-queue-8188", "link points at the stable arthur-queue-<port> anchor");
+		const target = findById(view14.contentEl, "arthur-queue-8188");
+		assert(!!target, "anchor target (generation panel for port 8188) exists below the grid");
+		let scrolled = false;
+		target.scrollIntoView = () => { scrolled = true; };
+		link.handlers.get("click")[0]?.({ preventDefault() {} });
+		assert(scrolled === true, "clicking the link scrolls the dashboard to the job-queue panel");
+		assert(target.hasClass("arthur-flash") === true, "anchor target gets the flash highlight class");
+		// training anchor target exists too
+		assert(!!findById(view14.contentEl, "arthur-training-row-jobA"),
+			"training table rows carry the arthur-training-row-<id> anchors the grid links target");
+		const rlinks = findLinks(rowByKey("job:jobA"));
+		assert(rlinks.length >= 1 && rlinks[0].attributes.get("href") === "#arthur-training-row-jobA",
+			"running training row links at its own table-row anchor");
+	}
+
+	// (f) unknown service id falls back to the lucide server glyph
+	{
+		const unknownIcon = new StubEl("span");
+		bundle.injectIcon(unknownIcon, "not-a-service");
+		assert(unknownIcon.getAttribute("data-icon") === "server", "unknown service falls back to the lucide server icon");
+	}
+
+	// (g) /api/gpus unreachable → derived columns + 'gpu stats unavailable' note
+	{
+		gpusBody = { gpus: [], count: 0, error: "nvidia-smi failed" };
+		await view14.refreshData();
+		assert(view14.gridNoteEl._shown === true, "grid note appears when gpu stats are unavailable");
+		assert(allText(view14.gridNoteEl).includes("gpu stats unavailable") && allText(view14.gridNoteEl).includes("nvidia-smi failed"),
+			"grid note names the collector failure");
+		assert(view14.gridNoteEl.getAttribute("title").includes("10.0.0.9:8766"),
+			"grid note tooltip carries the attempted agent host:port");
+		assert(gridHead14().length === 2, "columns derived from instance gpus arrays when /api/gpus is down");
+		assert(allText(gridHead14()[0]).includes("GPU 0"), "derived columns label synthetic GPU indexes");
+		assert(allText(gridHead14()[0]).includes("VRAM ?"), "derived columns show placeholder stats");
+		assert(allText(view14.lastErrorsEl).includes("gpu stats 10.0.0.9:8766"),
+			"gpu collector failure joins the topbar last-errors line");
+	}
+
+	httpResponder = null;
+	StubNotice.reset();
+	await app.workspace.detachLeavesOfType("arthur-dashboard");
+
+	// ---- cleanup ----------------------------------------------------------
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();
@@ -973,4 +1184,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-tooltips / agent-v0.5.0-service-bar / hung-request-timeout-guard / down-instance-filtering / ws-close-connecting-swallowed / debug-breadcrumbs all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-tooltips / agent-v0.5.0-service-bar / hung-request-timeout-guard / down-instance-filtering / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+icons+fallback all clean");

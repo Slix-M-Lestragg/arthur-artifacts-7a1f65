@@ -20,15 +20,7 @@
 import { setIcon } from "obsidian";
 
 import type { AgentService } from "../api/agent";
-
-/** Lucide icon per known service id — extend when the registry grows. */
-const SERVICE_ICONS: Record<string, string> = {
-	comfyui: "sparkles",
-	aitoolkit: "brain-circuit",
-};
-/** Icon for service ids not in the map above. */
-const SERVICE_ICON_FALLBACK = "server";
-
+import { injectIcon } from "../icons";
 /**
  * Fallback service list for when the agent is unreachable (ids the currently
  * deployed agent registry knows; buttons render disabled).
@@ -149,7 +141,7 @@ export class ServiceBar {
 						? `${svc.name ?? svc.id} — active; click to spawn a new instance`
 						: `${svc.name ?? svc.id} — offline; click to start`,
 			);
-			this.applyIcon(entry, SERVICE_ICONS[svc.id] ?? SERVICE_ICON_FALLBACK);
+			this.applyIcon(entry);
 			// Kill zone exists only on active buttons.
 			entry.kill.style.display = active ? "" : "none";
 			entry.kill.setAttribute("aria-label", `Stop all ${svc.name ?? svc.id} instances`);
@@ -195,10 +187,10 @@ export class ServiceBar {
 		this.el.append(btn);
 	}
 
-	/** setIcon replaces the child svg — only refresh when the icon changed. */
-	private applyIcon(entry: ServiceButton, icon: string): void {
-		if (this.icons.get(entry.svc.id) === icon) return;
-		this.icons.set(entry.svc.id, icon);
-		setIcon(entry.icon, icon);
+	/** Inject the service's official inline-SVG mark (cached per id). */
+	private applyIcon(entry: ServiceButton): void {
+		if (this.icons.get(entry.svc.id) === entry.svc.id) return;
+		this.icons.set(entry.svc.id, entry.svc.id);
+		injectIcon(entry.icon, entry.svc.id);
 	}
 }

@@ -13,13 +13,15 @@ import { Poller } from "./poller";
 import { DETAIL_INTERVAL_MS } from "./util";
 import { ArthurDashboardView, VIEW_TYPE_ARTHUR_DASHBOARD } from "./ui/dashboard-view";
 import { StatusBarPill, StatusBarState } from "./ui/status-bar";
-import { fmtBytes, normalizeHost } from "./util";
+import { fmtBytes, fmtGigCompact, normalizeHost } from "./util";
 
 // Re-exported for bundle smoke tests (scripts/test-bundle.mjs asserts the
 // normalizer directly against the compiled main.js export surface; WsConnection
-// is asserted for the close-during-CONNECTING swallow). Not used at runtime.
+// is asserted for the close-during-CONNECTING swallow; injectIcon for the
+// lucide fallback on unknown service ids). Not used at runtime.
 export { normalizeHost };
 export { WsConnection, WsState } from "./connection";
+export { injectIcon } from "./icons";
 
 /** One server profile — host + which ports the services live on + tokens. */
 export interface ServerProfile {
@@ -85,6 +87,15 @@ const LIGHT_INTERVAL_MS = 12_000;
 /** Debounce window for runtime rebuilds triggered from settings edits. */
 const REBUILD_DEBOUNCE_MS = 400;
 
+/** One GPU from /api/gpus (agent v0.5.2) — live per-GPU VRAM/temp/util. */
+export interface GpuStat {
+	index: number;
+	usedMb: number | null;
+	totalMb: number | null;
+	tempC: number | null;
+	utilPercent: number | null;
+}
+
 /** Light-cycle snapshot — status bar input, kept for inspection/debugging. */
 export interface LightState {
 	gpus: Array<{
@@ -93,6 +104,8 @@ export interface LightState {
 		online: boolean | null;
 		freeBytes: number | null;
 	}>;
+	/** Live per-GPU stats from /api/gpus when available. */
+	gpuStats: GpuStat[];
 	queueDepth: number;
 	/** Most advanced RUNNING training job, or null. */
 	train: { name: string; step: number; total: number | null } | null;
@@ -259,6 +272,7 @@ export default class ArthurPlugin extends Plugin {
 	/** Light-cycle snapshot; fed to the status bar pill each tick. */
 	private lightState: LightState = {
 		gpus: [],
+		gpuStats: [],
 		queueDepth: 0,
 		train: null,
 		agentOnline: null,
@@ -419,11 +433,12 @@ export default class ArthurPlugin extends Plugin {
 	}
 
 	/**
-	 * Light cycle: agent status (best-effort), then per-instance system_stats
-	 * + queue for the comfy ports it discovers (the settings list is the
-	 * unreachable fallback), ai-toolkit jobs. Anything failing just means its
-	 * field stays null / offline. Paints the status bar pill. Runs every
-	 * LIGHT_INTERVAL_MS while the plugin is loaded, dashboard open or not.
+	 * Light cycle: agent status (best-effort), /api/gpus live GPU stats, then
+	 * per-instance system_stats + queue for the comfy ports it discovers (the
+	 * settings list is the unreachable fallback), ai-toolkit jobs. Anything
+	 * failing just means its field stays null / offline. Paints the status
+	 * bar pill. Runs every LIGHT_INTERVAL_MS while the plugin is loaded,
+	 * dashboard open or not.
 	 */
 	private async collectLightData(): Promise<void> {
 		const clients = this.clients;
@@ -437,9 +452,12 @@ export default class ArthurPlugin extends Plugin {
 			}
 		};
 
-		const [agentStatus, aiJobs] = await Promise.all([
+		// /api/gpus (agent v0.5.2) is a degradable read — when it fails the pill
+		// falls back to the per-instance system_stats free-bytes view.
+		const [agentStatus, aiJobs, gpuResp] = await Promise.all([
 			best(clients.agent.status()),
 			best(clients.aitoolkit.jobs()),
+			best(clients.agent.gpus()),
 		]);
 
 		// Comfy ports come from the agent's discovered instances when it
@@ -479,6 +497,13 @@ export default class ArthurPlugin extends Plugin {
 
 		this.lightState = {
 			gpus,
+			gpuStats: (gpuResp?.gpus ?? []).map((g) => ({
+				index: g.index,
+				usedMb: g.mem_used_mb,
+				totalMb: g.mem_total_mb,
+				tempC: g.temp_c,
+				utilPercent: g.util_percent,
+			})),
 			queueDepth: results.reduce(
 				(acc, r) =>
 					acc +
@@ -506,6 +531,7 @@ export default class ArthurPlugin extends Plugin {
 				online: g.online,
 				freeBytes: g.freeBytes,
 			})),
+			gpuStats: s.gpuStats,
 			queueDepth: s.queueDepth,
 			train: s.train ? { step: s.train.step, total: s.train.total } : null,
 			lastUpdated: s.lastUpdated,
@@ -590,6 +616,13 @@ export default class ArthurPlugin extends Plugin {
 					`${g.gpuIndex != null ? `G${g.gpuIndex}` : `P${g.port}`}: ${g.online ? fmtBytes(g.freeBytes) : "down"}`,
 			)
 			.join(", ");
-		return `gpus[${gpus}] queue=${s.queueDepth} agent=${String(s.agentOnline)}`;
+		const stats = s.gpuStats
+			.map(
+				(g) =>
+					`G${g.index} ${fmtGigCompact(g.usedMb)}/${fmtGigCompact(g.totalMb)}` +
+					(g.tempC != null ? ` ${Math.round(g.tempC)}°` : ""),
+			)
+			.join(", ");
+		return `gpus[${gpus}]${stats ? ` stats[${stats}]` : ""} queue=${s.queueDepth} agent=${String(s.agentOnline)}`;
 	}
 }

@@ -1,19 +1,32 @@
 /**
- * Arthur dashboard — desktop ItemView with four stacked sections:
+ * Arthur dashboard — desktop ItemView with stacked sections:
  *   0. SERVICES    — one pill button per agent service (src/ui/service-bar.ts):
  *                    click = start (inactive) / spawn (active), red kill zone
  *                    = stop ALL instances (confirm + force modals)
- *   1. INSTANCES   — agent-reported per-instance rows (id, port, GPU, up/
- *                    uptime, VRAM) with lifecycle buttons via arthur-agent;
- *                    when the agent is unreachable the settings comfyPorts
- *                    render as unmanaged rows without lifecycle controls
- *   2. GENERATION  — per ComfyUI port: queue depth, running prompt info,
- *                    live WS progress bar, job control buttons; ports come
- *                    from the agent's discovered instances (settings list is
- *                    the fallback only)
+ *   1. INSTANCES   — the GPU instance grid: one COLUMN per GPU (live stats
+ *                    from GET /api/gpus, agent v0.5.2), one ROW per GPU-owning
+ *                    instance (comfy, incl. multi-GPU spanning rows) and per
+ *                    queued/running ai-toolkit training job. Rows carry a
+ *                    state badge (running/idle/down), quick run stats for
+ *                    running rows (WS progress / job step+speed), lifecycle
+ *                    buttons for instances, and a 'view in queue ↓' link for
+ *                    running rows that scrolls to the matching job-queue
+ *                    anchor below. Idle rows sort first, running rows by run
+ *                    duration (longest first); run starts are tracked locally
+ *                    (WS execution_start / queue transition; agent uptime as
+ *                    fallback). /api/gpus unreachable → columns derived from
+ *                    the instance gpus arrays (settings fallback: 2) with a
+ *                    'gpu stats unavailable' note; agent fully down → grid
+ *                    hidden, the settings comfyPorts render as unmanaged rows.
+ *   2. JOB QUEUE   — per ComfyUI port: queue depth, running prompt info, live
+ *                    WS progress bar, job control buttons; ports come from
+ *                    the agent's discovered instances (settings list is the
+ *                    fallback only). Each card carries a stable anchor id
+ *                    (arthur-queue-<port>) the grid links point to.
  *   3. TRAINING    — ai-toolkit job table + per-GPU-set queue toggles, bound
  *                    to the settings aiToolkitPort; its header shows the
- *                    aitoolkit service active state from the agent
+ *                    aitoolkit service active state from the agent. Each job
+ *                    row carries the arthur-training-row-<id> anchor.
  *
  * The DOM skeleton (service bar, top bar, section boxes, cards, table header)
  * is built once in onOpen; poll ticks and WS events only update text,
@@ -42,13 +55,21 @@ import { ItemView, WorkspaceLeaf } from "obsidian";
 
 import type ArthurPlugin from "../main";
 import { AGENT_VERSION } from "../api/agent";
-import type { AgentInstance, AgentService, AgentStatus } from "../api/agent";
+import type { AgentGpu, AgentInstance, AgentService, AgentStatus } from "../api/agent";
 import type { AiToolkitJob } from "../api/aitoolkit";
 import type { ComfyUIClient, QueueResponse, SystemStats } from "../api/comfy";
 import { parseComfyBinaryFrame } from "../comfy-frame";
 import { WsConnection, WsState } from "../connection";
 import { renderLossChart } from "./loss-chart";
-import { el, DETAIL_INTERVAL_MS, fmtBytes, fmtClockTime, fmtDuration, truncate } from "../util";
+import {
+	el,
+	DETAIL_INTERVAL_MS,
+	fmtBytes,
+	fmtClockTime,
+	fmtDuration,
+	fmtGigCompact,
+	truncate,
+} from "../util";
 import { ArthurApiError, isTimeoutError } from "../api/transport";
 import { ServiceBar } from "./service-bar";
 import { confirmModal, describeError, run, toastErr, toastOk } from "./actions";
@@ -60,6 +81,49 @@ export const VIEW_TYPE_ARTHUR_DASHBOARD = "arthur-dashboard";
 const STUCK_AFTER_MS = 2 * DETAIL_INTERVAL_MS;
 /** Watchdog cadence: finer than the stuck threshold, coarse enough to be cheap. */
 const WATCHDOG_INTERVAL_MS = 1000;
+
+/** Column count fallback when /api/gpus is unreachable AND no instance/jobs
+ *  expose gpu placements (settings fallback: 2). */
+const FALLBACK_GPU_COLUMNS = 2;
+/** How long the grid's 'view in queue' target keeps the flash highlight. */
+const FLASH_MS = 1500;
+
+/** One GPU column of the instance grid. */
+interface GridCol {
+	index: number;
+	/** Short display name (vendor/brand prefixes stripped). */
+	name: string;
+	usedMb: number | null;
+	totalMb: number | null;
+	util: number | null;
+	tempC: number | null;
+}
+
+/** One sorted row of the instance grid (instance or training job). */
+interface GridRowSpec {
+	key: string;
+	kind: "instance" | "training";
+	title: string;
+	gpus: number[];
+	state: "running" | "idle" | "down";
+	badge: string;
+	meta: string;
+	/** Run duration in seconds (running rows; sort input + display). */
+	durationSec: number | null;
+	/** Comfy quick stats (prompt id + live WS progress) — running instances. */
+	prompt: { id: string | null; progress: GenProgress | null } | null;
+	/** Training quick stats line — running/queued jobs. */
+	statsText: string | null;
+	/** Training step % for the micro progress bar (null → no bar). */
+	statsPct: number | null;
+	/** DOM anchor the 'view in queue' link points at. */
+	anchor: string;
+	// lifecycle wiring (instance rows only)
+	svcId: string | null;
+	instId: string | null;
+	/** Instance port (instance rows only) — run tracking + panel lookup. */
+	port: number | null;
+}
 
 /** Per-section stuck-state bookkeeping ("agent" / "training" / "gen:<port>"). */
 interface SectionWatch {
@@ -178,6 +242,26 @@ async function tryCall<T>(fn: () => Promise<T>): Promise<{ value: T | null; erro
 	}
 }
 
+/** Short GPU display name — vendor/brand prefixes stripped. */
+function gpuShortName(name: string): string {
+	return String(name ?? "")
+		.replace(/^NVIDIA\s+(GeForce\s+|Tesla\s+|Quadro\s+|Radeon\s+)/i, "")
+		.trim() || "GPU";
+}
+
+/** Synthetic (stats-less) column for placements derived without /api/gpus. */
+function syntheticCol(index: number): GridCol {
+	return { index, name: `GPU ${index}`, usedMb: null, totalMb: null, util: null, tempC: null };
+}
+
+/** Parse an ai-toolkit gpu_ids string ("0" / "0,1") into usable indexes. */
+function parseGpuIds(raw: string): number[] {
+	return String(raw ?? "")
+		.split(",")
+		.map((part) => parseInt(part.trim(), 10))
+		.filter((n) => Number.isFinite(n) && n >= 0);
+}
+
 /**
  * Offline tooltip text for a failed service probe: WHAT failed, WHY (last
  * error) and WHERE (the host:port actually attempted — no token material).
@@ -229,7 +313,10 @@ export class ArthurDashboardView extends ItemView {
 	/** One-line last-errors summary (hidden while everything answers). */
 	private lastErrorsEl!: HTMLElement;
 	private bannerEl!: HTMLElement;
-	private instanceCardsEl!: HTMLElement;
+	/** Instance grid + its notes (replaced by unmanaged rows when agent down). */
+	private gridEl!: HTMLElement;
+	private gridNoteEl!: HTMLElement;
+	private unmanagedEl!: HTMLElement;
 	private trainingSvcEl!: HTMLElement;
 	private trainingBodyEl!: HTMLElement;
 	private trainingQueueEl!: HTMLElement;
@@ -249,11 +336,31 @@ export class ArthurDashboardView extends ItemView {
 		queues: [],
 		error: null,
 	};
+	/** Live GPU columns from GET /api/gpus (detail cycle). Empty list + error
+	 *  = collector unreachable/degraded → grid falls back to derived columns. */
+	private gpuDetail: { list: AgentGpu[]; error: string | null } = {
+		list: [],
+		error: null,
+	};
 	private lastTick: number | null = null;
 
 	// stuck-state watchdog — no section waits past ~2 detail cycles
 	private readonly sectionWatches = new Map<string, SectionWatch>();
 	private watchTimer: number | null = null;
+
+	/** Run-start tracking (local): WS execution_start / queue transition.
+	 *  Keyed `run:<port>` (comfy) / `job:<id>` (training); agent uptime is the
+	 *  fallback duration when no precise start is known. */
+	private readonly runStarts = new Map<string, number>();
+	/** Row keys seen in the previous build — distinguishes "already running at
+	 *  view open" (uptime fallback) from a fresh idle→running transition. */
+	private readonly runPrior = new Set<string>();
+	/** Cached progress widgets of live grid rows, keyed like runStarts —
+	 *  WS ticks repaint them without a grid rebuild. */
+	private readonly gridRows = new Map<
+		string,
+		{ progressFill: HTMLElement; progressLabel: HTMLElement }
+	>();
 
 	// training accordion state (job id → state; cleared on close/unload/job delete)
 	private readonly jobUi = new Map<string, JobPanelUi>();
@@ -348,6 +455,7 @@ export class ArthurDashboardView extends ItemView {
 		this.activePorts = [];
 		this.skeletonBuilt = false;
 		this.sectionWatches.clear();
+		this.clearRunTracking();
 		this.buildSkeleton(this.desiredPorts());
 		this.openWss();
 		this.plugin.dashboardView = this;
@@ -382,6 +490,7 @@ export class ArthurDashboardView extends ItemView {
 		this.closeWss();
 		this.clearAllPreviews();
 		this.clearTrainingState();
+		this.clearRunTracking();
 		if (this.plugin.dashboardView === this) this.plugin.dashboardView = null;
 		this.contentEl.empty();
 	}
@@ -433,14 +542,16 @@ export class ArthurDashboardView extends ItemView {
 		if (key === "agent") {
 			const port = this.plugin.clients?.profile.agentPort ?? 0;
 			const hostPort = host ? `${host}:${port}` : "(not configured)";
-			this.instanceCardsEl.empty();
-			this.instanceCardsEl.append(
+			this.gridEl.hide();
+			this.gridNoteEl.empty();
+			this.gridNoteEl.append(
 				el("p", {
 					cls: "arthur-note",
 					text: `arthur-agent — ${mark}`,
 					attrs: { title: errTooltip(hostPort, mark) },
 				}),
 			);
+			this.gridNoteEl.show();
 		} else if (key === "training") {
 			const port = this.plugin.clients?.profile.aiToolkitPort ?? 0;
 			const hostPort = host ? `${host}:${port}` : "(not configured)";
@@ -493,6 +604,7 @@ export class ArthurDashboardView extends ItemView {
 				queues: [],
 				error: "not configured",
 			};
+			this.gpuDetail = { list: [], error: null };
 			this.lastTick = null;
 			// The "not configured" placeholder is a settled state — no watch pending.
 			this.sectionWatches.clear();
@@ -501,7 +613,7 @@ export class ArthurDashboardView extends ItemView {
 			this.renderTopBar(profile.name, "");
 			this.renderBanner();
 			this.renderServiceBar();
-			this.renderInstanceRows();
+			this.renderInstances();
 			this.renderGeneration();
 			this.renderTraining();
 			return;
@@ -540,6 +652,26 @@ export class ArthurDashboardView extends ItemView {
 		// renderable states, so the agent section can never sit "loading" here.
 		this.watchSettle("agent");
 		const agentError = this.agentDetail.error;
+
+		// Live GPU stats (detail cycle refresh for the grid columns + header
+		// stats). Degradable by design: nvidia-smi failure → {gpus: [], error};
+		// a request failure → empty list + the transport error. Both surface as
+		// the grid's 'gpu stats unavailable' note + topbar errors entry.
+		let gpuFetchError: unknown = null;
+		this.gpuDetail = { list: [], error: null };
+		if (healthOk) {
+			const gRes = await tryCall(() => clients.agent.gpus());
+			if (gRes.value !== null) {
+				const list = gRes.value.gpus ?? [];
+				this.gpuDetail = {
+					list,
+					error: list.length === 0 ? (gRes.value.error ?? "no gpus reported") : null,
+				};
+			} else {
+				gpuFetchError = gRes.error;
+				this.gpuDetail = { list: [], error: describeError(gRes.error) };
+			}
+		}
 
 		// Settings may have changed, or the agent discovered/removed instances
 		// (spawn/stop) — resync the cached cards + WS sockets with the current
@@ -619,7 +751,7 @@ export class ArthurDashboardView extends ItemView {
 		this.renderTopBar(profile.name, profile.host);
 		this.renderBanner();
 		this.renderServiceBar();
-		this.renderInstanceRows();
+		this.renderInstances();
 		this.renderGeneration();
 		this.renderTraining();
 
@@ -636,6 +768,7 @@ export class ArthurDashboardView extends ItemView {
 				parts.push(`comfy ${this.outcomeFor(comfyErrors.get(p.port) ?? null)} ${hostPort(p.port)}`);
 			}
 			parts.push(`aitk ${this.outcomeFor(aiError)} ${hostPort(profile.aiToolkitPort)}`);
+			parts.push(`gpus ${this.outcomeFor(gpuFetchError)} ${hostPort(profile.agentPort)}`);
 			console.debug(
 				`arthur dashboard-detail ok ${Date.now() - tickStarted}ms · ${parts.join(" · ")}`,
 			);
@@ -715,18 +848,25 @@ export class ArthurDashboardView extends ItemView {
 		this.bannerEl = root.createEl("div", { cls: "arthur-banner" });
 		this.bannerEl.hide();
 
-		// instances section — rows refilled per tick (instances legitimately
-		// appear/disappear on spawn/stop)
+		// instances section — the GPU instance grid (columns per GPU, rows per
+		// instance/training job), refilled per tick; below it the unmanaged-row
+		// fallback container (only rendered while the agent is unreachable)
 		const instancesSection = root.createEl("div", { cls: "arthur-section" });
 		instancesSection.createEl("h4", { text: "Instances" });
-		this.instanceCardsEl = instancesSection.createEl("div", { cls: "arthur-cards" });
-		this.instanceCardsEl.append(
-			el("p", { cls: "arthur-note", text: "loading…" }),
-		);
+		this.gridEl = instancesSection.createEl("div", { cls: "arthur-grid" });
+		this.gridEl.append(el("p", { cls: "arthur-note", text: "loading…" }));
+		this.gridNoteEl = instancesSection.createEl("p", {
+			cls: "arthur-note",
+			text: "",
+		});
+		this.gridNoteEl.hide();
+		this.unmanagedEl = instancesSection.createEl("div", { cls: "arthur-cards" });
+		this.unmanagedEl.hide();
 
-		// generation section — one cached card per discovered/fallback port
+		// job queue section — one cached card per discovered/fallback port, each
+		// with the stable anchor id the grid's 'view in queue' links target
 		const genSection = root.createEl("div", { cls: "arthur-section" });
-		genSection.createEl("h4", { text: "Generation" });
+		genSection.createEl("h4", { text: "Job queue" });
 		const generationBox = genSection.createEl("div", { cls: "arthur-cards" });
 		for (const p of ports) {
 			generationBox.append(this.buildGenCard(p));
@@ -807,6 +947,7 @@ export class ArthurDashboardView extends ItemView {
 		});
 
 		const genCard = el("div", { cls: "arthur-card" });
+		genCard.setAttribute("id", `arthur-queue-${port}`);
 		genCard.append(
 			el("div", {
 				cls: "arthur-card-head",
@@ -902,6 +1043,11 @@ export class ArthurDashboardView extends ItemView {
 		if (this.agentDetail.error) {
 			errors.push(`agent ${hostPort(clients?.profile.agentPort ?? 0)} — ${this.agentDetail.error}`);
 		}
+		// /api/gpus collector failure only matters while the agent answers at all
+		// (grid columns fall back to derived placements otherwise).
+		if (this.gpuDetail.error && this.agentDetail.statusOk === true) {
+			errors.push(`gpu stats ${hostPort(clients?.profile.agentPort ?? 0)} — ${this.gpuDetail.error}`);
+		}
 		if (errors.length > 0) {
 			this.lastErrorsEl.setText(`errors: ${errors.join(" · ")}`);
 			this.lastErrorsEl.setAttribute("title", errors.join("\n"));
@@ -947,48 +1093,34 @@ export class ArthurDashboardView extends ItemView {
 		});
 	}
 
-	/** Instance rows, refilled per tick (spawns/stops change the set). */
-	private renderInstanceRows(): void {
-		const container = this.instanceCardsEl;
-		container.empty();
-		const host = this.plugin.clients?.profile.host ?? "";
-		const hostPort = (port: number) => (host ? `${host}:${port}` : "(not configured)");
-		const ad = this.agentDetail;
+	// ------------------------------------------------------------------
+	// instance grid — one column per GPU, rows per instance/training job
+	// ------------------------------------------------------------------
 
+	/** Sync the instances section: the grid while the agent answers, the
+	 *  unmanaged-row fallback when it doesn't (grid hidden entirely). */
+	private renderInstances(): void {
+		this.gridRows.clear();
+		const ad = this.agentDetail;
 		if (ad.statusOk === true && ad.status) {
-			for (const svc of ad.status.services) {
-				container.append(
-					el("h5", {
-						cls: "arthur-inst-group",
-						children: [
-							el("span", { text: svc.name ?? svc.id }),
-							el("span", {
-								cls: "arthur-card-meta",
-								text: `${svc.active ? "active" : "idle"} · ${svc.instances.length} instance${svc.instances.length === 1 ? "" : "s"}`,
-							}),
-						],
-					}),
-				);
-				if (svc.instances.length === 0) {
-					container.append(el("p", { cls: "arthur-note", text: "no instances" }));
-					continue;
-				}
-				for (const inst of svc.instances) {
-					// Down instances get a compact lifecycle row (down badge + start);
-					// only live instances get the full card (and a generation panel).
-					container.append(
-						inst.up
-							? this.buildInstanceRow(svc, inst, hostPort)
-							: this.buildDownInstanceRow(svc, inst, hostPort),
-					);
-				}
-			}
+			this.gridEl.show();
+			this.gridNoteEl.hide();
+			this.unmanagedEl.hide();
+			this.renderInstanceGrid();
 			return;
 		}
 
-		// Agent unreachable / token rejected — the settings port list renders
-		// unmanaged: HTTP state is visible, lifecycle controls are not offered.
+		// Agent unreachable / token rejected — the grid needs instance/placement
+		// data it cannot get: hide it and render the settings port list as
+		// unmanaged rows (HTTP state visible, no lifecycle controls).
+		this.gridEl.hide();
+		this.gridNoteEl.hide();
+		const host = this.plugin.clients?.profile.host ?? "";
+		const hostPort = (port: number) => (host ? `${host}:${port}` : "(not configured)");
 		const reason = ad.healthOk === false ? "unreachable" : "token rejected";
+		const container = this.unmanagedEl;
+		container.show();
+		container.empty();
 		container.append(
 			el("h5", {
 				cls: "arthur-inst-group",
@@ -1012,106 +1144,361 @@ export class ArthurDashboardView extends ItemView {
 		}
 	}
 
-	/** Compact row for a down instance (up:false, port dead): name, port,
-	 *  'down' badge and the per-instance start endpoint — no VRAM bar, no
-	 *  stop/restart (nothing to stop), no generation panel or WS chatter. */
-	private buildDownInstanceRow(
-		svc: AgentService,
-		inst: AgentInstance,
-		hostPort: (port: number) => string,
-	): HTMLElement {
-		const name = inst.name ?? inst.id;
-		const dot = el("span", { cls: "arthur-dot arthur-dot--red" });
-		dot.setAttribute("title", `agent: instance down · ${hostPort(inst.port)}`);
-		const badge = el("span", { cls: "arthur-badge arthur-badge--down", text: "down" });
-		const metaParts = [`:${inst.port}`];
-		if (inst.gpu != null) metaParts.push(`GPU ${inst.gpu}`);
-		const btnStart = newBtn("Start");
-		btnStart.addClass("arthur-btn--tiny");
-		btnStart.addEventListener("click", () =>
-			void this.instanceLifecycle(svc.id, inst.id, `start ${name}`, "start"),
-		);
-		const row = el("div", { cls: "arthur-card arthur-card--compact" });
-		row.append(
-			el("div", {
-				cls: "arthur-card-head",
-				children: [
-					dot,
-					el("span", { cls: "arthur-card-title", text: name }),
-					el("span", { cls: "arthur-card-meta", text: metaParts.join(" · ") }),
-					badge,
-				],
-			}),
-			el("div", { cls: "arthur-btn-row", children: [btnStart] }),
-		);
-		return row;
+	/** GPU columns: /api/gpus when available, else derived from the instance
+	 *  gpus arrays + training gpu_ids; final fallback = 2 synthetic columns. */
+	private gridColumns(): GridCol[] {
+		const live = this.gpuDetail.list;
+		if (live.length > 0) {
+			return live.map((g) => ({
+				index: g.index,
+				name: gpuShortName(g.name),
+				usedMb: g.mem_used_mb,
+				totalMb: g.mem_total_mb,
+				util: g.util_percent,
+				tempC: g.temp_c,
+			}));
+		}
+		const idx = new Set<number>();
+		const status = this.agentDetail.statusOk === true ? this.agentDetail.status : null;
+		for (const svc of status?.services ?? []) {
+			for (const inst of svc.instances) {
+				for (const g of inst.gpus ?? (inst.gpu != null ? [inst.gpu] : [])) {
+					if (g >= 0) idx.add(g);
+				}
+			}
+		}
+		for (const job of this.aiDetail.jobs) {
+			for (const g of parseGpuIds(job.gpu_ids)) idx.add(g);
+		}
+		if (idx.size === 0) {
+			return Array.from({ length: FALLBACK_GPU_COLUMNS }, (_, i) => syntheticCol(i));
+		}
+		return [...idx].sort((a, b) => a - b).map(syntheticCol);
 	}
 
-	/** One agent-reported instance card (lifecycle buttons + VRAM). */
-	private buildInstanceRow(svc: AgentService, inst: AgentInstance, hostPort: (port: number) => string): HTMLElement {
-		const detailIdx = this.activePorts.findIndex((p) => p.port === inst.port);
-		const detail = detailIdx >= 0 ? this.comfyDetail[detailIdx] ?? null : null;
-		const name = inst.name ?? inst.id;
-		const offlineTip = errTooltip(hostPort(inst.port), detail?.error ?? null);
+	/** Sorted grid rows: idle/down first, running last ordered by run duration
+	 *  (longest first). Run starts are tracked locally; the agent-reported
+	 *  uptime is the fallback duration for runs observed mid-flight. */
+	private buildGridRows(): GridRowSpec[] {
+		const rows: GridRowSpec[] = [];
+		const status = this.agentDetail.statusOk === true ? this.agentDetail.status : null;
+		const comfy = status?.services.find((s) => s.id === "comfyui") ?? null;
 
-		const dot = el("span", { cls: "arthur-dot arthur-dot--gray" });
-		setDot(dot, inst.up);
-		dot.setAttribute(
-			"title",
-			`agent: ${inst.up ? "instance up" : "instance down"}` +
-				(detail?.online === false ? ` · HTTP not responding (${offlineTip})` : ""),
-		);
-		const metaParts = [`:${inst.port}`];
-		if (inst.gpu != null) metaParts.push(`GPU ${inst.gpu}`);
-		metaParts.push(`agent: ${inst.up ? `up · uptime ${fmtDuration(inst.uptime ?? undefined)}` : "down"}`);
-		if (detail?.online === false) metaParts.push("HTTP not responding");
-		const meta = el("span", { cls: "arthur-card-meta", text: metaParts.join(" · ") });
-
-		const card = el("div", { cls: "arthur-card" });
-		card.append(el("div", { cls: "arthur-card-head", children: [dot, el("span", { cls: "arthur-card-title", text: name }), meta] }));
-
-		// VRAM bar — devices[0] (instances are single-GPU).
-		if (inst.service === "comfyui") {
-			const vramFill = el("div", { cls: "arthur-bar-fill" });
-			vramFill.style.width = "0%";
-			const vramLabel = el("span", { cls: "arthur-card-meta", text: "VRAM ?" });
-			const device = detail?.stats?.devices?.[0];
-			if (device && device.vram_total > 0) {
-				const used = Math.max(0, device.vram_total - device.vram_free);
-				vramFill.style.width = `${Math.round((100 * used) / device.vram_total)}%`;
-				vramLabel.setText(`VRAM ${fmtBytes(used)} / ${fmtBytes(device.vram_total)}`);
-			} else if (detail?.online === false) {
-				vramLabel.setText("VRAM n/a — not responding");
-				vramLabel.setAttribute("title", offlineTip);
+		/** Run bookkeeping for one row key: precise duration when the local
+		 *  tracker holds a start (WS execution_start / observed transition),
+		 *  else null — callers apply their fallback (agent uptime). */
+		const runDuration = (key: string, running: boolean): number | null => {
+			const previously = this.runPrior.has(key);
+			this.runPrior.add(key);
+			if (!running) {
+				this.runStarts.delete(key);
+				return null;
 			}
-			card.append(el("div", { cls: "arthur-bar", children: [vramFill] }), vramLabel);
+			if (!this.runStarts.has(key) && previously) {
+				// idle → running transition observed between builds — stamp it.
+				this.runStarts.set(key, Date.now());
+			}
+			const start = this.runStarts.get(key);
+			return start != null ? (Date.now() - start) / 1000 : null;
+		};
+
+		for (const inst of comfy?.instances ?? []) {
+			// Non-GPU instances (e.g. the aitoolkit UI service) are not grid
+			// rows — they live in the service bar.
+			const gpuList = inst.gpus?.length ? inst.gpus : inst.gpu != null ? [inst.gpu] : [];
+			if (gpuList.length === 0) continue;
+			const idx = this.activePorts.findIndex((p) => p.port === inst.port);
+			const detail = idx >= 0 ? this.comfyDetail[idx] ?? null : null;
+			const runningCount =
+				inst.up && Array.isArray(detail?.queue?.queue_running)
+					? detail!.queue!.queue_running.length
+					: 0;
+			const running = runningCount > 0;
+			const key = `run:${inst.port}`;
+			const duration = runDuration(key, running);
+			const panel = this.panels.get(inst.port);
+			rows.push({
+				key: `inst:${inst.id}`,
+				kind: "instance",
+				title: inst.name ?? inst.id,
+				gpus: gpuList,
+				state: !inst.up ? "down" : running ? "running" : "idle",
+				badge: !inst.up ? "down" : running ? "running" : "idle",
+				meta: `:${inst.port} · GPU ${gpuList.join(",")}`,
+				durationSec: duration ?? (running ? (inst.uptime ?? null) : null),
+				prompt: running
+					? {
+							id: panel?.runningPromptId ?? null,
+							progress: panel?.progress ?? null,
+						}
+					: null,
+				statsText: null,
+				statsPct: null,
+				anchor: `arthur-queue-${inst.port}`,
+				svcId: inst.service,
+				instId: inst.id,
+				port: inst.port,
+			});
 		}
 
-		// Lifecycle — the agent refuses destructive ops while a generation runs
-		// (409), which the handlers escalate to a force-confirmation modal.
-		const label = (action: string) => `${action} ${name}`;
+		// Training jobs (queued/running only) — placed in the column(s) of
+		// their gpu_ids; the aitoolkit SERVICE itself is not a grid row.
+		if (this.aiDetail.reachable === true) {
+			for (const job of this.aiDetail.jobs) {
+				if (job.status !== "running" && job.status !== "queued") continue;
+				const gpus = parseGpuIds(job.gpu_ids);
+				if (gpus.length === 0) continue;
+				const running = job.status === "running";
+				const key = `job:${job.id}`;
+				const duration = runDuration(key, running);
+				const pct =
+					job.total_steps != null && job.total_steps > 0 && job.step > 0
+						? Math.min(100, Math.round((100 * job.step) / job.total_steps))
+						: null;
+				rows.push({
+					key,
+					kind: "training",
+					title: truncate(job.name, 28),
+					gpus,
+					state: running ? "running" : "idle",
+					badge: job.status,
+					meta: `GPUs ${job.gpu_ids || "?"}`,
+					durationSec: duration,
+					prompt: null,
+					statsText:
+						`${job.step}/${job.total_steps ?? "?"} · ${job.speed_string || "—"}`,
+					statsPct: pct,
+					anchor: `arthur-training-row-${job.id}`,
+					svcId: null,
+					instId: null,
+					port: null,
+				});
+			}
+		}
+
+		const rank = (r: GridRowSpec) => (r.state === "running" ? 1 : 0);
+		rows.sort((a, b) => {
+			const byRank = rank(a) - rank(b);
+			if (byRank !== 0) return byRank;
+			if (rank(a) === 1) {
+				return (b.durationSec ?? 0) - (a.durationSec ?? 0);
+			}
+			return a.title.localeCompare(b.title);
+		});
+		return rows;
+	}
+
+	/** Paint the grid: column headers (live stats from /api/gpus) + row cells. */
+	private renderInstanceGrid(): void {
+		const cols = this.gridColumns();
+		const rows = this.buildGridRows();
+		const grid = this.gridEl;
+		this.gridNoteEl.hide();
+		grid.empty();
+		grid.style.gridTemplateColumns = `repeat(${cols.length}, minmax(0, 1fr))`;
+
+		// Column headers (grid row 1): name, VRAM used/total bar + text, util, temp.
+		cols.forEach((col, i) => {
+			const fill = el("div", { cls: "arthur-bar-fill" });
+			fill.style.width = "0%";
+			const parts: string[] = [];
+			if (col.usedMb != null && col.totalMb != null && col.totalMb > 0) {
+				fill.style.width = `${Math.min(100, Math.round((100 * col.usedMb) / col.totalMb))}%`;
+				parts.push(`VRAM ${fmtGigCompact(col.usedMb)}/${fmtGigCompact(col.totalMb)}`);
+			} else {
+				parts.push("VRAM ?");
+			}
+			if (col.util != null) parts.push(`util ${Math.round(col.util)}%`);
+			if (col.tempC != null) parts.push(`${Math.round(col.tempC)}°`);
+			const head = el("div", { cls: "arthur-grid-colhead" });
+			head.style.gridColumn = `${i + 1} / span 1`;
+			head.style.gridRow = "1";
+			head.append(
+				el("span", { cls: "arthur-grid-gpu-name", text: col.name }),
+				el("div", { cls: "arthur-bar", children: [fill] }),
+				el("span", { cls: "arthur-card-meta", text: parts.join(" · ") }),
+			);
+			grid.append(head);
+		});
+
+		// 'gpu stats unavailable' note — the agent answers but its nvidia-smi
+		// probe failed (or the collector timed out); columns are derived.
+		if (this.gpuDetail.list.length === 0) {
+			const host = this.plugin.clients?.profile.host ?? "";
+			const agentPort = this.plugin.clients?.profile.agentPort ?? 0;
+			this.gridNoteEl.setText(`gpu stats unavailable — ${this.gpuDetail.error ?? "no data"}`);
+			this.gridNoteEl.setAttribute(
+				"title",
+				errTooltip(host ? `${host}:${agentPort}` : "(not configured)", this.gpuDetail.error),
+			);
+			this.gridNoteEl.show();
+		}
+
+		rows.forEach((spec, r) => grid.append(this.gridRowEl(spec, cols, r)));
+	}
+
+	/** One row cell, spanning its GPU column(s). */
+	private gridRowEl(spec: GridRowSpec, cols: GridCol[], rowIdx: number): HTMLElement {
+		// Placement: lowest matching column index + a span over the columns the
+		// row's GPU list covers (multi-GPU rows visually bridge the columns).
+		let colStart = -1;
+		for (const g of spec.gpus) {
+			const i = cols.findIndex((c) => c.index === g);
+			if (i >= 0 && (colStart < 0 || i < colStart)) colStart = i;
+		}
+		if (colStart < 0) colStart = Math.max(0, cols.length - 1);
+		const span = Math.min(
+			cols.length - colStart,
+			Math.max(1, spec.gpus.length),
+		);
+
+		const cell = el("div", {
+			cls: `arthur-grid-row arthur-grid-row--${spec.state}`,
+			attrs: { "data-row-key": spec.key },
+		});
+		cell.style.gridColumn = `${colStart + 1} / span ${span}`;
+		cell.style.gridRow = `${rowIdx + 2}`;
+
+		const dotCls =
+			spec.state === "running"
+				? "arthur-dot arthur-dot--green"
+				: spec.state === "down"
+					? "arthur-dot arthur-dot--red"
+					: "arthur-dot arthur-dot--gray";
+		const head = el("div", { cls: "arthur-grid-row-head" });
+		head.append(
+			el("span", { cls: dotCls }),
+			el("span", { cls: "arthur-grid-title", text: spec.title }),
+			el("span", {
+				cls: "arthur-card-meta",
+				text:
+					spec.meta +
+					(spec.state === "running" && spec.durationSec != null
+						? ` · ${fmtDuration(spec.durationSec)} run`
+						: ""),
+			}),
+			el("span", { cls: `arthur-badge arthur-badge--${spec.state}`, text: spec.badge }),
+		);
+		cell.append(head);
+
+		if (spec.kind === "instance" && spec.svcId && spec.instId) {
+			cell.append(this.gridLifecycleButtons(spec));
+		}
+
+		// Quick stats + queue link for RUNNING rows.
+		if (spec.state === "running") {
+			if (spec.kind === "instance") {
+				const progressFill = el("div", { cls: "arthur-bar-fill" });
+				progressFill.style.width = "0%";
+				const progressLabel = el("span", { cls: "arthur-card-meta", text: "…" });
+				const p = spec.prompt;
+				const promptLine = el("span", {
+					cls: "arthur-card-meta",
+					text: p?.id ? `prompt ${truncate(p.id, 12)}` : "running (prompt id unknown)",
+				});
+				cell.append(promptLine, el("div", { cls: "arthur-bar", children: [progressFill] }), progressLabel);
+				this.gridRows.set(`run:${spec.port}`, { progressFill, progressLabel });
+				const panel = spec.port != null ? this.panels.get(spec.port) : null;
+				if (panel) this.paintProgress(panel.progress, progressFill, progressLabel);
+			} else {
+				const statsFill = el("div", { cls: "arthur-bar-fill" });
+				statsFill.style.width = spec.statsPct != null ? `${spec.statsPct}%` : "0%";
+				cell.append(
+					el("span", { cls: "arthur-card-meta", text: spec.statsText ?? "" }),
+					el("div", { cls: "arthur-bar", children: [statsFill] }),
+				);
+			}
+			const link = el("a", {
+				cls: "arthur-grid-link",
+				text: "view in queue ↓",
+				attrs: { href: `#${spec.anchor}` },
+			});
+			link.addEventListener("click", (e) => {
+				e.preventDefault();
+				this.flashAnchor(spec.anchor);
+			});
+			cell.append(link);
+		}
+		return cell;
+	}
+
+	/** Start/stop/restart for one grid instance row (down rows: start only) —
+	 *  reuses the agent lifecycle handlers with the existing confirm/force
+	 *  (409) escalation contract. */
+	private gridLifecycleButtons(spec: GridRowSpec): HTMLElement {
+		const instName = spec.title;
+		const op = (action: "start" | "stop" | "restart") =>
+			void this.instanceLifecycle(spec.svcId!, spec.instId!, `${action} ${instName}`, action);
 		const btnStart = newBtn("Start");
-		const btnStop = newBtn("Stop");
-		const btnRestart = newBtn("Restart");
-		btnStart.addEventListener("click", () => void this.instanceLifecycle(svc.id, inst.id, label("start"), "start"));
-		btnStop.addEventListener("click", () => {
-			confirmModal(
-				this.app,
-				"Stop instance",
-				`Gracefully stop ${name} on port ${inst.port}? The agent refuses while a generation is running.`,
-				() => void this.instanceLifecycle(svc.id, inst.id, label("stop"), "stop"),
+		btnStart.addClass("arthur-btn--tiny");
+		btnStart.addEventListener("click", () => op("start"));
+		const buttons: HTMLButtonElement[] = [btnStart];
+		if (spec.state !== "down") {
+			const btnStop = newBtn("Stop");
+			btnStop.addClass("arthur-btn--tiny");
+			btnStop.addEventListener("click", () =>
+				confirmModal(
+					this.app,
+					"Stop instance",
+					`Gracefully stop ${instName} on port ${spec.port}? The agent refuses while a generation is running.`,
+					() => op("stop"),
+				),
 			);
-		});
-		btnRestart.addEventListener("click", () => {
-			confirmModal(
-				this.app,
-				"Restart instance",
-				`Restart ${name} on port ${inst.port}? It is down until the port comes back up (~30s).`,
-				() => void this.instanceLifecycle(svc.id, inst.id, label("restart"), "restart"),
+			const btnRestart = newBtn("Restart");
+			btnRestart.addClass("arthur-btn--tiny");
+			btnRestart.addEventListener("click", () =>
+				confirmModal(
+					this.app,
+					"Restart instance",
+					`Restart ${instName}? It is down until the port comes back up (~30s).`,
+					() => op("restart"),
+				),
 			);
-		});
-		card.append(el("div", { cls: "arthur-btn-row", children: [btnStart, btnStop, btnRestart] }));
-		return card;
+			buttons.push(btnStop, btnRestart);
+		}
+		return el("div", { cls: "arthur-btn-row", children: buttons });
+	}
+
+	/** Clear local run tracking (view close/reopen). */
+	private clearRunTracking(): void {
+		this.runStarts.clear();
+		this.runPrior.clear();
+		this.gridRows.clear();
+	}
+
+	/** Scroll the job-queue anchor into view and flag it with the flash class. */
+	private flashAnchor(anchorId: string): void {
+		const target = this.findAnchor(anchorId);
+		if (!target) return;
+		if (typeof target.scrollIntoView === "function") {
+			target.scrollIntoView({ behavior: "smooth", block: "start" });
+		}
+		target.addClass("arthur-flash");
+		window.setTimeout(() => target.removeClass("arthur-flash"), FLASH_MS);
+	}
+
+	/**
+	 * Anchor lookup: the native document lookup first, falling back to a walk
+	 * of the view tree (minimal test-DOM stubs may not implement getElementById).
+	 */
+	private findAnchor(anchorId: string): HTMLElement | null {
+		if (typeof document.getElementById === "function") {
+			const hit = document.getElementById(anchorId);
+			if (hit) return hit;
+		}
+		const walk = (node: unknown): HTMLElement | null => {
+			const n = node as { attributes?: Map<string, string>; children?: unknown[] } | null;
+			if (!n || typeof n !== "object") return null;
+			if ((n.attributes as Map<string, string> | undefined)?.get("id") === anchorId) {
+				return n as unknown as HTMLElement;
+			}
+			for (const child of n.children ?? []) {
+				const hit = walk(child);
+				if (hit) return hit;
+			}
+			return null;
+		};
+		return walk(this.contentEl);
 	}
 
 	/** Unmanaged row for a settings port (no lifecycle controls). */
@@ -1231,14 +1618,31 @@ export class ArthurDashboardView extends ItemView {
 	}
 
 	private renderProgress(panel: GenPanel): void {
-		const p = panel.progress;
+		this.paintProgress(panel.progress, panel.progressFill, panel.progressLabel);
+	}
+
+	/** Paint one (bar-fill, label) progress widget pair — shared by the port
+	 *  panel and the live grid rows. */
+	private paintProgress(p: GenProgress | null, fill: HTMLElement, label: HTMLElement): void {
 		if (p && p.max > 0) {
-			panel.progressFill.style.width = `${Math.min(100, Math.round((100 * p.value) / p.max))}%`;
-			panel.progressLabel.setText(`${p.nodeLabel} ${p.value}/${p.max}`);
+			fill.style.width = `${Math.min(100, Math.round((100 * p.value) / p.max))}%`;
+			label.setText(`${p.nodeLabel} ${p.value}/${p.max}`);
 		} else {
-			panel.progressFill.style.width = "0%";
-			panel.progressLabel.setText("idle");
+			fill.style.width = "0%";
+			label.setText("idle");
 		}
+	}
+
+	/** WS tick → repaint the live grid row's progress widgets without a grid
+	 *  rebuild (no-op when the port currently has no live grid row). */
+	private updateGridProgress(port: number): void {
+		const widgets = this.gridRows.get(`run:${port}`);
+		if (!widgets) return;
+		this.paintProgress(
+			this.panels.get(port)?.progress ?? null,
+			widgets.progressFill,
+			widgets.progressLabel,
+		);
 	}
 
 	private renderTraining(): void {
@@ -1337,6 +1741,7 @@ export class ArthurDashboardView extends ItemView {
 
 		const row = el("tr", {
 			cls: `arthur-job--${job.status}`,
+			attrs: { id: `arthur-training-row-${job.id}` },
 			children: [
 				el("td", { text: name, attrs: { title: job.name } }),
 				el("td", { text: job.gpu_ids || "?" }),
@@ -1744,6 +2149,7 @@ export class ArthurDashboardView extends ItemView {
 		if (parsed) {
 			panel.progress = parsed;
 			this.renderProgress(panel);
+			this.updateGridProgress(port);
 		}
 	}
 
@@ -1807,12 +2213,19 @@ export class ArthurDashboardView extends ItemView {
 		const panel = this.panels.get(port);
 		if (!panel) return;
 		switch (type) {
+			case "execution_start":
+				// Run-start tracking: the precise local source for the grid's
+				// run-duration sort (falls back to the agent uptime otherwise).
+				this.runStarts.set(`run:${port}`, Date.now());
+				return;
 			case "execution_success":
 			case "execution_error":
 			case "execution_interrupted":
 				panel.progress = null;
 				panel.runningPromptId = null;
 				panel.promptGraph = null;
+				this.runStarts.delete(`run:${port}`);
+				this.updateGridProgress(port);
 				// Terminal event: generation is over — clear the preview strip too.
 				this.clearPreviews(port);
 				this.renderProgress(panel);

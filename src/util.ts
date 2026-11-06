@@ -37,6 +37,18 @@ export function fmtDuration(seconds: number | null | undefined): string {
 	return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
+/**
+ * Compact megabyte → "G" formatter for status-bar/pill labels:
+ * 9420 → "9.2G", 12288 → "12G", 512 → "0.5G", null → "?".
+ */
+export function fmtGigCompact(mb: number | null | undefined): string {
+	if (mb == null || !Number.isFinite(mb)) return "?";
+	const value = mb / 1024;
+	if (value >= 100) return `${Math.round(value)}G`;
+	const fixed = value.toFixed(1);
+	return `${fixed.endsWith(".0") ? fixed.slice(0, -2) : fixed}G`;
+}
+
 /** Format an epoch-milliseconds timestamp as a short local time, e.g. "14:05". */
 export function fmtClockTime(epochMs: number | null | undefined): string {
 	if (epochMs == null || !Number.isFinite(epochMs)) return "?";

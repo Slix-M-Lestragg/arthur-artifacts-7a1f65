@@ -1,6 +1,6 @@
 /**
  * Client for the arthur-agent companion service (server/README-install.md,
- * default port 8766) — API v0.5.0 service-registry surface. Services are
+ * default port 8766) — API v0.5.2 service-registry surface. Services are
  * systemd-managed entries from the agent's config; instances are computed,
  * never stored. Everything under /api/ is Bearer-token authenticated; the
  * agent may legitimately be unreachable (server down, systemd restart) —
@@ -21,6 +21,9 @@ export interface AgentInstance {
 	port: number;
 	/** GPU index the instance runs on; null for non-GPU services. */
 	gpu: number | null;
+	/** GPU index(es) the instance runs on (v0.5.2). Multi-GPU instances carry
+	 *  the full list; `gpu` is `gpus[0]` when the list has one element, else null. */
+	gpus?: number[];
 	/** systemd active AND the port answers the probe path. */
 	up: boolean;
 	uptime?: number | null;
@@ -49,6 +52,24 @@ export interface AgentStatus {
 	version: string;
 	host_uptime?: number;
 	services: AgentService[];
+}
+
+/** One GPU as reported by GET /api/gpus (nvidia-smi, v0.5.2). */
+export interface AgentGpu {
+	index: number;
+	name: string;
+	mem_total_mb: number;
+	mem_used_mb: number;
+	util_percent: number;
+	temp_c: number;
+}
+
+/** GET /api/gpus — degradable, not fatal: nvidia-smi failure → 200 with
+ *  {gpus: [], error}. */
+export interface AgentGpusResponse {
+	gpus: AgentGpu[];
+	count: number;
+	error?: string;
 }
 
 /** GET /api/services/{svc}/instances — one service's instance list. */
@@ -82,7 +103,7 @@ export interface AgentActionResult {
 }
 
 /** Agent version this plugin build was written against — mismatch → banner. */
-export const AGENT_VERSION = "0.5.0";
+export const AGENT_VERSION = "0.5.2";
 
 /** GET /health — unauthenticated {ok:true, version}; distinguishes "agent down" from "bad token". */
 export interface AgentHealth {
@@ -157,6 +178,11 @@ export class ArthurAgentClient {
 	/** GET /api/status — version + full service/instance snapshot (gates all lifecycle UI). */
 	async status(): Promise<AgentStatus> {
 		return this.call<AgentStatus>("/api/status");
+	}
+
+	/** GET /api/gpus — live nvidia-smi stats; degrades to {gpus: [], error} on failure. */
+	async gpus(): Promise<AgentGpusResponse> {
+		return this.call<AgentGpusResponse>("/api/gpus");
 	}
 
 	/** GET /api/services/{svc}/instances — one service's instance list. */
