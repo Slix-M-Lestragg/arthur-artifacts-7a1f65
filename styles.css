@@ -269,6 +269,31 @@
 	padding: 0.2em 0.4em;
 }
 
+/* GPU in use (an up instance or a busy ai-toolkit job occupies it): the
+   line renders red via the theme's error tokens — a WARNING only: on
+   multi-instance services the checkbox stays interactive, so a spawn can
+   still be pinned onto a busy GPU deliberately. */
+.arthur-gpu-opt--used {
+	background: color-mix(in srgb, var(--background-modifier-error) 14%, transparent);
+	color: var(--color-accent-error);
+}
+
+.arthur-gpu-opt--used:hover {
+	background: color-mix(in srgb, var(--background-modifier-error) 24%, transparent);
+	color: var(--color-accent-error);
+}
+
+/* single-instance services: the same GPU lines rendered READ-ONLY —
+   live usage context, no checkbox, no clicking (spawn never applies). */
+.arthur-gpu-opt--static {
+	cursor: default;
+	color: var(--text-normal);
+}
+
+.arthur-gpu-opt--static.arthur-gpu-opt--used {
+	color: var(--color-accent-error);
+}
+
 /* ---------------------------------------------------------------- top bar */
 
 .arthur-dashboard {

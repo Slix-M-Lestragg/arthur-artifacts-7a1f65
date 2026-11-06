@@ -8,12 +8,19 @@
  *                        click → start the default instance → toast + re-poll
  *   service active     → accent-colored button (sliced: right ~10% end is a full-
  *                        height red stop-all slice)
- *                        hover (multi-instance only) → compact GPU dropdown
- *                        ('Single GPU'/'Multi-GPUs' segmented mode toggle
- *                        (accent-highlighted, no checkbox glyph) + one
- *                        checkbox line per machine GPU with VRAM/util + the
- *                        instances occupying it); the choice persists per
- *                        service in the plugin settings (spawnGpuSel)
+ *                        hover (every registered service) → compact GPU
+ *                        dropdown; multi-instance: 'Single GPU'/'Multi-GPUs'
+ *                        segmented mode toggle (accent-highlighted, no
+ *                        checkbox glyph) + one checkbox line per machine GPU
+ *                        with VRAM/util, persisted per service in the plugin
+ *                        settings (spawnGpuSel); single-instance: the SAME
+ *                        GPU lines READ-ONLY (no toggle, no checkboxes —
+ *                        spawn never applies, it is a live GPU-usage
+ *                        overview)
+ *                        a GPU occupied by an up instance or a busy ai-toolkit
+ *                        job (running/queued/stopping) renders RED; hovering
+ *                        the line tooltips its occupants ('In use: …') or a
+ *                        free-VRAM summary ('Free — XG of 12G used · % · °')
  *                        main-area click → spawn a new instance (with the
  *                        checked GPU set as the request body; success: "Spawned
  *                        <name> instance on port X"; 409 single-instance /
@@ -25,7 +32,7 @@
  * Buttons are cached DOM nodes keyed by service id: state changes only toggle
  * classes/text/attributes — never a full rebuild.
  */
-import { setIcon } from "obsidian";
+import { setIcon, setTooltip } from "obsidian";
 
 import type { AgentService } from "../api/agent";
 import { injectIcon } from "../icons";
@@ -49,6 +56,12 @@ export interface ServiceBarState {
 	services: AgentService[];
 }
 
+/** One machine occupant of a GPU (a live detail line for the tooltip). */
+export interface GpuOccupant {
+	/** e.g. 'comfy-0 (ComfyUI #0, :8188)' or 'job-name (AI Toolkit, running)'. */
+	label: string;
+}
+
 /** GPU dropdown payload for one service — null → no dropdown for it. */
 export interface GpuMenuData {
 	/** Live GPUs from /api/gpus (stats null when the collector is degraded). */
@@ -58,9 +71,11 @@ export interface GpuMenuData {
 		usedMb: number | null;
 		totalMb: number | null;
 		util: number | null;
+		/** GPU temperature (°C; null when the collector is degraded). */
+		temp: number | null;
 	}>;
-	/** GPU index → instance ids currently occupying it (agent status). */
-	occupants: Map<number, string[]>;
+	/** GPU index → current occupants (up instances + busy ai-toolkit jobs). */
+	occupants: Map<number, GpuOccupant[]>;
 }
 
 export const MENU_CLOSE_DELAY_MS = 300;
@@ -73,7 +88,8 @@ export interface ServiceBarCallbacks {
 	onSpawn(svc: AgentService): void;
 	/** Kill zone clicked → confirm → stop ALL instances (force path inside). */
 	onKill(svc: AgentService): void;
-	/** Hover GPU-menu data (multi-instance services only); null → no dropdown. */
+	/** Hover GPU-menu data for a registered service (live GPUs + machine
+	 *  occupancy); null → no dropdown for it (agent unreachable/unknown id). */
 	gpuMenuData?(svcId: string): GpuMenuData | null;
 	/** Persisted spawn GPU selection of a service (default: []). */
 	gpuSelection?(svcId: string): number[];
@@ -99,8 +115,7 @@ export interface ServiceButton {
 	name: HTMLElement;
 	/** Red right-end slice (stop-all click target). */
 	kill: HTMLElement;
-	/** Hover GPU dropdown (created lazily on first open; null for
-	 *  single-instance services — they never get a dropdown). */
+	/** Hover GPU dropdown (created lazily on first open; null until opened). */
 	menu: HTMLElement | null;
 	/** Pending hover-intent close timer id (null when none pending). */
 	closeTimer: number | null;
@@ -251,14 +266,15 @@ export class ServiceBar {
 			e.stopPropagation();
 			if (entry.active) this.callbacks.onKill(entry.svc);
 		});
-		// Hover GPU dropdown (multi-instance services only; the data callback
-		// answering null keeps it closed). Hover-intent protocol: mouseenter of
-		// the wrap opens (and cancels any pending close); mouseleave schedules
-		// a ~300ms-delayed close that entering the wrap OR the dropdown cancels.
-		// The dropdown is a DOM child of the wrap and a CSS bridge zone
-		// (::before on .arthur-svc-menu) tiles the button→menu gap, so the
-		// pointer can travel onto the checkboxes without ever counting as a
-		// leave. Clicking the button still performs its start/spawn action —
+		// Hover GPU dropdown (every registered service; the data callback
+		// answering null keeps it closed — e.g. agent unreachable).
+		// Hover-intent protocol: mouseenter of the wrap opens (and cancels any
+		// pending close); mouseleave schedules a ~300ms-delayed close that
+		// entering the wrap OR the dropdown cancels. The dropdown is a DOM child
+		// of the wrap and a CSS bridge zone (::before on .arthur-svc-menu) tiles
+		// the button→menu gap, so the pointer can travel onto the dropdown
+		// without ever counting as a leave. Clicking the button still performs
+		// its start/spawn action —
 		// the dropdown is purely hover. JS mouseenter/mouseleave — the most
 		// robust host signal inside Obsidian's DOM (no :has() dependency).
 		wrap.addEventListener("mouseenter", () => this.enterHover(entry));
@@ -275,11 +291,10 @@ export class ServiceBar {
 		this.openMenu(entry);
 	}
 
-	/** Open the hover GPU dropdown under the service button (multi-instance
-	 *  services with available menu data only; content is rebuilt fresh on
-	 *  every open so the GPU stats/occupants are current). */
+	/** Open the hover GPU dropdown under the service button (any registered
+	 *  service with available menu data; content is rebuilt fresh on every
+	 *  open so the GPU stats/occupants are current). */
 	private openMenu(entry: ServiceButton): void {
-		if (!entry.svc.multi_instance) return;
 		const data = this.callbacks.gpuMenuData?.(entry.svc.id) ?? null;
 		if (!data) return;
 		this.cancelScheduledClose(entry);
@@ -391,9 +406,15 @@ export class ServiceBar {
 	}
 
 	/** One dropdown row: custom check glyph + label (clickable). */
-	private menuRow(label: string, checked: boolean, onClick?: () => void): HTMLElement {
+	private menuRow(
+		label: string,
+		checked: boolean,
+		used: boolean,
+		tooltip: string,
+		onClick?: () => void,
+	): HTMLElement {
 		const row = document.createElement("div");
-		row.className = "arthur-gpu-opt";
+		row.className = "arthur-gpu-opt" + (used ? " arthur-gpu-opt--used" : "");
 		row.setAttribute("role", "menuitemcheckbox");
 		row.setAttribute("aria-checked", String(checked));
 		const check = document.createElement("span");
@@ -403,22 +424,65 @@ export class ServiceBar {
 		text.className = "arthur-gpu-text";
 		text.textContent = label;
 		row.append(check, text);
+		setTooltip(row, tooltip);
 		if (onClick) row.addEventListener("click", () => onClick());
 		return row;
 	}
 
-	/** (Re)build the dropdown's rows: the 'Single GPU' / 'Multi-GPUs' mode
-	 *  toggle (segmented, accent-highlighted — no checkbox glyphs), a sep-
-	 *  arator, then one checkbox line per machine GPU
-	 *  ('GPU 0 — RTX 3060 · 9.4G/12G · 12%' + '(comfy-0)' occupant suffix).
-	 *  The mode highlight is DERIVED from the checked GPU set (0/1 checked =
-	 *  single mode, ≥2 = multi mode) so the two surfaces can never disagree. */
+	/** One READ-ONLY dropdown row (single-instance services): no check glyph,
+	 *  no click — a live GPU-usage overview line. Carries the same red
+	 *  used-state + occupant/free tooltip as the interactive rows. */
+	private staticRow(label: string, used: boolean, tooltip: string): HTMLElement {
+		const row = document.createElement("div");
+		row.className =
+			"arthur-gpu-opt arthur-gpu-opt--static" + (used ? " arthur-gpu-opt--used" : "");
+		const text = document.createElement("span");
+		text.className = "arthur-gpu-text";
+		text.textContent = label;
+		row.append(text);
+		setTooltip(row, tooltip);
+		return row;
+	}
+
+	/** Hover tooltip for one GPU line: the occupant list when ANY up instance
+	 *  or busy job sits on it ('In use: <first occupant>' + '\n+ <next>'),
+	 *  else the free-VRAM summary with the collector's live stats. */
+	private gpuTooltipText(gpu: GpuMenuData["gpus"][number], occupants: GpuOccupant[]): string {
+		if (occupants.length > 0) {
+			return `In use: ${occupants.map((o) => o.label).join("\n+ ")}`;
+		}
+		let first = "Free";
+		if (gpu.usedMb != null && gpu.totalMb != null) {
+			first = `Free — ${fmtGigCompact(gpu.usedMb)} of ${fmtGigCompact(gpu.totalMb)} used`;
+		}
+		const rest: string[] = [];
+		if (gpu.util != null) rest.push(`${Math.round(gpu.util)}%`);
+		if (gpu.temp != null) rest.push(`${Math.round(gpu.temp)}°`);
+		return [first, ...rest].join(" · ");
+	}
+
+	/** (Re)build the dropdown's rows: for MULTI-instance services the 'Single
+	 *  GPU' / 'Multi-GPUs' mode toggle (segmented, accent-highlighted — no
+	 *  checkbox glyphs), a separator, then one checkbox line per machine GPU
+	 *  ('GPU 0 — RTX 3060 · 9.4G/12G · 12%'). For SINGLE-instance services the
+	 *  toggle and checkboxes are OMITTED — the same lines render read-only as
+	 *  a live GPU-usage context (spawn never applies to them). A GPU occupied
+	 *  by an up instance or a busy ai-toolkit job renders RED (spawn may still
+	 *  be pinned onto it — the checkbox stays interactive); the occupant list
+	 *  (or free-VRAM summary) lives on the line's hover tooltip via
+	 *  setTooltip. The mode highlight is DERIVED from the checked GPU set
+	 *  (0/1 checked = single mode, ≥2 = multi mode) so the two surfaces can
+	 *  never disagree. */
 	private buildMenuContent(entry: ServiceButton, data: GpuMenuData): void {
 		const menu = entry.menu;
 		if (!menu) return;
 		const svcId = entry.svc.id;
 		menu.empty();
-		const sel = [...(this.callbacks.gpuSelection?.(svcId) ?? [])].sort((a, b) => a - b);
+		// The editable spawn-selection surface exists only where spawn applies.
+		const interactive = entry.svc.multi_instance === true;
+		const sel = interactive
+			? [...(this.callbacks.gpuSelection?.(svcId) ?? [])].sort((a, b) => a - b)
+			: [];
 		const multi = sel.length >= 2;
 		// The mode pair is a segmented toggle: exactly ONE side is accent-
 		// highlighted at a time, DERIVED from the checked GPU set (0/1 checked =
@@ -426,22 +490,24 @@ export class ServiceBar {
 		// GPU' clears every GPU check (back to the default modulo rotation),
 		// 'Multi-GPUs' checks ALL GPUs so multi actually becomes effective
 		// (a single checked GPU can never be a multi-GPU spawn).
-		const modeGroup = document.createElement("div");
-		modeGroup.className = "arthur-gpu-mode-group";
-		modeGroup.append(
-			this.modeRow("Single GPU", !multi, () => {
-				this.callbacks.setGpuSelection?.(svcId, []);
-				this.buildMenuContent(entry, data); // repaint the highlight
-			}),
-			this.modeRow("Multi-GPUs", multi, () => {
-				this.callbacks.setGpuSelection?.(svcId, data.gpus.map((g) => g.index));
-				this.buildMenuContent(entry, data); // repaint the highlight
-			}),
-		);
-		menu.append(modeGroup);
-		const sep = document.createElement("div");
-		sep.className = "arthur-svc-menu-sep";
-		menu.append(sep);
+		if (interactive) {
+			const modeGroup = document.createElement("div");
+			modeGroup.className = "arthur-gpu-mode-group";
+			modeGroup.append(
+				this.modeRow("Single GPU", !multi, () => {
+					this.callbacks.setGpuSelection?.(svcId, []);
+					this.buildMenuContent(entry, data); // repaint the highlight
+				}),
+				this.modeRow("Multi-GPUs", multi, () => {
+					this.callbacks.setGpuSelection?.(svcId, data.gpus.map((g) => g.index));
+					this.buildMenuContent(entry, data); // repaint the highlight
+				}),
+			);
+			menu.append(modeGroup);
+			const sep = document.createElement("div");
+			sep.className = "arthur-svc-menu-sep";
+			menu.append(sep);
+		}
 		if (data.gpus.length === 0) {
 			const note = document.createElement("span");
 			note.className = "arthur-svc-menu-note";
@@ -450,8 +516,9 @@ export class ServiceBar {
 			return;
 		}
 		for (const gpu of data.gpus) {
-			const checked = sel.includes(gpu.index);
 			const occ = data.occupants.get(gpu.index) ?? [];
+			const used = occ.length > 0;
+			const tooltip = this.gpuTooltipText(gpu, occ);
 			const stats: string[] = [];
 			if (gpu.usedMb != null && gpu.totalMb != null) {
 				stats.push(`${fmtGigCompact(gpu.usedMb)}/${fmtGigCompact(gpu.totalMb)}`);
@@ -459,20 +526,24 @@ export class ServiceBar {
 			if (gpu.util != null) stats.push(`${Math.round(gpu.util)}%`);
 			const label =
 				`GPU ${gpu.index} — ${gpuShortName(gpu.name)}`
-				+ (stats.length ? ` · ${stats.join(" · ")}` : "")
-				+ (occ.length ? ` (${occ.join(", ")})` : "");
-			menu.append(
-				this.menuRow(label, checked, () => {
-					const cur = [...(this.callbacks.gpuSelection?.(svcId) ?? [])];
-					const i = cur.indexOf(gpu.index);
-					if (i >= 0) cur.splice(i, 1);
-					else cur.push(gpu.index);
-					// Exactly one → single GPU spawn; ≥2 → multi-GPU spawn;
-					// none → default (no body, modulo rotation).
-					this.callbacks.setGpuSelection?.(svcId, cur);
-					this.buildMenuContent(entry, data); // repaint the marks
-				}),
-			);
+				+ (stats.length ? ` · ${stats.join(" · ")}` : "");
+			if (interactive) {
+				const checked = sel.includes(gpu.index);
+				menu.append(
+					this.menuRow(label, checked, used, tooltip, () => {
+						const cur = [...(this.callbacks.gpuSelection?.(svcId) ?? [])];
+						const i = cur.indexOf(gpu.index);
+						if (i >= 0) cur.splice(i, 1);
+						else cur.push(gpu.index);
+						// Exactly one → single GPU spawn; ≥2 → multi-GPU spawn;
+						// none → default (no body, modulo rotation).
+						this.callbacks.setGpuSelection?.(svcId, cur);
+						this.buildMenuContent(entry, data); // repaint the marks
+					}),
+				);
+			} else {
+				menu.append(this.staticRow(label, used, tooltip));
+			}
 		}
 	}
 

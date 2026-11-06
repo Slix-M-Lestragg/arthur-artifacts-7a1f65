@@ -237,6 +237,11 @@ const obsidianStub = {
 	setIcon: (el, name) => {
 		el.setAttribute("data-icon", name);
 	},
+	// Obsidian tooltip helper (service-bar GPU lines): records the content on
+	// the element so tests can assert the exact occupant/free tooltip text.
+	setTooltip: (el, tooltip) => {
+		el.setAttribute("data-tooltip", String(tooltip));
+	},
 	// Rejects exactly like an unreachable server — callers treat it offline.
 	// Sections can install a temporary httpResponder(opts) → {status, body}
 	// handler to simulate a live arthur-agent; no match → offline (default).
@@ -2274,7 +2279,10 @@ try {
 		const gpu0Row20 = gpuRows20().find((r) => (r.textContent ?? "").includes("GPU 0"));
 		assert(gpu0Row20 != null && gpu0Row20.textContent.includes("GPU 0 — RTX 3060 · 9.2G/12G · 36%"),
 			"GPU line lists the GPU with name + VRAM + utilization stats");
-		assert((gpu0Row20?.textContent ?? "").includes("(comfy-0)"), "GPU line carries the occupant suffix '(comfy-0)'");
+		assert(gpu0Row20.hasClass("arthur-gpu-opt--used"),
+			"GPU 0 (occupied by the up instance comfy-0) renders the red used-state class");
+		assert((gpu0Row20?.attributes.get("data-tooltip") ?? "") === "In use: comfy-0 (ComfyUI #0, :8188)",
+			"the GPU line's setTooltip names the occupant instance");
 		// mouse-leave does NOT close instantly anymore (hover intent): the
 		// dropdown survives the leave and closes only after the ~300ms delay.
 		sb20.wrap.handlers.get("mouseleave")[0]?.();
@@ -2376,12 +2384,24 @@ try {
 		}
 	}
 
-	// (f) single-instance services get NO dropdown.
+	// (f) single-instance services get the dropdown too — READ-ONLY live GPU
+	// context: no mode toggle, no checkboxes, nothing clickable.
 	{
 		const sbAi20 = view20.serviceBar.buttons.get("aitoolkit");
+		assert(sbAi20 !== undefined, "single-instance service button exists");
 		sbAi20.wrap.handlers.get("mouseenter")[0]?.();
-		assert(sbAi20?.menu == null, "single-instance service has NO GPU dropdown");
-		assert(view20.svcGpuMenuData("aitoolkit") === null, "the dropdown data gate rejects single-instance services");
+		assert(sbAi20?.menu != null && sbAi20.menu.hasClass("arthur-svc-menu--open"),
+			"single-instance service opens the GPU dropdown on hover");
+		assert(findByClass(sbAi20.menu, "arthur-gpu-mode").length === 0,
+			"single-instance dropdown has NO mode-toggle rows");
+		const aiRows20 = findByClass(sbAi20.menu, "arthur-gpu-opt");
+		assert(aiRows20.length > 0
+			&& aiRows20.every((r) => findByClass(r, "arthur-gpu-check").length === 0),
+			"single-instance GPU lines carry no checkbox glyph (read-only)");
+		assert(aiRows20.every((r) => (r.handlers.get("click") ?? []).length === 0),
+			"single-instance GPU lines are not clickable (spawn never applies)");
+		assert(view20.svcGpuMenuData("aitoolkit") !== null,
+			"the dropdown data gate accepts single-instance services");
 	}
 
 	// (g) hover-intent persistence — the v0.8.0 device bug (the dropdown hid
@@ -2471,6 +2491,147 @@ try {
 	StubNotice.reset();
 	await app.workspace.detachLeavesOfType("arthur-dashboard");
 
+	// ---- 21. v0.9.0: GPU dropdown for ALL services — machine occupancy from
+	// up instances + busy ai-toolkit jobs, red used-state, occupant tooltips.
+	console.log("== 21. all-service GPU dropdown: occupancy + red state + tooltips ==");
+	plugin.settings.spawnGpuSel = {}; // clean slate
+	const json21 = (status, body) => ({ status, body });
+	const gpuLine21 = (index, used, util, temp) => ({
+		index, name: "NVIDIA GeForce RTX 3060", mem_total_mb: 12288,
+		mem_used_mb: used, util_percent: util, temp_c: temp,
+	});
+	const inst21 = (id, port, gpus, up) => ({
+		id, service: "comfyui", name: id === "comfy-dual" ? "ComfyUI Dual" : `ComfyUI #0`,
+		port, gpu: gpus.length === 1 ? gpus[0] : null, gpus, up, uptime: up ? 100.0 : null, unit: `comfy@${id.slice(-1)}`,
+	});
+	const status21 = {
+		version: "0.6.0",
+		host_uptime: 1,
+		services: [
+			{
+				id: "comfyui", name: "ComfyUI", active: true, multi_instance: true,
+				max_instances: 4, default_port: 8188, unit_template: "comfy@{i}",
+				instances: [
+					inst21("comfy-0", 8188, [0], true),      // single up instance on GPU0
+					inst21("comfy-dual", 8190, [3, 4], true), // multi-GPU up instance → both marks
+					inst21("comfy-9", 8199, [2], false),      // DOWN instance must NOT mark GPU2
+				],
+				},
+				{
+					id: "aitoolkit", name: "AI Toolkit", active: true, multi_instance: false,
+					max_instances: 1, default_port: 8675, unit: "ai-toolkit.service",
+					instances: [{ id: "aitoolkit", service: "aitoolkit", name: "AI Toolkit", port: 8675, gpu: null, gpus: [], up: true, uptime: 10.0 }],
+				},
+			],
+		};
+	const gpus21 = {
+		gpus: [
+			gpuLine21(0, 9420, 36, 40),  // up instance comfy-0 (down-instance test uses GPU2)
+			gpuLine21(1, 8500, 90, 55),  // job-only GPU (busy)
+			gpuLine21(2, 100, 4, 38),    // truly free (down comfy-9 must not count)
+			gpuLine21(3, 11000, 97, 60), // comfy-dual
+			gpuLine21(4, 11500, 98, 61), // comfy-dual + queued job (both occupants)
+		],
+		count: 5,
+	};
+	const jobs21 = {
+		jobs: [
+			{ id: "j1", name: "inference_engine_gpu0", gpu_ids: "1", status: "running", step: 50, total_steps: 200, speed_string: "1.20it/s", queue_position: null, pid: 123 },
+			{ id: "j2", name: "sdxl_lora", gpu_ids: "1", status: "stopping", step: 10, total_steps: 100, speed_string: "", queue_position: null, pid: 456 },
+			{ id: "j3", name: "queued job", gpu_ids: "4", status: "queued", step: 0, total_steps: 100, speed_string: "", queue_position: 1, pid: null },
+		],
+	};
+	httpResponder = (opts) => {
+		if (opts.url.endsWith("/health")) return json21(200, { ok: true, version: "0.6.0" });
+		if (opts.url.endsWith("/api/status")) return json21(200, status21);
+		if (opts.url.endsWith("/api/gpus")) return json21(200, gpus21);
+		if (opts.url.endsWith("/api/jobs")) return json21(200, jobs21);
+		if (opts.url.endsWith("/api/queue")) return json21(200, { queues: [
+			{ id: 1, gpu_ids: "1", is_running: true },
+			{ id: 4, gpu_ids: "4", is_running: false },
+		] });
+		for (const port of [8188, 8190]) {
+			if (opts.url.startsWith(`http://10.0.0.9:${port}/`)) {
+				return opts.url.endsWith("/system_stats")
+					? json21(200, { system: {}, devices: [{ name: "cuda", type: "cuda", vram_total: 12 * 1024 * 1024, vram_free: 4 * 1024 * 1024 }] })
+					: json21(200, { queue_running: [], queue_pending: [] });
+			}
+		}
+		return null;
+	};
+	let view21;
+	ok = true;
+	try {
+		await plugin.activateView();
+		view21 = app.workspace.getLeavesOfType("arthur-dashboard")[0]?.view;
+		await view21.refreshData();
+	} catch (err) {
+		ok = false;
+		console.error(`    view21 attach threw: ${err?.stack ?? err}`);
+	}
+	assert(ok, "view21 attach + refresh did not throw");
+	{
+		const sbAi = view21.serviceBar.buttons.get("aitoolkit");
+		sbAi.wrap.handlers.get("mouseenter")[0]?.();
+		const menuAi = sbAi.menu;
+		assert(!!menuAi && menuAi.hasClass("arthur-svc-menu--open"),
+			"(a) the single-instance service opens the hover dropdown");
+		const gpuRows21 = () => findByClass(menuAi, "arthur-gpu-opt");
+		assert(findByClass(menuAi, "arthur-gpu-mode").length === 0
+			&& findByClass(menuAi, "arthur-gpu-check").length === 0
+			&& gpuRows21().length === 5,
+			"(a) no mode toggle, no checkboxes — 5 read-only GPU lines");
+		const rowOf = (i) => gpuRows21().find((r) => (r.textContent ?? "").includes(`GPU ${i} —`));
+
+		// (b) GPU used by an UP instance → red.
+		assert(rowOf(0)?.hasClass("arthur-gpu-opt--used") === true,
+			"(b) GPU 0 used by up instance comfy-0 renders the red used-state class");
+
+		// (c) GPU used ONLY by a running ai-toolkit job → red + the job named.
+		assert(rowOf(1)?.hasClass("arthur-gpu-opt--used") === true,
+			"(c) GPU 1 used only by busy ai-toolkit jobs renders the red used-state class");
+		assert((rowOf(1)?.attributes.get("data-tooltip") ?? "").includes("inference_engine_gpu0 (AI Toolkit, running)"),
+			"(c) GPU 1's tooltip names the running job");
+
+		// (d) both an instance and a job occupy → both lines listed.
+		assert((rowOf(4)?.attributes.get("data-tooltip") ?? "")
+			=== "In use: comfy-dual (ComfyUI Dual, :8190)\n+ queued job (AI Toolkit, queued)",
+			"(d) tooltip lists the instance first, then the job ('In use: …\n+ …')");
+
+		// (e) free GPU tooltip shows stats (down instances do NOT occupy).
+		assert(rowOf(2)?.hasClass("arthur-gpu-opt--used") === false,
+			"(g) a DOWN instance (comfy-9 on GPU 2) does NOT mark the GPU used");
+		assert((rowOf(2)?.attributes.get("data-tooltip") ?? "") === "Free — 0.1G of 12G used · 4% · 38°",
+			"(e) free GPU tooltip shows 'Free — XG of 12G used · % · °'");
+
+		// (f) multi-GPU up instance marks BOTH its GPUs used.
+		assert(rowOf(3)?.hasClass("arthur-gpu-opt--used") === true
+			&& rowOf(4)?.hasClass("arthur-gpu-opt--used") === true,
+			"(f) the multi-GPU instance comfy-dual marks BOTH GPUs 3 and 4 used");
+
+		// multi-instance service dropdown unchanged: red line + still-interactive
+		// checkbox (the user MAY pin a spawn onto a busy GPU — visual warning).
+		sbAi.wrap.handlers.get("mouseleave")[0]?.();
+		const sbC = view21.serviceBar.buttons.get("comfyui");
+		sbC.wrap.handlers.get("mouseenter")[0]?.();
+		const cRows = findByClass(sbC.menu, "arthur-gpu-opt");
+		const busyRow = cRows.find((r) => (r.textContent ?? "").includes("GPU 1 —"));
+		assert(busyRow?.hasClass("arthur-gpu-opt--used") === true
+			&& findByClass(busyRow, "arthur-gpu-check").length === 1
+			&& (busyRow.handlers.get("click") ?? []).length === 1,
+			"multi-instance dropdown: busy GPU line is red yet keeps its interactive checkbox");
+		busyRow.handlers.get("click")[0]?.();
+		assert((plugin.settings.spawnGpuSel?.comfyui ?? []).join(",") === "1",
+			"checking a BUSY GPU persists the spawn selection (pin-on-busy stays possible)");
+		assert(busyRow.hasClass("arthur-gpu-opt--used") === true,
+			"the pinned-busy line KEEPS its red warning while checked");
+		sbC.wrap.handlers.get("mouseleave")[0]?.();
+	}
+	view21.pluginStarts.clear();
+	httpResponder = null;
+	StubNotice.reset();
+	await app.workspace.detachLeavesOfType("arthur-dashboard");
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();
@@ -2486,4 +2647,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.6.0-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove / pure-job-list-queue / collapsible-section-titles / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.6.0-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove / pure-job-list-queue / collapsible-section-titles / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips all clean");

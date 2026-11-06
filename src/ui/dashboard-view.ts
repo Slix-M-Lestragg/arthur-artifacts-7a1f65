@@ -129,7 +129,7 @@ import {
 } from "../util";
 import { ArthurApiError, isTimeoutError } from "../api/transport";
 import { ServiceBar } from "./service-bar";
-import type { GpuMenuData } from "./service-bar";
+import type { GpuMenuData, GpuOccupant } from "./service-bar";
 import { confirmModal, describeError, run, toastErr, toastOk } from "./actions";
 import { openUiTooltip, openWebUrl } from "./webviewer";
 
@@ -1046,8 +1046,9 @@ export class ArthurDashboardView extends ItemView {
 			onStart: (svc) => void this.serviceStartAction(svc),
 			onSpawn: (svc) => void this.serviceSpawnAction(svc),
 			onKill: (svc) => this.serviceKillAction(svc),
-			// Hover GPU dropdown (multi-instance services): live GPU stats +
-			// occupants, with the selection persisted per service in settings.
+			// Hover GPU dropdown (every registered service): live GPU stats +
+			// machine occupancy (up instances + busy ai-toolkit jobs), with the
+			// spawn selection persisted per service in the settings.
 			gpuMenuData: (svcId) => this.svcGpuMenuData(svcId),
 			gpuSelection: (svcId) => this.gpuSelectionFor(svcId),
 			setGpuSelection: (svcId, gpus) => this.setGpuSelection(svcId, gpus),
@@ -2860,19 +2861,46 @@ export class ArthurDashboardView extends ItemView {
 		}
 	}
 
-	/** Per-service GPU dropdown data (multi-instance services only; null → the
-	 *  dropdown stays closed — single-instance services, agent unreachable). */
+	/** Per-service GPU dropdown data (every agent-registered service; null →
+	 *  the dropdown stays closed — agent unreachable / unknown id). Occupancy
+	 *  is the MACHINE's truth, not the hovered service's: (a) up instances of
+	 *  ANY service mark their gpus/gpus arrays (down instances the agent still
+	 *  lists never count), and (b) ai-toolkit jobs with gpu_ids in
+	 *  running/queued/stopping mark theirs (the job name rides along in the
+	 *  occupant label). Single-instance services get the same data and render
+	 *  it READ-ONLY (the service bar omits the toggle/checkboxes). */
 	private svcGpuMenuData(svcId: string): GpuMenuData | null {
 		const status = this.agentDetail.status;
 		if (this.agentDetail.statusOk !== true || !status) return null;
 		const svc = status.services.find((s) => s.id === svcId);
-		if (!svc || !svc.multi_instance) return null;
-		const occupants = new Map<number, string[]>();
-		for (const inst of svc.instances) {
-			for (const g of inst.gpus?.length ? inst.gpus : inst.gpu != null ? [inst.gpu] : []) {
-				const list = occupants.get(g) ?? [];
-				if (!list.includes(inst.id)) list.push(inst.id);
-				occupants.set(g, list);
+		if (!svc) return null;
+		const occupants = new Map<number, GpuOccupant[]>();
+		const addOccupant = (gpu: number, occupant: GpuOccupant): void => {
+			if (gpu < 0) return;
+			const list = occupants.get(gpu) ?? [];
+			list.push(occupant);
+			occupants.set(gpu, list);
+		};
+		// (a) up instances only — a stopped instance the agent still lists must
+		// never make its GPU look busy.
+		for (const s of status.services) {
+			for (const inst of s.instances) {
+				if (!inst.up) continue;
+				for (const g of inst.gpus?.length ? inst.gpus : inst.gpu != null ? [inst.gpu] : []) {
+					addOccupant(g, {
+						label: `${inst.id} (${inst.name ?? s.name ?? s.id}, :${inst.port})`,
+					});
+				}
+			}
+		}
+		// (b) busy ai-toolkit jobs — running/queued/stopping gpu_ids count as
+		// in-use; completed/stopped/error jobs are history, not occupancy.
+		const aiName = status.services.find((s) => s.id === "aitoolkit")?.name ?? "AI Toolkit";
+		const BUSY_JOB = new Set(["running", "queued", "stopping"]);
+		for (const job of this.aiDetail.jobs) {
+			if (!BUSY_JOB.has(job.status)) continue;
+			for (const g of parseGpuIds(job.gpu_ids)) {
+				addOccupant(g, { label: `${job.name} (${aiName}, ${job.status})` });
 			}
 		}
 		return {
@@ -2882,6 +2910,7 @@ export class ArthurDashboardView extends ItemView {
 				usedMb: g.mem_used_mb,
 				totalMb: g.mem_total_mb,
 				util: g.util_percent,
+				temp: g.temp_c,
 			})),
 			occupants,
 		};
