@@ -1,43 +1,57 @@
 /**
- * Arthur dashboard — desktop ItemView with stacked sections:
- *   0. SERVICES    — one pill button per agent service (src/ui/service-bar.ts):
+ * Arthur dashboard — desktop ItemView with THREE stacked elements (v0.6.1:
+ * everything else — top summary bar, section headers, separate generation
+ * panels + training table — removed or merged into these):
+ *   0. SERVICE BAR — one pill button per agent service (src/ui/service-bar.ts):
  *                    click = start (inactive) / spawn (active), red kill zone
  *                    = stop ALL instances (confirm + force modals)
+ *   0b. ERROR LINE — ONE slim banner directly under the service bar, listing
+ *                    dead services + last error + attempted host:port; hidden
+ *                    entirely while everything answers (also carries the
+ *                    'not configured' / token / version-mismatch states).
  *   1. INSTANCES   — the GPU instance grid: one COLUMN per GPU (live stats
  *                    from GET /api/gpus, agent v0.5.2), one ROW per GPU-owning
  *                    instance (comfy, incl. multi-GPU spanning rows) and per
- *                    queued/running ai-toolkit training job. Rows carry a
- *                    state badge (running/idle/down), quick run stats for
- *                    running rows (WS progress / job step+speed), lifecycle
- *                    buttons for instances, and a 'view in queue ↓' link for
- *                    running rows that scrolls to the matching job-queue
- *                    anchor below. Idle rows sort first, running rows by run
- *                    duration (longest first); run starts are tracked locally
- *                    (WS execution_start / queue transition; agent uptime as
- *                    fallback). /api/gpus unreachable → columns derived from
- *                    the instance gpus arrays (settings fallback: 2) with a
- *                    'gpu stats unavailable' note; agent fully down → grid
- *                    hidden, the settings comfyPorts render as unmanaged rows.
- *   2. JOB QUEUE   — per ComfyUI port: queue depth, running prompt info, live
- *                    WS progress bar, job control buttons; ports come from
+ *                    queued/running ai-toolkit training job. Rows are
+ *                    self-contained outlined cards (running = accent tint,
+ *                    idle = neutral, down = dashed muted + grayscale),
+ *                    carrying a state badge (running/idle/down), quick run
+ *                    stats for running rows (WS progress / job step+speed),
+ *                    lifecycle buttons for instances, and a 'view in queue ↓'
+ *                    link for running rows that scrolls to the matching
+ *                    job-queue anchor below. Idle rows sort first, running
+ *                    rows by run duration (longest first); run starts are
+ *                    tracked locally (WS execution_start / queue transition;
+ *                    agent uptime as fallback). /api/gpus unreachable →
+ *                    columns derived from the instance gpus arrays (settings
+ *                    fallback: 2) with a 'gpu stats unavailable' note; agent
+ *                    fully down → grid hidden, the settings comfyPorts render
+ *                    as unmanaged rows.
+ *   2. JOB QUEUE   — ONE unified queue of compact job cards below the grid:
+ *                    per comfy instance a group header (stable anchor id
+ *                    arthur-queue-<port> for the grid links) holding the
+ *                    queue depth + clear-queue/free-VRAM actions, followed by
+ *                    the instance's running card (live WS progress + cancel)
+ *                    and pending cards (per-prompt ✕ delete); ai-toolkit
+ *                    training entries (arthur-training-row-<id> anchor) with
+ *                    their existing action buttons + chart/log accordion;
+ *                    per-GPU-set queue toggles close the queue. Ordering:
+ *                    running (by run duration desc) → pending/queued →
+ *                    recent stopped/error training (cap 5). Ports come from
  *                    the agent's discovered instances (settings list is the
- *                    fallback only). Each card carries a stable anchor id
- *                    (arthur-queue-<port>) the grid links point to.
- *   3. TRAINING    — ai-toolkit job table + per-GPU-set queue toggles, bound
- *                    to the settings aiToolkitPort; its header shows the
- *                    aitoolkit service active state from the agent. Each job
- *                    row carries the arthur-training-row-<id> anchor.
+ *                    fallback only).
  *
- * The DOM skeleton (service bar, top bar, section boxes, cards, table header)
+ * The DOM skeleton (service bar, error banner, grid, per-port queue groups)
  * is built once in onOpen; poll ticks and WS events only update text,
- * classes, attributes and bar widths. The instance rows, training <tbody>,
- * the pending-prompt list and preview strip are refilled because their rows
- * legitimately appear and disappear (spawn/stop) — everything else is cached
- * per port.
+ * classes, attributes and bar widths, and re-append the cached queue nodes
+ * in the sorted order described above. The instance rows, training cards,
+ * pending prompt list and preview strip are refilled because their rows
+ * legitimately appear and disappear (spawn/stop/run end) — everything else
+ * is cached per port.
  *
  * Instance discovery (agent API v0.5.0): /api/status lists services with
- * computed instances; the generation panels + WS sockets attach to the
- * comfyui service's instance ports in agent order. The panel set is rebuilt
+ * computed instances; the queue groups + WS sockets attach to the
+ * comfyui service's instance ports in agent order. The group set is rebuilt
  * only when that ordered port list changes (or the profile host changed).
  *
  * The view never mutates state optimistically: everything rendered comes
@@ -56,7 +70,7 @@ import { ItemView, WorkspaceLeaf } from "obsidian";
 import type ArthurPlugin from "../main";
 import { AGENT_VERSION } from "../api/agent";
 import type { AgentGpu, AgentInstance, AgentService, AgentStatus } from "../api/agent";
-import type { AiToolkitJob } from "../api/aitoolkit";
+import type { AiToolkitJob, AiToolkitJobStatus } from "../api/aitoolkit";
 import type { ComfyUIClient, QueueResponse, SystemStats } from "../api/comfy";
 import { parseComfyBinaryFrame } from "../comfy-frame";
 import { WsConnection, WsState } from "../connection";
@@ -65,7 +79,6 @@ import {
 	el,
 	DETAIL_INTERVAL_MS,
 	fmtBytes,
-	fmtClockTime,
 	fmtDuration,
 	fmtGigCompact,
 	truncate,
@@ -173,21 +186,26 @@ interface DesiredPort {
 	label: string;
 }
 
-/** Cached DOM widgets + bookkeeping for one comfy port. */
+/** Cached DOM widgets + bookkeeping for one comfy port's queue group. */
 interface GenPanel {
 	port: number;
-	// generation card
+	// queue group header (anchor id arthur-queue-<port>): dot + label + ws
+	// state + queue depth + clear-queue/free-VRAM actions
+	head: HTMLElement;
 	titleEl: HTMLElement;
 	genDot: HTMLElement;
 	wsDot: HTMLElement;
 	wsLabel: HTMLElement;
 	queueEl: HTMLElement;
-	runningEl: HTMLElement;
+	// running job card: live WS progress + cancel + preview strip
+	runningCard: HTMLElement;
+	runningTextEl: HTMLElement;
 	progressFill: HTMLElement;
 	progressLabel: HTMLElement;
 	btnCancel: HTMLButtonElement;
 	btnFree: HTMLButtonElement;
 	btnClear: HTMLButtonElement;
+	// pending job card (per-prompt ✕ delete rows)
 	pendingWrap: HTMLElement;
 	previewStrip: HTMLElement;
 	// bookkeeping
@@ -233,6 +251,16 @@ interface AiToolkitQueueRow {
 	is_running: boolean;
 }
 
+/** One sort unit of the unified job queue (renderQueue). */
+interface QueueEntry {
+	rank: 0 | 1 | 2;
+	/** Running entries: sort seconds (duration desc), else 0. */
+	sort: number;
+	/** Stable tie-break inside a rank (port/job order). */
+	seq: number;
+	nodes: HTMLElement[];
+}
+
 /** Never-throw wrapper for best-effort probes — keeps the error for diagnostics. */
 async function tryCall<T>(fn: () => Promise<T>): Promise<{ value: T | null; error: unknown }> {
 	try {
@@ -260,6 +288,20 @@ function parseGpuIds(raw: string): number[] {
 		.split(",")
 		.map((part) => parseInt(part.trim(), 10))
 		.filter((n) => Number.isFinite(n) && n >= 0);
+}
+
+/** Badge color class for a training job status. */
+function jobBadgeCls(status: AiToolkitJobStatus): string {
+	if (status === "running") return "arthur-badge--running";
+	if (status === "error") return "arthur-badge--down";
+	return "arthur-badge--idle";
+}
+
+/** Training step % for progress bars (null → no bar). */
+function jobStepPct(job: AiToolkitJob): number | null {
+	return job.total_steps != null && job.total_steps > 0 && job.step > 0
+		? Math.min(100, Math.round((100 * job.step) / job.total_steps))
+		: null;
 }
 
 /**
@@ -304,23 +346,25 @@ export class ArthurDashboardView extends ItemView {
 	private activePorts: DesiredPort[] = [];
 	private skeletonBuilt = false;
 
-	// cached section roots
+	// cached element roots
 	private serviceBarEl!: HTMLElement;
 	private serviceBar!: ServiceBar;
-	private profileEl!: HTMLElement;
-	private readonly topDots = new Map<string, HTMLElement>();
-	private updatedEl!: HTMLElement;
-	/** One-line last-errors summary (hidden while everything answers). */
-	private lastErrorsEl!: HTMLElement;
+	/** Slim error banner — hidden while every service answers (v0.6.1: the one
+	 *  error surface, replacing the old top bar's errors/dots/profile line). */
 	private bannerEl!: HTMLElement;
 	/** Instance grid + its notes (replaced by unmanaged rows when agent down). */
 	private gridEl!: HTMLElement;
 	private gridNoteEl!: HTMLElement;
 	private unmanagedEl!: HTMLElement;
-	private trainingSvcEl!: HTMLElement;
-	private trainingBodyEl!: HTMLElement;
-	private trainingQueueEl!: HTMLElement;
-	private trainingNoteEl!: HTMLElement;
+	/** Unified job queue (comfy groups + training cards + aitk queue toggles). */
+	private queueEl!: HTMLElement;
+	/** Tail of the unified queue: per-GPU-set ai-toolkit queue toggles (shown
+	 *  only while ai-toolkit answers) + the empty-queue note. */
+	private aiQueueToggleEl!: HTMLElement;
+	private queueEmptyEl!: HTMLElement;
+	/** True while the training collector sits degraded (watchdog); cleared on
+	 *  each settled tick — feeds the error banner. */
+	private trainingStuck = false;
 
 	// latest poll data (single source of truth for rendering)
 	private comfyDetail: ComfyPortDetail[] = [];
@@ -361,6 +405,10 @@ export class ArthurDashboardView extends ItemView {
 		string,
 		{ progressFill: HTMLElement; progressLabel: HTMLElement }
 	>();
+	/** Latest per-row run durations from buildGridRows ("inst:<id>" / "job:<id>")
+	 *  — the unified queue's duration sort reuses them so the run-start
+	 *  bookkeeping runs exactly once per tick. */
+	private readonly gridRowDurations = new Map<string, number | null>();
 
 	// training accordion state (job id → state; cleared on close/unload/job delete)
 	private readonly jobUi = new Map<string, JobPanelUi>();
@@ -553,11 +601,10 @@ export class ArthurDashboardView extends ItemView {
 			);
 			this.gridNoteEl.show();
 		} else if (key === "training") {
-			const port = this.plugin.clients?.profile.aiToolkitPort ?? 0;
-			const hostPort = host ? `${host}:${port}` : "(not configured)";
-			this.trainingNoteEl.setText(`ai-toolkit — ${mark}`);
-			this.trainingNoteEl.setAttribute("title", errTooltip(hostPort, mark));
-			this.trainingNoteEl.show();
+			// No dedicated training element anymore — the error banner carries the
+			// degraded state (the queue keeps painting the last known jobs).
+			this.trainingStuck = true;
+			this.renderBanner();
 		} else if (key.startsWith("gen:")) {
 			const port = Number(key.slice(4));
 			const hostPort = host ? `${host}:${port}` : "(not configured)";
@@ -567,11 +614,6 @@ export class ArthurDashboardView extends ItemView {
 				setDot(panel.genDot, false);
 				panel.genDot.setAttribute("title", tooltip);
 				panel.queueEl.setText(mark);
-			}
-			const dot = this.topDots.get(`c${port}`);
-			if (dot) {
-				setDot(dot, false);
-				dot.setAttribute("title", tooltip);
 			}
 		}
 	}
@@ -608,14 +650,13 @@ export class ArthurDashboardView extends ItemView {
 			this.lastTick = null;
 			// The "not configured" placeholder is a settled state — no watch pending.
 			this.sectionWatches.clear();
+			this.trainingStuck = false;
 			// Port set may have changed in settings while the view sat open.
 			this.syncSkeleton();
-			this.renderTopBar(profile.name, "");
 			this.renderBanner();
 			this.renderServiceBar();
 			this.renderInstances();
-			this.renderGeneration();
-			this.renderTraining();
+			this.renderQueue();
 			return;
 		}
 
@@ -748,12 +789,11 @@ export class ArthurDashboardView extends ItemView {
 		this.watchSettle("training");
 
 		this.lastTick = Date.now();
-		this.renderTopBar(profile.name, profile.host);
+		this.trainingStuck = false;
 		this.renderBanner();
 		this.renderServiceBar();
 		this.renderInstances();
-		this.renderGeneration();
-		this.renderTraining();
+		this.renderQueue();
 
 		// Debug breadcrumb (settings toggle): one line per tick — collector
 		// name, per-service outcome (ok/err/timeout), duration, host:port.
@@ -807,7 +847,6 @@ export class ArthurDashboardView extends ItemView {
 	}
 
 	private buildSkeleton(ports: DesiredPort[]): void {
-		this.topDots.clear();
 		const root = this.contentEl.createEl("div", { cls: "arthur-dashboard" });
 
 		// service pill row — top surface for service-level lifecycle
@@ -818,114 +857,117 @@ export class ArthurDashboardView extends ItemView {
 			onKill: (svc) => this.serviceKillAction(svc),
 		});
 
-		// thin top summary bar
-		const top = root.createEl("div", { cls: "arthur-topbar" });
-		this.profileEl = top.createEl("span", { cls: "arthur-topbar-profile" });
-		const dotsBox = top.createEl("span", { cls: "arthur-topbar-dots" });
-		const dotSpecs: Array<[string, string]> = [
-			...ports.map((p) => [`c${p.port}`, p.label] as [string, string]),
-			["aitk", "ai-toolkit"],
-			["agent", "arthur-agent"],
-		];
-		for (const [key, label] of dotSpecs) {
-			const dot = el("span", {
-				cls: "arthur-dot arthur-dot--gray",
-				attrs: { "aria-label": label },
-			});
-			dotsBox.append(
-				el("span", {
-					cls: "arthur-dot-wrap",
-					children: [dot, el("span", { cls: "arthur-dot-label", text: label })],
-				}),
-			);
-			this.topDots.set(key, dot);
-		}
-		this.lastErrorsEl = top.createEl("span", { cls: "arthur-topbar-errors" });
-		this.lastErrorsEl.hide();
-		this.updatedEl = top.createEl("span", { cls: "arthur-topbar-updated" });
-
-		// banner slot (agent unreachable / token / version mismatch)
+		// ONE slim error banner under the service bar — dead services + last
+		// error + attempted host:port; hidden entirely while all healthy. Also
+		// carries the 'not configured' / token / version-mismatch states.
 		this.bannerEl = root.createEl("div", { cls: "arthur-banner" });
 		this.bannerEl.hide();
 
-		// instances section — the GPU instance grid (columns per GPU, rows per
-		// instance/training job), refilled per tick; below it the unmanaged-row
-		// fallback container (only rendered while the agent is unreachable)
-		const instancesSection = root.createEl("div", { cls: "arthur-section" });
-		instancesSection.createEl("h4", { text: "Instances" });
-		this.gridEl = instancesSection.createEl("div", { cls: "arthur-grid" });
+		// instance grid (no section header — the cards are self-describing):
+		// one column per GPU, one card row per instance/training job; below it
+		// the unmanaged-row fallback container (only rendered while the agent
+		// is unreachable)
+		this.gridEl = root.createEl("div", { cls: "arthur-grid" });
 		this.gridEl.append(el("p", { cls: "arthur-note", text: "loading…" }));
-		this.gridNoteEl = instancesSection.createEl("p", {
+		this.gridNoteEl = root.createEl("p", {
 			cls: "arthur-note",
 			text: "",
 		});
 		this.gridNoteEl.hide();
-		this.unmanagedEl = instancesSection.createEl("div", { cls: "arthur-cards" });
+		this.unmanagedEl = root.createEl("div", { cls: "arthur-cards" });
 		this.unmanagedEl.hide();
 
-		// job queue section — one cached card per discovered/fallback port, each
-		// with the stable anchor id the grid's 'view in queue' links target
-		const genSection = root.createEl("div", { cls: "arthur-section" });
-		genSection.createEl("h4", { text: "Job queue" });
-		const generationBox = genSection.createEl("div", { cls: "arthur-cards" });
+		// ONE unified job queue: per-port cached group (header + running card +
+		// pending card) ordered per tick by the queue sorting rules, training
+		// job cards rebuilt per tick. Re-attaching the cached nodes preserves
+		// the WS-facing widget refs (progress bars never need a rebuild).
+		this.queueEl = root.createEl("div", { cls: "arthur-queue" });
 		for (const p of ports) {
-			generationBox.append(this.buildGenCard(p));
+			this.queueEl.append(this.buildGenGroup(p));
 		}
-		if (ports.length === 0) {
-			const note = "no ComfyUI instances configured — set Host and ComfyUI ports in the arthur settings";
-			generationBox.append(el("p", { cls: "arthur-note", text: note }));
-		}
-
-		// training section
-		const trainingSection = root.createEl("div", { cls: "arthur-section" });
-		const trainingHead = trainingSection.createEl("h4", { text: "Training (ai-toolkit)" });
-		this.trainingSvcEl = trainingHead.createEl("span", {
-			cls: "arthur-training-service",
-		});
-		this.trainingSvcEl.hide();
-		this.trainingNoteEl = trainingSection.createEl("p", {
+		// Queue tail: per-GPU-set queue toggles (repainted per tick; shown only
+		// while ai-toolkit answers) and the empty-queue note.
+		this.aiQueueToggleEl = this.queueEl.createEl("div", { cls: "arthur-aiqueue" });
+		this.aiQueueToggleEl.hide();
+		this.queueEmptyEl = el("p", {
 			cls: "arthur-note",
-			text: "loading…",
+			text: "no jobs — every queue is clear",
 		});
-		const table = trainingSection.createEl("table", { cls: "arthur-table" });
-		const head = table.createEl("thead").createEl("tr");
-		head.append(
-			...["Name", "GPUs", "Status", "Progress", "Speed", "Queue", "Actions"].map((h) =>
-				el("th", { text: h }),
-			),
-		);
-		this.trainingBodyEl = table.createEl("tbody");
-		trainingSection.createEl("h5", { text: "Queues" });
-		this.trainingQueueEl = trainingSection.createEl("div", { cls: "arthur-queue-rows" });
+		this.queueEmptyEl.hide();
 
-		// Port list the cards+WS are now built for.
+		// Port list the groups+WS are now built for.
 		this.activePorts = ports;
 		this.skeletonBuilt = true;
 	}
 
-	/** Build the generation card for one port and cache its widgets. */
-	private buildGenCard(p: DesiredPort): HTMLElement {
+	/**
+	 * Build the queue group for one port and cache its widgets: a group header
+	 * (stable anchor id arthur-queue-<port>, queue depth + clear/free actions),
+	 * a running job card (live WS progress + cancel + preview strip) and a
+	 * pending card (per-prompt ✕ delete rows). The nodes are cached for the
+	 * view's lifetime; per-tick renderQueue only repaints + reorders them.
+	 */
+	private buildGenGroup(p: DesiredPort): HTMLElement {
 		const port = p.port;
 		const buttonRow = (...btns: HTMLButtonElement[]) =>
 			el("div", { cls: "arthur-btn-row", children: btns });
 
-		const titleEl = el("span", { cls: "arthur-card-title", text: p.label });
+		// group header — also the scroll target of the grid's 'view in queue ↓'
+		const head = el("div", {
+			cls: "arthur-queue-head",
+			attrs: { id: `arthur-queue-${port}` },
+		});
+		const titleEl = el("span", { cls: "arthur-queue-title", text: p.label });
 		const genDot = el("span", { cls: "arthur-dot arthur-dot--gray" });
 		const wsDot = el("span", { cls: "arthur-dot arthur-dot--gray" });
 		const wsLabel = el("span", { cls: "arthur-card-meta", text: "ws off" });
 		const queueEl = el("span", { cls: "arthur-card-meta", text: "…" });
+		const btnClear = newBtn("Clear queue");
+		btnClear.addClass("arthur-btn--tiny");
+		const btnFree = newBtn("Free VRAM");
+		btnFree.addClass("arthur-btn--tiny");
+		head.append(
+			genDot,
+			titleEl,
+			wsDot,
+			wsLabel,
+			queueEl,
+			buttonRow(btnClear, btnFree),
+		);
+
+		// running job card — the only place the live WS progress surfaces
 		const progressFill = el("div", { cls: "arthur-bar-fill" });
 		progressFill.style.width = "0%";
 		const progressLabel = el("span", { cls: "arthur-card-meta", text: "idle" });
-		const runningEl = el("span", { cls: "arthur-card-meta" });
-		runningEl.hide();
-		const pendingWrap = el("div", { cls: "arthur-pending-list" });
-		pendingWrap.hide();
+		const runningTextEl = el("span", { cls: "arthur-card-meta" });
+		runningTextEl.hide();
 		const previewStrip = el("div", { cls: "arthur-preview-strip" });
 		previewStrip.hide();
 		const btnCancel = newBtn("Cancel");
-		const btnClear = newBtn("Clear queue");
-		const btnFree = newBtn("Free VRAM");
+		btnCancel.addClass("arthur-btn--tiny");
+		const runningCard = el("div", {
+			cls: "arthur-queue-job arthur-queue-job--running",
+		});
+		runningCard.append(
+			el("div", {
+				cls: "arthur-card-head",
+				children: [
+					el("span", { cls: "arthur-badge arthur-badge--running", text: "running" }),
+					runningTextEl,
+					buttonRow(btnCancel),
+				],
+			}),
+			el("div", { cls: "arthur-bar", children: [progressFill] }),
+			progressLabel,
+			previewStrip,
+		);
+		runningCard.hide();
+
+		// pending card — one compact row per queued prompt, refilled per tick
+		const pendingWrap = el("div", {
+			cls: "arthur-pending-list arthur-queue-job arthur-queue-job--pending",
+		});
+		pendingWrap.hide();
 
 		btnCancel.addEventListener("click", () => void this.cancelRunning(port));
 		btnClear.addEventListener("click", () => {
@@ -946,29 +988,16 @@ export class ArthurDashboardView extends ItemView {
 			);
 		});
 
-		const genCard = el("div", { cls: "arthur-card" });
-		genCard.setAttribute("id", `arthur-queue-${port}`);
-		genCard.append(
-			el("div", {
-				cls: "arthur-card-head",
-				children: [genDot, titleEl, wsDot, wsLabel, queueEl],
-			}),
-			el("div", { cls: "arthur-bar", children: [progressFill] }),
-			progressLabel,
-			runningEl,
-			pendingWrap,
-			previewStrip,
-			buttonRow(btnCancel, btnClear, btnFree),
-		);
-
 		this.panels.set(port, {
 			port,
+			head,
 			titleEl,
 			genDot,
 			wsDot,
 			wsLabel,
 			queueEl,
-			runningEl,
+			runningCard,
+			runningTextEl,
 			progressFill,
 			progressLabel,
 			btnCancel,
@@ -982,57 +1011,51 @@ export class ArthurDashboardView extends ItemView {
 			pendingIds: [],
 			previewUrls: [],
 		});
-		return genCard;
+		return head;
 	}
 
 	// ------------------------------------------------------------------
-	// rendering
+	// rendering — the slim error banner (the ONE error surface; hidden
+	// entirely while every service answers)
 	// ------------------------------------------------------------------
 
-	private renderTopBar(profileName: string, host: string): void {
-		this.profileEl.setText(host ? `${profileName} @ ${host}` : profileName);
+	/**
+	 * Slim error line directly under the service bar: every dead service from
+	 * the last tick with its last error + attempted host:port (no token
+	 * material), plus the configuration problems the old banner carried (not
+	 * configured / token rejected / version mismatch) and the watchdog's
+	 * stuck-collector states. Hidden entirely when all healthy.
+	 */
+	private renderBanner(): void {
 		const clients = this.plugin.clients;
-		const hostPort = (port: number) => (host ? `${host}:${port}` : "(not configured)");
-		this.activePorts.forEach((p, i) => {
-			const dot = this.topDots.get(`c${p.port}`);
-			const d = this.comfyDetail[i] ?? null;
-			if (dot) {
-				setDot(dot, d?.online ?? null);
-				// Offline diagnostics: why the dot is red + the URL attempted.
-				dot.setAttribute(
-					"title",
-					(d?.online === false
-						? errTooltip(hostPort(p.port), d.error)
-						: `${p.label} — ${d?.online === true ? "ok" : "waiting for data…"}`),
-				);
-			}
-		});
-		const aitk = this.topDots.get("aitk");
-		const aiReachable = this.aiDetail.reachable ?? null;
-		if (aitk) {
-			setDot(aitk, aiReachable);
-			aitk.setAttribute(
-				"title",
-				aiReachable === false
-					? errTooltip(hostPort(clients?.profile.aiToolkitPort ?? 0), this.aiDetail.error)
-					: `ai-toolkit — ${aiReachable === true ? "ok" : "waiting for data…"}`,
+		const host = clients?.profile.host ?? "";
+		if (!host) {
+			this.bannerEl.setText(
+				"arthur is not configured — set the server host in the plugin settings",
 			);
+			this.bannerEl.show();
+			return;
 		}
-		const agent = this.topDots.get("agent");
-		const agentOk = this.agentDetail.statusOk ?? this.agentDetail.healthOk;
-		if (agent) {
-			setDot(agent, agentOk);
-			agent.setAttribute(
-				"title",
-				agentOk === false
-					? errTooltip(hostPort(clients?.profile.agentPort ?? 0), this.agentDetail.error)
-					: `arthur-agent — ${agentOk === true ? "ok" : "waiting for data…"}`,
-			);
-		}
-
-		// One-line last-errors summary: every service that failed on the last
-		// tick with its last error + attempted host:port (no token material).
+		const hostPort = (port: number) => `${host}:${port}`;
 		const errors: string[] = [];
+		const ad = this.agentDetail;
+		if (ad.healthOk === false) {
+			errors.push(
+				`agent ${hostPort(clients?.profile.agentPort ?? 0)} — ${ad.error ?? "offline"} — instance lifecycle disabled`,
+			);
+		} else if (ad.statusOk === false) {
+			errors.push("agent token rejected — check Agent token in settings");
+		} else if (ad.status && ad.status.version !== AGENT_VERSION) {
+			errors.push(`agent version mismatch: server ${ad.status.version}, expected ${AGENT_VERSION} — update server/`);
+		}
+		// Watchdog: the training collector wedged between data and error.
+		if (this.trainingStuck) {
+			errors.push(
+				`ai-toolkit ${hostPort(clients?.profile.aiToolkitPort ?? 0)} — no response — timeout/offline`,
+			);
+		}
+		// Dead-service lines, same format as the old top-bar errors line:
+		// service + error + host:port attempted.
 		this.activePorts.forEach((p, i) => {
 			const d = this.comfyDetail[i];
 			if (d?.online === false) errors.push(`ComfyUI ${hostPort(p.port)} — ${d.error ?? "not responding"}`);
@@ -1040,44 +1063,14 @@ export class ArthurDashboardView extends ItemView {
 		if (this.aiDetail.reachable === false && this.aiDetail.error) {
 			errors.push(`ai-toolkit ${hostPort(clients?.profile.aiToolkitPort ?? 0)} — ${this.aiDetail.error}`);
 		}
-		if (this.agentDetail.error) {
-			errors.push(`agent ${hostPort(clients?.profile.agentPort ?? 0)} — ${this.agentDetail.error}`);
-		}
 		// /api/gpus collector failure only matters while the agent answers at all
 		// (grid columns fall back to derived placements otherwise).
-		if (this.gpuDetail.error && this.agentDetail.statusOk === true) {
+		if (this.gpuDetail.error && ad.statusOk === true) {
 			errors.push(`gpu stats ${hostPort(clients?.profile.agentPort ?? 0)} — ${this.gpuDetail.error}`);
 		}
 		if (errors.length > 0) {
-			this.lastErrorsEl.setText(`errors: ${errors.join(" · ")}`);
-			this.lastErrorsEl.setAttribute("title", errors.join("\n"));
-			this.lastErrorsEl.show();
-		} else {
-			this.lastErrorsEl.hide();
-		}
-		this.updatedEl.setText(`upd ${fmtClockTime(this.lastTick)}`);
-	}
-
-	private renderBanner(): void {
-		const clients = this.plugin.clients;
-		if (clients && !clients.profile.host) {
-			this.bannerEl.setText(
-				"arthur is not configured — set the server host in the plugin settings",
-			);
-			this.bannerEl.show();
-			return;
-		}
-		const ad = this.agentDetail;
-		let message: string | null = null;
-		if (ad.healthOk === false) {
-			message = `agent unreachable (${ad.error ?? "offline"}) — instance lifecycle disabled`;
-		} else if (ad.healthOk === true && ad.statusOk === false) {
-			message = "agent token rejected — check Agent token in settings";
-		} else if (ad.status && ad.status.version !== AGENT_VERSION) {
-			message = `agent version mismatch: server ${ad.status.version}, expected ${AGENT_VERSION} — update server/`;
-		}
-		if (message) {
-			this.bannerEl.setText(message);
+			this.bannerEl.setText(`errors: ${errors.join(" · ")}`);
+			this.bannerEl.setAttribute("title", errors.join("\n"));
 			this.bannerEl.show();
 		} else {
 			this.bannerEl.hide();
@@ -1181,6 +1174,7 @@ export class ArthurDashboardView extends ItemView {
 	 *  uptime is the fallback duration for runs observed mid-flight. */
 	private buildGridRows(): GridRowSpec[] {
 		const rows: GridRowSpec[] = [];
+		this.gridRowDurations.clear();
 		const status = this.agentDetail.statusOk === true ? this.agentDetail.status : null;
 		const comfy = status?.services.find((s) => s.id === "comfyui") ?? null;
 
@@ -1216,6 +1210,8 @@ export class ArthurDashboardView extends ItemView {
 			const running = runningCount > 0;
 			const key = `run:${inst.port}`;
 			const duration = runDuration(key, running);
+			const effective = duration ?? (running ? (inst.uptime ?? null) : null);
+			this.gridRowDurations.set(key, effective);
 			const panel = this.panels.get(inst.port);
 			rows.push({
 				key: `inst:${inst.id}`,
@@ -1225,7 +1221,7 @@ export class ArthurDashboardView extends ItemView {
 				state: !inst.up ? "down" : running ? "running" : "idle",
 				badge: !inst.up ? "down" : running ? "running" : "idle",
 				meta: `:${inst.port} · GPU ${gpuList.join(",")}`,
-				durationSec: duration ?? (running ? (inst.uptime ?? null) : null),
+				durationSec: effective,
 				prompt: running
 					? {
 							id: panel?.runningPromptId ?? null,
@@ -1251,10 +1247,8 @@ export class ArthurDashboardView extends ItemView {
 				const running = job.status === "running";
 				const key = `job:${job.id}`;
 				const duration = runDuration(key, running);
-				const pct =
-					job.total_steps != null && job.total_steps > 0 && job.step > 0
-						? Math.min(100, Math.round((100 * job.step) / job.total_steps))
-						: null;
+				const pct = jobStepPct(job);
+				this.gridRowDurations.set(key, duration);
 				rows.push({
 					key,
 					kind: "training",
@@ -1369,20 +1363,27 @@ export class ArthurDashboardView extends ItemView {
 		head.append(
 			el("span", { cls: dotCls }),
 			el("span", { cls: "arthur-grid-title", text: spec.title }),
+			el("span", { cls: "arthur-card-meta", text: spec.meta }),
 			el("span", {
-				cls: "arthur-card-meta",
-				text:
-					spec.meta +
-					(spec.state === "running" && spec.durationSec != null
-						? ` · ${fmtDuration(spec.durationSec)} run`
-						: ""),
+				cls: "arthur-grid-head-tail",
+				children: [
+					...(spec.state === "running" && spec.durationSec != null
+						? [el("span", {
+								cls: "arthur-card-meta arthur-grid-duration",
+								text: `${fmtDuration(spec.durationSec)} run`,
+								attrs: { "aria-label": "run duration" },
+						  })]
+						: []),
+					el("span", { cls: `arthur-badge arthur-badge--${spec.state}`, text: spec.badge }),
+				],
 			}),
-			el("span", { cls: `arthur-badge arthur-badge--${spec.state}`, text: spec.badge }),
 		);
 		cell.append(head);
 
 		if (spec.kind === "instance" && spec.svcId && spec.instId) {
-			cell.append(this.gridLifecycleButtons(spec));
+			const buttons = this.gridLifecycleButtons(spec);
+			buttons.addClass("arthur-grid-actions");
+			cell.append(buttons);
 		}
 
 		// Quick stats + queue link for RUNNING rows.
@@ -1464,6 +1465,7 @@ export class ArthurDashboardView extends ItemView {
 		this.runStarts.clear();
 		this.runPrior.clear();
 		this.gridRows.clear();
+		this.gridRowDurations.clear();
 	}
 
 	/** Scroll the job-queue anchor into view and flag it with the flash class. */
@@ -1537,84 +1539,144 @@ export class ArthurDashboardView extends ItemView {
 		return card;
 	}
 
-	private renderGeneration(): void {
+	// ------------------------------------------------------------------
+	// ONE unified job queue — per-port comfy groups (running + pending
+	// cards) merged with ai-toolkit training cards, sorted:
+	//   0. running (run duration desc, comfy before training on ties)
+	//   1. pending/queued (comfy groups, then queued training jobs)
+	//   2. recent stopped/error training jobs (newest first, cap 5)
+	// Idle comfy instances still emit their group header (queue depth +
+	// clear-queue/free-VRAM actions stay reachable); each port's header is
+	// emitted once, directly above its first card in the sorted flow.
+	// ------------------------------------------------------------------
+
+	/** Cap on the ranked-2 "recent stopped/error" training tail. */
+	private static readonly RECENT_TRAINING_CAP = 5;
+
+	private runSortSeconds(key: string): number {
+		return this.gridRowDurations.get(key) ?? 0;
+	}
+
+	/**
+	 * Repaint + reorder the unified queue. Cached nodes (group headers,
+	 * running cards, pending cards) are moved, not rebuilt — WS-facing
+	 * progress widgets keep their identity; training cards rebuild per tick
+	 * (their action rows depend on the job status).
+	 */
+	private renderQueue(): void {
+		const q = this.queueEl;
 		const host = this.plugin.clients?.profile.host ?? "";
+		const entries: QueueEntry[] = [];
+		const headEmitted = new Set<number>();
+		const emitHead = (port: number, entry: QueueEntry): void => {
+			const panel = this.panels.get(port);
+			if (!panel || headEmitted.has(port)) return;
+			headEmitted.add(port);
+			panel.head.show();
+			entry.nodes.push(panel.head);
+		};
+
+		// comfy groups — running card first (rank 0), then pending card (rank 1);
+		// an idle instance still emits its header alone (rank 1) so the queue
+		// depth + clear-queue/free-VRAM actions remain reachable.
 		this.activePorts.forEach((p, i) => {
 			const panel = this.panels.get(p.port);
 			if (!panel) return;
-			const detail = this.comfyDetail[i] ?? null;
-			const online = detail?.online === true;
-			const running = Array.isArray(detail?.queue?.queue_running)
-				? (detail!.queue!.queue_running as unknown[])
-				: [];
-			const pending = Array.isArray(detail?.queue?.queue_pending)
-				? (detail!.queue!.queue_pending as unknown[])
-				: [];
-
-			panel.titleEl.setText(p.label);
-			setDot(panel.genDot, detail?.online ?? null);
-			panel.genDot.setAttribute(
-				"title",
-				detail?.online === false
-					? errTooltip(host ? `${host}:${p.port}` : "(not configured)", detail.error)
-					: `${p.label} — ${detail?.online === true ? "ok" : "waiting for data…"}`,
-			);
-			panel.queueEl.setText(`${running.length} running · ${pending.length} pending`);
-
-			// running prompt info: queue entries are [exec, prompt_id, graph, extra, …]
-			const entry = (running[0] ?? null) as unknown[];
-			const pid = entry && typeof entry[1] === "string" ? entry[1] : null;
-			panel.runningPromptId = pid;
-			panel.promptGraph =
-				entry && entry[2] && typeof entry[2] === "object"
-					? (entry[2] as Record<string, any>)
-					: null;
-			const classes = Object.values(panel.promptGraph ?? {})
-				.map((n) => (n as any)?.class_type)
-				.filter((s) => typeof s === "string") as string[];
-			const runningText = pid
-				? `${truncate(pid, 12)} · ${classes.slice(0, 4).join(" → ")}${classes.length > 4 ? " → …" : ""}`
-				: running.length > 0
-					? "running (prompt id unknown)"
-					: "";
-			if (runningText) {
-				panel.runningEl.setText(runningText);
-				panel.runningEl.show();
+			const counts = this.updateGenEntry(panel, p, this.comfyDetail[i] ?? null, host);
+			if (counts.running > 0) {
+				const entry: QueueEntry = {
+					rank: 0,
+					sort: this.runSortSeconds(`run:${p.port}`),
+					seq: i,
+					nodes: [],
+				};
+				emitHead(p.port, entry);
+				panel.runningCard.show();
+				entry.nodes.push(panel.runningCard);
+				entries.push(entry);
 			} else {
-				panel.runningEl.hide();
+				panel.runningCard.hide();
 			}
-
-			// pending list (refilled — rows come and go)
-			panel.pendingIds = pending.flatMap((e) =>
-				Array.isArray(e) && typeof e[1] === "string" ? [e[1] as string] : [],
-			);
-			panel.pendingWrap.empty();
-			if (panel.pendingIds.length > 0) {
-				for (const id of panel.pendingIds) {
-					const del = newBtn("✕");
-					del.addClass("arthur-btn--tiny");
-					del.addEventListener("click", () => void this.deletePending(p.port, id));
-					panel.pendingWrap.append(
-						el("div", {
-							cls: "arthur-pending-row",
-							children: [
-								el("span", { cls: "arthur-card-meta", text: truncate(id, 14) }),
-								del,
-							],
-						}),
-					);
-				}
+			if (counts.pending > 0) {
+				const entry: QueueEntry = { rank: 1, sort: 0, seq: i, nodes: [] };
+				emitHead(p.port, entry);
 				panel.pendingWrap.show();
+				entry.nodes.push(panel.pendingWrap);
+				entries.push(entry);
 			} else {
 				panel.pendingWrap.hide();
 			}
-
-			panel.btnCancel.disabled = !online || running.length === 0;
-			panel.btnClear.disabled = !online || pending.length === 0;
-			panel.btnFree.disabled = !online;
-
-			this.renderProgress(panel);
+			if (counts.running + counts.pending === 0) {
+				const entry: QueueEntry = { rank: 1, sort: 0, seq: i, nodes: [] };
+				emitHead(p.port, entry);
+				entries.push(entry);
+			}
 		});
+
+		// ai-toolkit training cards — running (rank 0, duration-sorted),
+		// queued/stopping (rank 1, queue position first), recent stopped/error
+		// (rank 2, newest updated_at first, capped).
+		if (this.aiDetail.reachable === true) {
+			// Drop caches/state for jobs that no longer exist (deleted or job
+			// list rebuilt) before the per-tick card rebuild.
+			this.pruneTrainingState();
+			this.jobPanelEls.clear();
+			let queuedSeq = 0;
+			let recentSeq = 0;
+			for (const job of this.aiDetail.jobs) {
+				if (job.status === "running") {
+					entries.push({
+						rank: 0,
+						sort: this.runSortSeconds(`job:${job.id}`),
+						seq: 100 + queuedSeq++,
+						nodes: [this.jobQueueCard(job)],
+					});
+				} else if (job.status === "queued" || job.status === "stopping") {
+					entries.push({
+						rank: 1,
+						sort: job.queue_position ?? 0,
+						seq: 100 + queuedSeq++,
+						nodes: [this.jobQueueCard(job)],
+					});
+				}
+				// "completed" jobs are history, not queue entries — skipped.
+			}
+			const recentJobs = this.aiDetail.jobs
+				.filter((j) => j.status === "stopped" || j.status === "error")
+				.sort(
+					(a, b) =>
+						(Date.parse(b.updated_at ?? "") || 0) -
+							(Date.parse(a.updated_at ?? "") || 0),
+				)
+				.slice(0, ArthurDashboardView.RECENT_TRAINING_CAP);
+			for (const job of recentJobs) {
+				entries.push({
+					rank: 2,
+					sort: 0,
+					seq: recentSeq++,
+					nodes: [this.jobQueueCard(job)],
+				});
+			}
+			this.renderTrainingQueueToggles();
+		} else {
+			this.aiQueueToggleEl.hide();
+		}
+
+		// Rank order + running duration desc + stable tie-breaks.
+		entries.sort(
+			(a, b) =>
+				a.rank - b.rank || b.sort - a.sort || a.seq - b.seq,
+		);
+		q.empty();
+		for (const entry of entries) {
+			for (const node of entry.nodes) q.append(node);
+		}
+		for (const panel of this.panels.values()) {
+			if (!headEmitted.has(panel.port)) panel.head.hide();
+		}
+		if (entries.length === 0) this.queueEmptyEl.show();
+		else this.queueEmptyEl.hide();
+		this.queueEl.append(this.aiQueueToggleEl, this.queueEmptyEl);
 	}
 
 	private renderProgress(panel: GenPanel): void {
@@ -1645,55 +1707,110 @@ export class ArthurDashboardView extends ItemView {
 		);
 	}
 
-	private renderTraining(): void {
-		// Header service state: the aitoolkit service's live state from the agent.
-		const aitk = this.agentDetail.status?.services.find((s) => s.id === "aitoolkit");
-		if (this.agentDetail.statusOk === true && aitk) {
-			this.trainingSvcEl.setText(` — agent: ${aitk.active ? "active" : "idle"}`);
-			this.trainingSvcEl.show();
+	/**
+	 * Refresh one comfy port's cached queue widgets (header labels, dots,
+	 * queue depth, pending rows, button enablement, progress bar) against the
+	 * latest poll data, and report its running/pending counts as the sort
+	 * input for the unified queue.
+	 */
+	private updateGenEntry(
+		panel: GenPanel,
+		p: DesiredPort,
+		detail: ComfyPortDetail | null,
+		host: string,
+	): { running: number; pending: number } {
+		const running = Array.isArray(detail?.queue?.queue_running)
+			? (detail!.queue!.queue_running as unknown[])
+			: [];
+		const pending = Array.isArray(detail?.queue?.queue_pending)
+			? (detail!.queue!.queue_pending as unknown[])
+			: [];
+		const online = detail?.online === true;
+
+		panel.titleEl.setText(p.label);
+		setDot(panel.genDot, detail?.online ?? null);
+		panel.genDot.setAttribute(
+			"title",
+			detail?.online === false
+				? errTooltip(host ? `${host}:${p.port}` : "(not configured)", detail.error)
+				: `${p.label} — ${online ? "ok" : "waiting for data…"}`,
+		);
+		panel.queueEl.setText(`${running.length} running · ${pending.length} pending`);
+
+		// running prompt info: queue entries are [exec, prompt_id, graph, extra, …]
+		const entry = (running[0] ?? null) as unknown[];
+		const pid = entry && typeof entry[1] === "string" ? entry[1] : null;
+		panel.runningPromptId = pid;
+		panel.promptGraph =
+			entry && entry[2] && typeof entry[2] === "object"
+				? (entry[2] as Record<string, any>)
+				: null;
+		const classes = Object.values(panel.promptGraph ?? {})
+			.map((n) => (n as any)?.class_type)
+			.filter((s) => typeof s === "string") as string[];
+		if (running.length > 0) {
+			panel.runningTextEl.setText(
+				pid
+					? `${truncate(pid, 12)} · ${classes.slice(0, 4).join(" → ")}${classes.length > 4 ? " → …" : ""}`
+					: "running (prompt id unknown)",
+			);
+			panel.runningTextEl.show();
 		} else {
-			this.trainingSvcEl.hide();
+			panel.runningTextEl.hide();
 		}
 
-		const detail = this.aiDetail;
-		if (detail.reachable !== true) {
-			const host = this.plugin.clients?.profile.host ?? "";
-			const aiPort = this.plugin.clients?.profile.aiToolkitPort ?? 0;
-			this.trainingNoteEl.setText(
-				`ai-toolkit not responding — ${detail.error ?? "no data"}` +
-					(detail.error?.includes("401") === true ? " · check ai-toolkit token in settings" : ""),
+		// pending list (refilled — rows come and go)
+		panel.pendingIds = pending.flatMap((e) =>
+			Array.isArray(e) && typeof e[1] === "string" ? [e[1] as string] : [],
+		);
+		panel.pendingWrap.empty();
+		for (const id of panel.pendingIds) {
+			const del = newBtn("✕");
+			del.addClass("arthur-btn--tiny");
+			del.addEventListener("click", () => void this.deletePending(p.port, id));
+			panel.pendingWrap.append(
+				el("div", {
+					cls: "arthur-pending-row",
+					children: [
+						el("span", { cls: "arthur-card-meta", text: truncate(id, 14) }),
+						del,
+					],
+				}),
 			);
-			this.trainingNoteEl.setAttribute(
-				"title",
-				`${host ? `${host}:${aiPort}` : "(not configured)"} — ${detail.error ?? "no data"}`,
-			);
-			this.trainingNoteEl.show();
-			this.trainingBodyEl.empty();
-			this.trainingQueueEl.empty();
-			return;
 		}
-		this.trainingNoteEl.hide();
-		// Drop caches/state for jobs that no longer exist (deleted or job list rebuilt).
-		this.pruneTrainingState();
-		this.trainingBodyEl.empty();
-		this.jobPanelEls.clear();
-		for (const job of detail.jobs) {
-			this.trainingBodyEl.append(this.jobRow(job));
-			const ui = this.jobUi.get(job.id);
-			if (ui?.chart === true) void this.fetchJobLoss(job.id);
-			if (ui?.logs === true) void this.fetchJobLog(job.id);
-		}
-		this.trainingQueueEl.empty();
-		if (detail.queues.length === 0) {
-			this.trainingQueueEl.append(
-				el("span", { cls: "arthur-card-meta", text: "no queues" }),
-			);
-			return;
-		}
-		for (const q of detail.queues) this.trainingQueueEl.append(this.queueRow(q));
+
+		panel.btnCancel.disabled = !online || running.length === 0;
+		panel.btnClear.disabled = !online || pending.length === 0;
+		panel.btnFree.disabled = !online;
+
+		this.renderProgress(panel);
+		return { running: running.length, pending: pending.length };
 	}
 
-	private jobRow(job: AiToolkitJob): DocumentFragment {
+	/**
+	 * Per-GPU-set ai-toolkit queue toggles — the tail of the unified queue,
+	 * only rendered while ai-toolkit answers (elsewhere hidden; the error
+	 * banner carries the unreachable state).
+	 */
+	private renderTrainingQueueToggles(): void {
+		const wrap = this.aiQueueToggleEl;
+		wrap.show();
+		wrap.empty();
+		if (this.aiDetail.queues.length === 0) {
+			wrap.append(el("span", { cls: "arthur-card-meta", text: "no ai-toolkit queues" }));
+			return;
+		}
+		for (const q of this.aiDetail.queues) wrap.append(this.queueRow(q));
+	}
+
+	/**
+	 * One training job card of the unified queue (stable anchor id
+	 * arthur-training-row-<id>): status badge + name + GPUs + step/speed
+	 * stats, step progress bar while running, the existing action buttons,
+	 * and the chart/log accordion. Rebuilt per tick — action enablement
+	 * follows the job status.
+	 */
+	private jobQueueCard(job: AiToolkitJob): HTMLElement {
 		const clients = this.plugin.clients!;
 		const pollers = this.pollers();
 		const name = truncate(job.name, 28);
@@ -1721,7 +1838,7 @@ export class ArthurDashboardView extends ItemView {
 			);
 
 		const running = job.status === "running";
-		const actions = el("td", { cls: "arthur-actions" });
+		const actions = el("div", { cls: "arthur-actions" });
 		const toggle = (key: "chart" | "logs", text: string) => {
 			const b = btn(text, () => this.toggleJobPanel(job.id, key), false);
 			if (ui[key] === true) b.addClass("arthur-btn--active");
@@ -1739,28 +1856,37 @@ export class ArthurDashboardView extends ItemView {
 			btn("Sample now", () => void run(pollers, label("Sample now"), () => clients.aitoolkit.jobSampleNow(job.id)), !running || job.sample_now),
 		);
 
-		const row = el("tr", {
-			cls: `arthur-job--${job.status}`,
+		const pct = jobStepPct(job);
+		const card = el("div", {
+			cls: `arthur-queue-job arthur-queue-job--training arthur-job--${job.status}`,
 			attrs: { id: `arthur-training-row-${job.id}` },
-			children: [
-				el("td", { text: name, attrs: { title: job.name } }),
-				el("td", { text: job.gpu_ids || "?" }),
-				el("td", { text: job.status }),
-				el("td", {
-					text: job.total_steps != null && job.total_steps > 0
-						? `${Math.round((100 * job.step) / job.total_steps)}% (${job.step}/${job.total_steps})`
-						: `${job.step}/?`,
-				}),
-				el("td", { text: job.speed_string || "—" }),
-				el("td", { text: job.queue_position != null ? String(job.queue_position) : "—" }),
-				actions,
-			],
 		});
-
-		const frag = document.createDocumentFragment();
-		frag.append(row);
-		if (ui.chart || ui.logs) frag.append(this.jobPanelRow(job.id, ui));
-		return frag;
+		card.append(
+			el("div", {
+				cls: "arthur-card-head",
+				children: [
+					el("span", { cls: `arthur-badge ${jobBadgeCls(job.status)}`, text: job.status }),
+					el("span", { cls: "arthur-card-title", text: name, attrs: { title: job.name } }),
+					el("span", { cls: "arthur-card-meta", text: `GPUs ${job.gpu_ids || "?"}` }),
+					el("span", {
+						cls: "arthur-card-meta",
+						text: `${job.step}/${job.total_steps ?? "?"} · ${job.speed_string || "—"}`,
+					}),
+				],
+			}),
+		);
+		if (running && pct != null) {
+			const fill = el("div", { cls: "arthur-bar-fill" });
+			fill.style.width = `${pct}%`;
+			card.append(el("div", { cls: "arthur-bar", children: [fill] }));
+		}
+		card.append(actions);
+		if (ui.chart || ui.logs) {
+			card.append(this.jobPanelStack(job.id, ui));
+			if (ui.chart) void this.fetchJobLoss(job.id);
+			if (ui.logs) void this.fetchJobLog(job.id);
+		}
+		return card;
 	}
 
 	// ------------------------------------------------------------------
@@ -1779,7 +1905,7 @@ export class ArthurDashboardView extends ItemView {
 	private toggleJobPanel(jobId: string, key: "chart" | "logs"): void {
 		const ui = this.jobUiState(jobId);
 		ui[key] = !ui[key];
-		this.renderTraining();
+		this.renderQueue();
 	}
 
 	/** Drop caches + accordion state for jobs that no longer exist. */
@@ -1805,8 +1931,10 @@ export class ArthurDashboardView extends ItemView {
 		this.jobPanelEls.clear();
 	}
 
-	/** Expandable <tr> under a job row, holding the chart and/or log panels. */
-	private jobPanelRow(jobId: string, ui: JobPanelUi): HTMLElement {
+	/** Accordion stack (chart / log panels) inside a training job card — the
+	 *  mounted containers are registered in jobPanelEls so the incremental
+	 *  fetchers repaint them in place. */
+	private jobPanelStack(jobId: string, ui: JobPanelUi): HTMLElement {
 		const mounted: { chart?: HTMLElement; log?: HTMLElement } = {};
 		const stack = el("div", { cls: "arthur-panel-stack" });
 		if (ui.chart) {
@@ -1817,15 +1945,10 @@ export class ArthurDashboardView extends ItemView {
 			mounted.log = el("div", { cls: "arthur-log-panel" });
 			stack.append(mounted.log);
 		}
-		const cell = el("td", {
-			cls: "arthur-job-panel-cell",
-			attrs: { colspan: "7" },
-			children: [stack],
-		});
 		this.jobPanelEls.set(jobId, mounted);
 		if (mounted.chart) this.renderJobChart(mounted.chart, jobId);
 		if (mounted.log) this.renderJobLog(mounted.log, jobId);
-		return el("tr", { cls: "arthur-job-panel-row", children: [cell] });
+		return stack;
 	}
 
 	/** Paint the loss chart panel from the accumulated cache (no fetch). */

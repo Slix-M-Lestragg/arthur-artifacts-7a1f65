@@ -117,60 +117,7 @@
 	padding: 0.75em;
 	display: flex;
 	flex-direction: column;
-	gap: 0.75em;
-}
-
-.arthur-topbar {
-	display: flex;
-	align-items: center;
-	gap: 1em;
-	flex-wrap: wrap;
-	padding: 0.35em 0.75em;
-	border-radius: var(--radius-s);
-	background: var(--background-secondary);
-	font-size: var(--font-ui-small);
-}
-
-.arthur-topbar-profile {
-	font-weight: var(--font-semibold);
-}
-
-.arthur-topbar-dots {
-	display: flex;
-	align-items: center;
-	gap: 0.75em;
-	flex-wrap: wrap;
-	min-width: 0;
-}
-
-.arthur-dot-wrap {
-	display: inline-flex;
-	align-items: center;
-	gap: 0.3em;
-	/* tooltip label */
-	position: relative;
-}
-
-.arthur-dot-label {
-	opacity: 0.75;
-}
-
-.arthur-topbar-updated {
-	margin-inline-start: auto;
-	opacity: 0.6;
-	font-variant-numeric: tabular-nums;
-}
-
-/* one-line last-errors diagnostics (offline probes + the URLs attempted) */
-.arthur-topbar-errors {
-	flex: 1 1 100%;
-	min-width: 0;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-	opacity: 0.85;
-	color: var(--text-error, #e93147);
-	cursor: default;
+	gap: 0.85em;
 }
 
 /* ---------------------------------------------------------------- dots */
@@ -198,38 +145,23 @@
 
 /* ---------------------------------------------------------------- banners */
 
+/* ONE slim error line directly under the service bar — dead services + last
+   error + attempted host:port; hidden entirely while everything answers. */
 .arthur-banner {
-	display: flex;
-	align-items: center;
+	display: block;
 	gap: 0.5em;
-	padding: 0.4em 0.75em;
+	padding: 0.3em 0.75em;
 	border-radius: var(--radius-s);
 	background: var(--background-modifier-warning);
 	color: var(--text-warning);
 	font-size: var(--font-ui-small);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	cursor: default;
 }
 
-.arthur-banner--warn::before {
-	content: "⚠";
-}
-
-/* ---------------------------------------------------------------- sections */
-
-.arthur-section {
-	display: flex;
-	flex-direction: column;
-	gap: 0.5em;
-}
-
-.arthur-section h4 {
-	margin: 0 0 0.15em 0;
-}
-
-.arthur-section h5 {
-	margin: 0.5em 0 0.15em 0;
-}
-
-/* instance-row group heading: <service name> | state · count */
+/* unmanaged-row fallback heading (agent unreachable) */
 .arthur-inst-group {
 	display: flex;
 	align-items: baseline;
@@ -238,13 +170,6 @@
 
 .arthur-inst-group:first-child {
 	margin-top: 0;
-}
-
-/* training header's agent-visible service state */
-.arthur-training-service {
-	opacity: 0.75;
-	font-size: var(--font-ui-small);
-	font-weight: var(--font-normal);
 }
 
 .arthur-cards {
@@ -295,13 +220,16 @@
 	align-items: stretch;
 }
 
+/* GPU column headers — outlined chips with name, VRAM bar, util, temp. */
 .arthur-grid-colhead {
 	display: flex;
 	flex-direction: column;
 	gap: 0.35em;
 	min-width: 0;
-	padding: 0.35em 0.5em;
-	border-bottom: 1px solid var(--background-modifier-border);
+	padding: 0.45em 0.6em;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m, 10px);
+	background: var(--background-secondary);
 }
 
 .arthur-grid-gpu-name {
@@ -312,15 +240,51 @@
 	white-space: nowrap;
 }
 
+/* Instance cards — self-contained outlined objects. Running = subtle accent
+   tint (accent mixed into the primary background) + accent border; idle =
+   neutral border on the primary background; down = dashed muted + grayscale
+   (all via theme variables, so light/dark themes both work). */
 .arthur-grid-row {
 	border: 1px solid var(--background-modifier-border);
-	border-radius: var(--radius-s);
-	background: var(--background-secondary);
-	padding: 0.5em 0.65em;
+	border-radius: var(--radius-m, 10px);
+	background: var(--background-primary);
+	padding: 0.55em 0.75em;
 	display: flex;
 	flex-direction: column;
 	gap: 0.35em;
 	min-width: 0;
+	box-shadow: var(--shadow-s);
+	transition:
+		border-color 0.15s ease,
+		background-color 0.15s ease,
+		box-shadow 0.15s ease;
+}
+
+/* subtle accent lift on hover */
+.arthur-grid-row:hover {
+	border-color: color-mix(in srgb, var(--interactive-accent) 60%, var(--background-modifier-border));
+}
+
+.arthur-grid-row--running {
+	border-color: var(--interactive-accent);
+	background: color-mix(in srgb, var(--interactive-accent) 10%, var(--background-primary));
+}
+
+.arthur-grid-row--running:hover {
+	border-color: var(--interactive-accent-hover);
+	background: color-mix(in srgb, var(--interactive-accent) 16%, var(--background-primary));
+}
+
+.arthur-grid-row--down {
+	border-style: dashed;
+	border-color: var(--background-modifier-border);
+	box-shadow: none;
+	filter: grayscale(1);
+	opacity: 0.75;
+}
+
+.arthur-grid-row--down:hover {
+	border-color: var(--background-modifier-border-hover);
 }
 
 .arthur-grid-row-head {
@@ -328,6 +292,25 @@
 	align-items: center;
 	gap: 0.5em;
 	min-width: 0;
+}
+
+/* right-aligned tail of the card header: run duration + state badge */
+.arthur-grid-head-tail {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.5em;
+	margin-inline-start: auto;
+	flex: none;
+}
+
+.arthur-grid-duration {
+	font-variant-numeric: tabular-nums;
+}
+
+/* lifecycle buttons aligned right under the header line */
+.arthur-grid-actions {
+	margin-inline-start: auto;
+	justify-content: flex-end;
 }
 
 .arthur-grid-title {
@@ -339,19 +322,91 @@
 	opacity: 0.7;
 }
 
-.arthur-grid-row--running {
-	border-color: var(--interactive-accent);
-}
-
 .arthur-grid-link {
 	align-self: flex-start;
 	font-size: var(--font-ui-smaller);
 	cursor: pointer;
 }
 
+/* ---------------------------------------------------------------- job queue */
+
+.arthur-queue {
+	display: flex;
+	flex-direction: column;
+	gap: 0.45em;
+}
+
+/* per-instance group header (anchor id arthur-queue-<port>): dot + label + ws
+   state + queue depth + clear-queue/free-VRAM actions, outlined like a card */
+.arthur-queue-head {
+	display: flex;
+	align-items: center;
+	gap: 0.5em;
+	padding: 0.4em 0.65em;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m, 10px);
+	background: var(--background-secondary);
+	min-width: 0;
+	scroll-margin-top: 4em;
+}
+
+.arthur-queue-head:hover {
+	border-color: color-mix(in srgb, var(--interactive-accent) 60%, var(--background-modifier-border));
+}
+
+.arthur-queue-head .arthur-btn-row {
+	margin-inline-start: auto;
+}
+
+.arthur-queue-title {
+	font-weight: var(--font-semibold);
+	flex: none;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* compact job cards of the unified queue (running / pending / training) */
+.arthur-queue-job {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m, 10px);
+	background: var(--background-primary);
+	padding: 0.5em 0.65em;
+	display: flex;
+	flex-direction: column;
+	gap: 0.3em;
+	min-width: 0;
+	box-shadow: var(--shadow-s);
+	scroll-margin-top: 4em;
+}
+
+.arthur-queue-job--running {
+	border-color: var(--interactive-accent);
+	background: color-mix(in srgb, var(--interactive-accent) 10%, var(--background-primary));
+}
+
+.arthur-queue-job--running:hover {
+	border-color: var(--interactive-accent-hover);
+	background: color-mix(in srgb, var(--interactive-accent) 16%, var(--background-primary));
+}
+
+.arthur-queue-job .arthur-card-head .arthur-btn-row,
+.arthur-queue-job .arthur-actions {
+	margin-inline-start: auto;
+}
+
+/* per-GPU-set ai-toolkit queue toggles — tail of the unified queue */
+.arthur-aiqueue {
+	display: flex;
+	flex-direction: column;
+	gap: 0.3em;
+	padding: 0.15em 0.25em;
+}
+
 /* scroll target of the grid's 'view in queue' links */
-.arthur-card[id^="arthur-queue-"],
-.arthur-table tr[id^="arthur-training-row-"] {
+.arthur-queue-head[id^="arthur-queue-"],
+.arthur-queue-job[id^="arthur-training-row-"] {
 	scroll-margin-top: 4em;
 }
 
@@ -425,36 +480,10 @@
 
 /* ---------------------------------------------------------------- training */
 
-.arthur-table {
-	width: 100%;
-	font-size: var(--font-ui-small);
-	border-collapse: collapse;
-}
-
-.arthur-table th {
-	text-align: left;
-	font-weight: var(--font-medium);
-	opacity: 0.7;
-	padding: 0.3em 0.5em;
-	border-bottom: 1px solid var(--background-modifier-border);
-}
-
-.arthur-table td {
-	padding: 0.3em 0.5em;
-	border-bottom: 1px solid var(--background-modifier-border-faint);
-	white-space: nowrap;
-}
-
 .arthur-actions {
 	display: flex;
 	gap: 0.25em;
 	flex-wrap: wrap;
-}
-
-.arthur-queue-rows {
-	display: flex;
-	flex-direction: column;
-	gap: 0.3em;
 }
 
 .arthur-queue-row {
@@ -482,14 +511,6 @@
 }
 
 /* ---------------------------------------------------------------- training accordion */
-
-.arthur-job-panel-row td {
-	border-bottom: 1px solid var(--background-modifier-border-faint);
-}
-
-.arthur-job-panel-cell {
-	padding: 0 0.5em 0.75em 2.5em;
-}
 
 .arthur-panel-stack {
 	display: flex;

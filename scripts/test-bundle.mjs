@@ -381,6 +381,22 @@ function findLinks(node, out = []) {
 	return out;
 }
 
+/** Find all elements carrying a CSS class inside a stub element tree. */
+function findByClass(node, cls, out = []) {
+	if (node == null || typeof node !== "object") return out;
+	if ((node.className ?? "").split(/\s+/).includes(cls)) out.push(node);
+	for (const child of node.children ?? []) findByClass(child, cls, out);
+	return out;
+}
+
+/** Find all elements with a tagName (e.g. 'H4') inside a stub element tree. */
+function findByTag(node, tag, out = []) {
+	if (node == null || typeof node !== "object") return out;
+	if (node.tagName === tag) out.push(node);
+	for (const child of node.children ?? []) findByTag(child, tag, out);
+	return out;
+}
+
 // ------------------------------------------------------------------- run -----
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -471,10 +487,17 @@ try {
 	}
 	const viewText = allText(leaf.view.contentEl);
 	assert(ok, "onOpen with empty profile did not throw");
-	assert(viewText.includes("Instances"), "skeleton contains Instances header");
-	assert(viewText.includes("Job queue"), "skeleton contains Job queue header");
-	assert(viewText.includes("Training (ai-toolkit)"), "skeleton contains Training header");
+	// v0.6.1 structure — service bar → error banner → instance grid → unified
+	// job queue; the old top bar / section headers / training table are gone.
 	assert(viewText.includes("not configured"), "empty profile paints 'not configured' state");
+	assert(leaf.view.bannerEl._shown === true, "unconfigured profile shows the error banner");
+	assert(findByClass(leaf.view.contentEl, "arthur-topbar").length === 0, "no old top bar exists");
+	assert(findByTag(leaf.view.contentEl, "H4").length === 0,
+		"no section headers (structure is service bar → banner → grid → queue)");
+	assert(findByClass(leaf.view.contentEl, "arthur-grid").length === 1, "skeleton renders the instance grid");
+	assert(findByClass(leaf.view.contentEl, "arthur-queue").length === 1, "skeleton renders the unified job queue");
+	assert(findByClass(leaf.view.contentEl, "arthur-table").length === 0, "no separate training table (merged into the queue)");
+	assert(leaf.view.profileEl === undefined && leaf.view.lastErrorsEl === undefined, "old top-bar wiring removed (no dead elements retained)");
 	assert(leaf.view.contentEl.isShown(), "contentEl isShown() gate is true for the open view");
 
 	// ---- 4. partially configured profile degrades gracefully -------------
@@ -543,10 +566,17 @@ try {
 	assert(typeof ribbonView?.open === "function", "view exposes a callable open() (no shadowing)");
 	assert(ribbonView?.getViewType() === "arthur-dashboard", "attached view reports the registered type");
 	assert(ribbonView?.isOpened === true, "internal open() ran → view reports open/onOpen() executed");
-	let v5 = allText(ribbonView?.contentEl);
-	assert(v5.includes("Instances"), "attached view renders Instances header");
-	assert(v5.includes("Job queue"), "attached view renders Job queue header");
-	assert(v5.includes("Training (ai-toolkit)"), "attached view renders Training header");
+	assert(!!ribbonView?.gridEl && !!ribbonView?.queueEl, "attached view renders the instance grid + unified job queue");
+	assert(findByTag(ribbonView?.contentEl, "H4").length === 0, "no section headers in the attached view");
+	ok = true;
+	try {
+		await ribbonView.refreshData(); // settle the tick before banner checks
+	} catch (err) {
+		ok = false;
+		console.error(`    ribbon-view refresh threw: ${err?.stack ?? err}`);
+	}
+	assert(ok, "ribbon view refresh did not throw");
+	assert(ribbonView?.bannerEl._shown === true, "dead services (last section's offline host) show the error banner");
 
 	// Second click must reuse the existing leaf, never open a duplicate.
 	ok = true;
@@ -623,9 +653,12 @@ try {
 		console.error(`    refreshData (all probes failing) threw: ${err?.stack ?? err}`);
 	}
 	let v8 = allText(dashLeaf.view.contentEl);
-	assert(/errors:\s+\S/.test(v8) === true, "topbar shows a one-line last-errors summary");
-	assert(v8.includes("10.0.0.9:8188") && v8.includes("10.0.0.9:8675") && v8.includes("10.0.0.9:8766"), "errors line names the attempted host:port per service");
-	assert(v8.includes("offline"), "errors line carries the network-level failure text");
+	const banner8 = dashLeaf.view.bannerEl;
+	assert(banner8._shown === true && allText(banner8).includes("errors:"),
+		"dead services → the ONE slim error banner under the service bar shows");
+	assert(v8.includes("10.0.0.9:8188") && v8.includes("10.0.0.9:8675") && v8.includes("10.0.0.9:8766"),
+		"banner names the attempted host:port per service");
+	assert(v8.includes("offline"), "banner carries the network-level failure text");
 	const genDotEl = dashLeaf.view.panels.get(8188)?.genDot;
 	assert(genDotEl?.getAttribute("title")?.includes("10.0.0.9:8188") === true, "offline card tooltip holds attempted host:port + error");
 	assert(genDotEl?.getAttribute("title")?.includes("Bearer") === false, "tooltips carry no token material");
@@ -710,7 +743,8 @@ try {
 		"panel title labels instance id + GPU");
 	assert(allText(view9.gridEl).includes("comfy-") === false, "grid rows show agent names, not raw comfy ports as titles");
 	assert(allText(view9.gridEl).includes("ComfyUI #1") === true, "grid rows render agent instance names");
-	assert(view9.trainingSvcEl.textContent.includes("agent: active") === true, "training header shows aitoolkit service state from the agent");
+	assert(findById(view9.contentEl, "arthur-queue-8188") != null && findById(view9.contentEl, "arthur-queue-8189") != null,
+		"unified queue keeps the per-instance group heads (stable arthur-queue-<port> anchors)");
 
 	// B. OFFLINE service click → serviceStart + toast + re-poll
 	agentStatusBody.services[0].active = false;
@@ -1060,6 +1094,9 @@ try {
 	}
 	assert(ok, "grid view attach + refresh did not throw");
 	assert(view14.gridEl.isShown() === true, "grid is visible while the agent answers");
+	// all services answer (agent + gpus + ai-toolkit + both comfy ports) → the
+	// error banner is hidden entirely
+	assert(view14.bannerEl._shown !== true, "all services healthy → error banner hidden entirely");
 	const gridRows14 = () =>
 		view14.gridEl.children.filter((c) => c.hasClass?.("arthur-grid-row"));
 	const gridHead14 = () =>
@@ -1160,8 +1197,38 @@ try {
 		assert(gridHead14().length === 2, "columns derived from instance gpus arrays when /api/gpus is down");
 		assert(allText(gridHead14()[0]).includes("GPU 0"), "derived columns label synthetic GPU indexes");
 		assert(allText(gridHead14()[0]).includes("VRAM ?"), "derived columns show placeholder stats");
-		assert(allText(view14.lastErrorsEl).includes("gpu stats 10.0.0.9:8766"),
-			"gpu collector failure joins the topbar last-errors line");
+		assert(allText(view14.bannerEl).includes("gpu stats 10.0.0.9:8766") === true,
+			"gpu collector failure joins the banner error line");
+		assert(view14.bannerEl._shown === true, "dead gpu collector → only then the banner shows");
+	}
+
+	// (h) unified job queue: running cards sort before pending cards; the
+	// per-instance group heads + anchors resolve
+	{
+		comfyQueue[8188].queue_pending = [["exec", "prompt-pending-1", { "7": { class_type: "CheckpointLoader" } }]];
+		view14.runStarts.set("run:8188", Date.now() - 60000);
+		view14.runStarts.set("run:8189", Date.now() - 10000);
+		view14.renderInstances();
+		view14.renderQueue();
+		const jobCards = view14.queueEl.children.filter((c) => c.hasClass?.("arthur-queue-job"));
+		const runningIdx = jobCards.map((c, i) => (c.hasClass("arthur-queue-job--running") ? i : -1)).filter((i) => i >= 0);
+		const pendingIdx = jobCards.map((c, i) => (c.hasClass("arthur-queue-job--pending") ? i : -1)).filter((i) => i >= 0);
+		assert(jobCards.length >= 2, "unified queue renders compact job cards");
+		assert(runningIdx.length >= 1 && pendingIdx.length >= 1, "queue holds both running and pending cards");
+		assert(Math.max(...runningIdx) < Math.min(...pendingIdx),
+			`unified queue orders running cards before pending cards (running=${runningIdx.join(",")}, pending=${pendingIdx.join(",")})`);
+		const heads = view14.queueEl.children.filter((c) => c.hasClass?.("arthur-queue-head"));
+		assert(heads.length === 2, "one group header per comfy instance (queue depth + clear-queue/free-VRAM actions)");
+		assert(!!findById(view14.contentEl, "arthur-queue-8188") && !!findById(view14.contentEl, "arthur-queue-8189"),
+			"queue group anchors still resolve for the grid's 'view in queue ↓' links");
+	}
+
+	// (i) grid cards carry the outlined running/idle/down variants
+	{
+		const rows = gridRows14();
+		assert(rows.some((r) => r.hasClass("arthur-grid-row--running")), "running grid card variant present");
+		assert(rows.some((r) => r.hasClass("arthur-grid-row--idle")), "idle grid card variant present");
+		assert(rows.some((r) => r.hasClass("arthur-grid-row--down")), "down grid card variant present (comfy-dual)");
 	}
 
 	httpResponder = null;
@@ -1184,4 +1251,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-tooltips / agent-v0.5.0-service-bar / hung-request-timeout-guard / down-instance-filtering / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+icons+fallback all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.5.0-service-bar / hung-request-timeout-guard / down-instance-filtering / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+icons+fallback / unified-job-queue all clean");
