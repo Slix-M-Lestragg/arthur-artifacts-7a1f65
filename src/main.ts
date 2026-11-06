@@ -235,6 +235,9 @@ export default class ArthurPlugin extends Plugin {
 	/** Live dashboard view instance, if its leaf is open (set/cleared by the view). */
 	dashboardView: ArthurDashboardView | null = null;
 
+	/** Cached comfy clients for dynamically discovered instance ports. */
+	private readonly comfyClientCache = new Map<number, ComfyUIClient>();
+
 	/** Parsed comfy instance ports of the active profile ([] until clients exist). */
 	get comfyPorts(): number[] {
 		return this.clients?.comfyPorts ?? [];
@@ -331,6 +334,8 @@ export default class ArthurPlugin extends Plugin {
 
 	/** Build API clients from the active profile; replaces any previous set. */
 	private rebuildClients(): void {
+		// Discovered instance ports may be stale now (host/ports changed).
+		this.comfyClientCache.clear();
 		const raw = this.settings.profiles[0];
 		// Snapshot (never hand live settings objects into the runtime — text-field
 		// edits would mutate an in-flight profile) with the host normalized so
@@ -367,10 +372,28 @@ export default class ArthurPlugin extends Plugin {
 	}
 
 	/**
-	 * Light cycle: per-port system_stats + queue, ai-toolkit jobs, agent
-	 * status (best-effort; anything failing just means its field stays null
-	 * / offline). Paints the status bar pill. Runs every LIGHT_INTERVAL_MS
-	 * while the plugin is loaded, dashboard open or not.
+	 * Comfy client for a given port: the prebuilt one when the port is in the
+	 * settings list, otherwise a cached on-demand client (the agent's
+	 * discovered instances can appear/disappear without a settings change).
+	 */
+	comfyClientFor(port: number): ComfyUIClient | null {
+		const clients = this.clients;
+		if (!clients || !clients.profile.host) return null;
+		const idx = clients.comfyPorts.indexOf(port);
+		if (idx >= 0) return clients.comfy[idx] ?? null;
+		const cached = this.comfyClientCache.get(port);
+		if (cached) return cached;
+		const client = new ComfyUIClient(clients.profile.host, port, obsidianRequester);
+		this.comfyClientCache.set(port, client);
+		return client;
+	}
+
+	/**
+	 * Light cycle: agent status (best-effort), then per-instance system_stats
+	 * + queue for the comfy ports it discovers (the settings list is the
+	 * unreachable fallback), ai-toolkit jobs. Anything failing just means its
+	 * field stays null / offline. Paints the status bar pill. Runs every
+	 * LIGHT_INTERVAL_MS while the plugin is loaded, dashboard open or not.
 	 */
 	private async collectLightData(): Promise<void> {
 		const clients = this.clients;
@@ -384,22 +407,30 @@ export default class ArthurPlugin extends Plugin {
 			}
 		};
 
-		const results = await Promise.all(
-			clients.comfy.map(async (client) => ({
-				stats: await best(client.systemStats()),
-				queue: await best(client.queue()),
-			})),
-		);
 		const [agentStatus, aiJobs] = await Promise.all([
 			best(clients.agent.status()),
 			best(clients.aitoolkit.jobs()),
 		]);
 
-		const gpus = results.map((r, i) => ({
-			port: clients.comfyPorts[i],
-			gpuIndex:
-				agentStatus?.instances.find((v) => v.port === clients.comfyPorts[i])?.gpu ??
-				null,
+		// Comfy ports come from the agent's discovered instances when it
+		// answers; the settings comfyPorts list is the unreachable fallback.
+		const comfyInstances = agentStatus?.services.find((s) => s.id === "comfyui")?.instances ?? null;
+		const targets: Array<{ port: number; gpu: number | null }> = comfyInstances
+			? comfyInstances.map((i) => ({ port: i.port, gpu: i.gpu }))
+			: clients.comfyPorts.map((p) => ({ port: p, gpu: null }));
+
+		const results = await Promise.all(
+			targets.map(async (t) => {
+				const client = this.comfyClientFor(t.port);
+				const stats = client ? await best(client.systemStats()) : null;
+				const queue = client ? await best(client.queue()) : null;
+				return { port: t.port, gpu: t.gpu, stats, queue };
+			}),
+		);
+
+		const gpus = results.map((r) => ({
+			port: r.port,
+			gpuIndex: r.gpu,
 			online: r.stats !== null,
 			freeBytes: r.stats?.devices?.[0]?.vram_free ?? null,
 		}));

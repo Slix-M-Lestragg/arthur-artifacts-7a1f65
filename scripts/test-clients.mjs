@@ -193,4 +193,85 @@ for (const comfyPort of [8188, 8189]) {
 	}
 }
 
+// --- arthur-agent (8766) — service-registry surface (API v0.5.0) ----------
+const agentPort = parseInt(process.env.ARTHUR_AGENT_PORT ?? "8766", 10);
+const agentBase = `http://${host}:${agentPort}`;
+console.log(`\n== arthur-agent base: ${agentBase} (auth: ${process.env.ARTHUR_AGENT_TOKEN ? "ARTHUR_AGENT_TOKEN env token" : "none — /api/* live probes limited to the 401 contract"})`);
+
+let agentFailures = 0;
+function agentAssert(label, cond, detail = "") {
+	if (!cond) { agentFailures++; console.log(`agent FAIL ${label} ${detail}`); }
+}
+
+// GET /health — unauthenticated, must answer {ok:true, version:"0.5.0"}
+try {
+	const resp = await requester.request({ url: `${agentBase}/health` });
+	await ensureOk(resp);
+	const health = resp.json();
+	console.log(`agent/health: ${JSON.stringify(health)}`);
+	agentAssert("health-ok", health?.ok === true);
+	agentAssert("health-version-0.5.0", health?.version === "0.5.0", `version=${health?.version}`);
+} catch (err) {
+	agentFailures++;
+	console.log(`agent/health: FAILED ${err.status ?? ""} ${err.message}`);
+}
+
+// Token source: /etc/arthur-agent/token is root 0600 — live /api probes need
+// ARTHUR_AGENT_TOKEN exported (e.g. read it from /etc/arthur-agent/env with
+// sudo). Without it, only the unauthenticated 401 contract is verified.
+const agentToken = process.env.ARTHUR_AGENT_TOKEN || null;
+const agentRequester = nodeFetchRequester(agentToken ? { Authorization: `Bearer ${agentToken}` } : {});
+
+async function agentGet(path) {
+	const resp = await agentRequester.request({ url: agentBase + path });
+	await ensureOk(resp);
+	return resp.json();
+}
+
+if (agentToken) {
+	try {
+		const status = await agentGet("/api/status");
+		console.log(`agent/api/status: version=${status.version} services=${JSON.stringify((status.services ?? []).map((s) => `${s.id}:${s.active ? "active" : "idle"} (${(s.instances ?? []).length} inst)`))}`);
+		agentAssert("status-version", typeof status?.version === "string");
+		agentAssert("status-services-shape",
+			Array.isArray(status?.services) &&
+			status.services.every((s) =>
+				typeof s.id === "string" &&
+				typeof s.active === "boolean" &&
+				typeof s.multi_instance === "boolean" &&
+				typeof s.max_instances === "number" &&
+				typeof s.default_port === "number" &&
+				Array.isArray(s.instances) &&
+				s.instances.every((i) =>
+					typeof i.id === "string" &&
+					typeof i.port === "number" &&
+					typeof i.up === "boolean")),
+			"service/instance shape mismatch");
+		// GET /api/services/{svc}/instances — detailed list shape
+		const svc = status.services?.[0]?.id;
+		if (svc) {
+			const list = await agentGet(`/api/services/${svc}/instances`);
+			agentAssert("instances-shape", list?.service === svc && Array.isArray(list?.instances));
+			console.log(`agent/api/services/${svc}/instances: ${JSON.stringify(list.instances?.map?.((i) => `${i.id}@${i.port}${i.live ? " live" : " not-live"}`))}`);
+		}
+	} catch (err) {
+		agentFailures++;
+		console.log(`agent/api/status: FAILED ${err.status ?? ""} ${err.message}`);
+	}
+} else {
+	// Without a token, verify the gateway's 401 contract instead.
+	try {
+		const resp = await agentRequester.request({ url: `${agentBase}/api/status` });
+		let body = null;
+		try { body = resp.json(); } catch { /* non-JSON */ }
+		console.log(`agent/api/status (no token): HTTP ${resp.status} ${JSON.stringify(body)}`);
+		agentAssert("api-status-unauthenticated-401", resp.status === 401, `status=${resp.status}`);
+	} catch (err) {
+		agentFailures++;
+		console.log(`agent/api/status (no token): FAILED ${err.status ?? ""} ${err.message}`);
+	}
+}
+
+if (agentFailures > 0) process.exitCode = 1;
+
 console.log("\nDone.");

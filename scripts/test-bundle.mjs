@@ -184,14 +184,29 @@ class StubItemView {
 }
 
 class StubModal {
-	constructor(_app) {}
-	open() {}
-	close() {}
+	constructor(_app) {
+		this.app = _app;
+		this.contentEl = new StubEl("div");
+		this.titleEl = new StubEl("div");
+		StubModal.opened.push(this);
+	}
+	open() { this.onOpen?.(); }
+	close() { this.onClose?.(); this._closed = true; }
+	/** Modal instances in creation order — confirm-flow tests replay clicks. */
+	static opened = [];
+	static reset() { StubModal.opened = []; }
 }
 
 class StubNotice {
-	constructor() {}
+	constructor(message) {
+		if (message !== undefined) StubNotice.shown.push(String(message));
+	}
+	/** Toast texts the bundle produced — service-bar flow tests assert these. */
+	static shown = [];
+	static reset() { StubNotice.shown = []; }
 }
+
+let httpResponder = null;
 
 const obsidianStub = {
 	Plugin: StubPlugin,
@@ -200,8 +215,24 @@ const obsidianStub = {
 	ItemView: StubItemView,
 	Modal: StubModal,
 	Notice: StubNotice,
+	// Obsidian icon helper (used by the service bar): records the icon name.
+	setIcon: (el, name) => {
+		el.setAttribute("data-icon", name);
+	},
 	// Rejects exactly like an unreachable server — callers treat it offline.
-	requestUrl: async () => {
+	// Sections can install a temporary httpResponder(opts) → {status, body}
+	// handler to simulate a live arthur-agent; no match → offline (default).
+	// NOTE: the resolved response mirrors Obsidian's REAL requestUrl contract:
+	// `.json` and `.text` are pre-parsed VALUE properties (not methods).
+	requestUrl: async (opts) => {
+		if (httpResponder) {
+			const resp = httpResponder(opts);
+			if (resp) return {
+				status: resp.status ?? 200,
+				json: resp.body ?? {},
+				text: JSON.stringify(resp.body ?? {}),
+			};
+		}
 		throw new Error("offline (smoke stub)");
 	},
 };
@@ -289,6 +320,8 @@ function assert(cond, label) {
 	}
 }
 
+let calls9 = [];
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Deep text dump of a stub element tree. */
@@ -296,6 +329,17 @@ function allText(node) {
 	if (node == null) return "";
 	if (typeof node === "string") return node;
 	return `${node.textContent ?? ""} ${(node.children ?? []).map(allText).join(" ")}`;
+}
+
+/** Find a button by visible text inside a stub element tree (modal confirms). */
+function findButton(node, text) {
+	if (node == null || typeof node !== "object") return null;
+	if (node.tagName === "BUTTON" && (node.textContent ?? "").includes(text)) return node;
+	for (const child of node.children ?? []) {
+		const hit = findButton(child, text);
+		if (hit) return hit;
+	}
+	return null;
 }
 
 // ------------------------------------------------------------------- run -----
@@ -543,9 +587,196 @@ try {
 	assert(/errors:\s+\S/.test(v8) === true, "topbar shows a one-line last-errors summary");
 	assert(v8.includes("10.0.0.9:8188") && v8.includes("10.0.0.9:8675") && v8.includes("10.0.0.9:8766"), "errors line names the attempted host:port per service");
 	assert(v8.includes("offline"), "errors line carries the network-level failure text");
-	const instMetaEl = dashLeaf.view.panels.get(8188)?.instMeta;
-	assert(instMetaEl?.getAttribute("title")?.includes("10.0.0.9:8188") === true, "offline card meta tooltip holds attempted host:port + error");
-	assert(instMetaEl?.getAttribute("title")?.includes("Bearer") === false, "tooltips carry no token material");
+	const genDotEl = dashLeaf.view.panels.get(8188)?.genDot;
+	assert(genDotEl?.getAttribute("title")?.includes("10.0.0.9:8188") === true, "offline card tooltip holds attempted host:port + error");
+	assert(genDotEl?.getAttribute("title")?.includes("Bearer") === false, "tooltips carry no token material");
+	assert(allText(dashLeaf.view.instanceCardsEl).includes("unmanaged") === true, "agent-down instance rows render as unmanaged");
+	const sbDotBtn = dashLeaf.view.serviceBar?.buttons.get("comfyui")?.btn;
+	assert(sbDotBtn?.disabled === true && sbDotBtn?.getAttribute("aria-label")?.includes("agent unreachable") === true, "agent-down service bar renders disabled buttons with the unreachable tooltip");
+
+	// ---- 9. agent v0.5.0 — service bar, dynamic instance panels, lifecycle flows
+	console.log("== 9. agent v0.5.0 service bar + dynamic instance panels ==");
+	plugin.settings.profiles[0].comfyPorts = "8188,8189";
+	ok = true;
+	try {
+		await plugin.saveSettings();
+		await sleep(700); // debounced rebuild with the full fallback port list
+	} catch (err) {
+		ok = false;
+		console.error(`    section-9 setup threw: ${err?.stack ?? err}`);
+	}
+	assert(ok, "section-9 setup (settings rebuild) did not throw");
+
+	const jsonBody = (status, body) => ({ status, body });
+	const agentStatusBody = {
+		version: "0.5.0",
+		host_uptime: 123456.7,
+		services: [
+			{
+				id: "comfyui", name: "ComfyUI", active: true, multi_instance: true,
+				max_instances: 4, default_port: 8188, unit_template: "comfy@{i}",
+				instances: [
+					{ id: "comfy-0", service: "comfyui", name: "ComfyUI #0", port: 8188, gpu: 0, up: true, uptime: 169000.0 },
+					{ id: "comfy-1", service: "comfyui", name: "ComfyUI #1", port: 8189, gpu: 1, up: true, uptime: 168000.0 },
+				],
+			},
+			{
+				id: "aitoolkit", name: "AI Toolkit", active: true, multi_instance: false,
+				max_instances: 1, default_port: 8675, unit: "ai-toolkit.service",
+				instances: [
+					{ id: "aitoolkit", service: "aitoolkit", name: "AI Toolkit", port: 8675, gpu: null, up: true, uptime: 180000.0 },
+				],
+			},
+		],
+	};
+	calls9 = [];
+	// Default handler: agent handshake + status answer; everything else offline.
+	httpResponder = (opts) => {
+		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.0" });
+		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
+		if (opts.method === "POST" && opts.url.endsWith("/api/services/comfyui/start")) {
+			return jsonBody(200, { action: "start", result: "started", service: agentStatusBody.services[0] });
+		}
+		return null;
+	};
+
+	// A. status-driven rendering: buttons per service, agent-discovered panels
+	app.workspace.detachLeavesOfType("arthur-dashboard");
+	let view9;
+	ok = true;
+	try {
+		await plugin.activateView();
+		view9 = app.workspace.getLeavesOfType("arthur-dashboard")[0]?.view;
+		await view9.refreshData(); // wait for the onOpen/first-tick fill
+	} catch (err) {
+		ok = false;
+		console.error(`    agent-backed onOpen threw: ${err?.stack ?? err}`);
+	}
+	assert(ok, "agent-backed view attach + refresh did not throw");
+	const sb = view9?.serviceBar;
+	const sbComfy = sb?.buttons.get("comfyui");
+	const sbAi = sb?.buttons.get("aitoolkit");
+	assert(!!sb && sb.buttons.size === 2, "service bar renders one button per agent service");
+	assert(sbComfy?.btn.hasClass("arthur-svc-btn--active") === true, "active service button gets the accent/active state");
+	assert(sbAi?.btn.hasClass("arthur-svc-btn--active") === true, "second active service button gets the active state");
+	assert(sbComfy?.icon.getAttribute("data-icon") === "sparkles", "comfyui button uses the mapped service icon");
+	assert(sbAi?.icon.getAttribute("data-icon") === "brain-circuit", "aitoolkit button uses the mapped service icon");
+	assert(sbComfy?.kill.style.display === "" && sbAi?.kill.style.display === "", "active buttons expose the red kill zone");
+	assert(view9.panels.get(8188) != null && view9.panels.get(8189) != null, "generation panels attach to agent-discovered ports");
+	assert(view9.panels.get(8189)?.titleEl.textContent.includes("comfy-1") === true
+		&& view9.panels.get(8189)?.titleEl.textContent.includes("GPU 1") === true,
+		"panel title labels instance id + GPU");
+	assert(allText(view9.instanceCardsEl).includes("comfy-") === false, "instance rows show agent names, not raw comfy ports as titles");
+	assert(allText(view9.instanceCardsEl).includes("ComfyUI #1") === true, "instance rows render agent instance names");
+	assert(view9.trainingSvcEl.textContent.includes("agent: active") === true, "training header shows aitoolkit service state from the agent");
+
+	// B. OFFLINE service click → serviceStart + toast + re-poll
+	agentStatusBody.services[0].active = false;
+	await view9.refreshData();
+	assert(sbComfy?.btn.hasClass("arthur-svc-btn--offline") === true, "inactive service button gets the grey/offline state");
+	assert(sbComfy?.kill.style.display === "none", "offline button hides the kill zone");
+	calls9 = [];
+	StubNotice.reset();
+	await sbComfy?.btn.handlers.get("click")[0]?.();
+	await sleep(30);
+	assert(calls9.some((c) => c.method === "POST" && c.url.endsWith("/api/services/comfyui/start")) === true, "offline service click calls the agent start endpoint");
+	assert(StubNotice.shown.some((m) => m.includes("start ComfyUI — done")) === true, "offline service click toasts the result");
+	agentStatusBody.services[0].active = true;
+	await view9.refreshData();
+
+	// C. ACTIVE service click → serviceSpawn + 'Spawned … on port X' toast
+	calls9 = [];
+	StubNotice.reset();
+	httpResponder = (opts) => {
+		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.0" });
+		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
+		if (opts.method === "POST" && opts.url.endsWith("/api/services/comfyui/instances")) {
+			return jsonBody(201, {
+				action: "spawn", result: "spawned",
+				instance: { id: "comfy-2", service: "comfyui", name: "ComfyUI #2", port: 8190, gpu: 0, unit: "comfy@2", up: true, live: true },
+			});
+		}
+		return null;
+	};
+	await sbComfy?.btn.handlers.get("click")[0]?.();
+	await sleep(30);
+	assert(calls9.some((c) => c.method === "POST" && c.url.endsWith("/api/services/comfyui/instances")) === true, "active service click calls the instance spawn endpoint");
+	assert(StubNotice.shown.some((m) => m.includes("Spawned ComfyUI instance on port 8190")) === true, "spawn success toasts the new instance port");
+
+	// D. single-instance spawn 409 → the agent's error toast, no crash
+	calls9 = [];
+	StubNotice.reset();
+	httpResponder = (opts) => {
+		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.0" });
+		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
+		if (opts.method === "POST" && opts.url.endsWith("/api/services/aitoolkit/instances")) {
+			return jsonBody(409, { error: "single-instance service" });
+		}
+		return null;
+	};
+	ok = true;
+	try {
+		await sbAi?.btn.handlers.get("click")[0]?.();
+		await sleep(30);
+	} catch (err) {
+		ok = false;
+		console.error(`    single-instance spawn click threw: ${err?.stack ?? err}`);
+	}
+	assert(ok, "single-instance spawn 409 does not crash");
+	assert(StubNotice.shown.some((m) => m.includes("single-instance service")) === true, "spawn 409 surfaces the agent's error message as a toast");
+
+	// E. kill zone → confirm modal → serviceStop; 409 busy → force modal
+	StubModal.reset();
+	calls9 = [];
+	httpResponder = (opts) => {
+		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.0" });
+		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
+		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/stop")) {
+			return opts.url.includes("force=1")
+				? jsonBody(200, { action: "stop", result: "stopped", stopped: ["comfy-0", "comfy-1"], service: agentStatusBody.services[0] })
+				: jsonBody(409, { error: "generation running: comfy-0 (1); pass ?force=1 to stop anyway" });
+		}
+		return null;
+	};
+	await sbComfy?.kill.handlers.get("click")[0]?.({ stopPropagation() {} });
+	await sleep(30);
+	assert(StubModal.opened.length === 1, "kill-zone click opens exactly one confirm modal");
+	assert(StubModal.opened[0]?.titleEl.textContent.includes("Stop all ComfyUI") === true, "kill-zone confirm asks 'Stop all <name> instances'");
+	calls9 = [];
+	const confirmBtn = findButton(StubModal.opened[0]?.contentEl, "Confirm");
+	assert(!!confirmBtn, "confirm modal exposes a Confirm button");
+	await confirmBtn.handlers.get("click")[0]?.();
+	await sleep(30);
+	assert(calls9.some((c) => c.method === "POST" && c.url.endsWith("/api/services/comfyui/stop") && !c.url.includes("force")) === true, "confirmed kill calls the service stop endpoint (no force)");
+	assert(StubModal.opened.length === 2, "409 busy response escalates to a second force modal");
+	assert(StubModal.opened[1]?.titleEl.textContent.includes("Force stop") === true, "force modal offers the force path");
+	assert(StubModal.opened[1]?.contentEl.textContent.includes("comfy-0") === true, "force modal names the busy generation instances");
+	calls9 = [];
+	const forceBtn = findButton(StubModal.opened[1]?.contentEl, "Confirm");
+	await forceBtn.handlers.get("click")[0]?.();
+	await sleep(30);
+	assert(calls9.some((c) => c.method === "POST" && c.url.includes("/api/services/comfyui/stop") && c.url.includes("force=1")) === true, "force confirm calls the service stop endpoint with ?force=1");
+	assert(StubNotice.shown.some((m) => m.includes("stop ComfyUI — done")) === true, "forced stop toasts success");
+
+	// F. agent down → disabled fallback buttons + unmanaged fallback panels
+	httpResponder = null; // every probe rejects offline again
+	calls9 = [];
+	StubNotice.reset();
+	await view9.refreshData();
+	assert(sbComfy?.btn.disabled === true, "service buttons disable when the agent is unreachable");
+	assert(sbComfy?.btn.hasClass("arthur-svc-btn--disabled") === true, "unreachable agent buttons get the disabled grey state");
+	assert(sbComfy?.btn.getAttribute("aria-label")?.includes("agent unreachable") === true, "unreachable buttons carry the agent-unreachable tooltip");
+	assert(view9.panels.get(8188)?.titleEl.textContent.includes("unmanaged") === true, "agent-down panels fall back to configured ports labeled unmanaged");
+	assert(allText(view9.instanceCardsEl).includes("unmanaged") === true, "agent-down instance rows render unmanaged");
+
+	// restore the default offline stub for any later pollution checks
+	httpResponder = null;
+	StubNotice.reset();
+	await app.workspace.detachLeavesOfType("arthur-dashboard");
 
 	// ---- cleanup ----------------------------------------------------------
 	try {
@@ -562,4 +793,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-tooltips all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-tooltips / agent-v0.5.0-service-bar all clean");

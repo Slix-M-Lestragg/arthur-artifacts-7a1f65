@@ -20,6 +20,97 @@
 	opacity: 0.55;
 }
 
+/* ---------------------------------------------------------------- service bar */
+
+.arthur-service-bar {
+	display: flex;
+	align-items: center;
+	gap: 0.5em;
+	flex-wrap: wrap;
+}
+
+/* pill/capsule service button: grey when inactive, accent when active */
+.arthur-svc-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.45em;
+	padding: 0.25em 0.65em;
+	border-radius: 999px;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-secondary);
+	color: var(--text-normal);
+	cursor: pointer;
+	font-size: var(--font-ui-small);
+	max-width: 260px;
+	box-shadow: none;
+}
+
+.arthur-svc-btn:not(.arthur-svc-btn--disabled):hover {
+	border-color: var(--interactive-accent);
+	box-shadow: 0 0 0 1px var(--background-modifier-border-focus) inset;
+}
+
+.arthur-svc-icon,
+.arthur-svc-kill {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex: none;
+}
+
+.arthur-svc-icon svg {
+	width: 1em;
+	height: 1em;
+}
+
+.arthur-svc-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* inactive service: desaturated, low-opacity grey */
+.arthur-svc-btn--offline {
+	opacity: 0.55;
+	filter: grayscale(1);
+}
+
+/* agent unreachable: disabled grey */
+.arthur-svc-btn--disabled {
+	opacity: 0.4;
+	filter: grayscale(1);
+	cursor: not-allowed;
+}
+
+/* active service: full accent color */
+.arthur-svc-btn--active {
+	border-color: var(--interactive-accent);
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
+/* dedicated red kill zone on the right edge of active buttons */
+.arthur-svc-kill {
+	width: 8%;
+	min-width: 1.5em;
+	padding-left: 0.35em;
+	margin-inline-start: 0.15em;
+	border-left: 1px solid var(--background-modifier-border);
+	background: var(--background-modifier-error);
+	cursor: pointer;
+}
+
+.arthur-svc-kill svg {
+	width: 0.85em;
+	height: 0.85em;
+	/* white icon on the red zone */
+	color: var(--text-on-accent);
+}
+
+.arthur-svc-kill:hover {
+	background: var(--background-modifier-error-hover);
+}
+
 /* ---------------------------------------------------------------- top bar */
 
 .arthur-dashboard {
@@ -136,6 +227,24 @@
 
 .arthur-section h5 {
 	margin: 0.5em 0 0.15em 0;
+}
+
+/* instance-row group heading: <service name> | state · count */
+.arthur-inst-group {
+	display: flex;
+	align-items: baseline;
+	gap: 0.6em;
+}
+
+.arthur-inst-group:first-child {
+	margin-top: 0;
+}
+
+/* training header's agent-visible service state */
+.arthur-training-service {
+	opacity: 0.75;
+	font-size: var(--font-ui-small);
+	font-weight: var(--font-normal);
 }
 
 .arthur-cards {

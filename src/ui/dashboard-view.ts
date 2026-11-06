@@ -1,16 +1,31 @@
 /**
- * Arthur dashboard — desktop ItemView with three stacked sections:
- *   1. INSTANCES   — per ComfyUI port: agent-reported up/uptime, HTTP
- *                    liveness, VRAM bar, lifecycle buttons (via arthur-agent)
+ * Arthur dashboard — desktop ItemView with four stacked sections:
+ *   0. SERVICES    — one pill button per agent service (src/ui/service-bar.ts):
+ *                    click = start (inactive) / spawn (active), red kill zone
+ *                    = stop ALL instances (confirm + force modals)
+ *   1. INSTANCES   — agent-reported per-instance rows (id, port, GPU, up/
+ *                    uptime, VRAM) with lifecycle buttons via arthur-agent;
+ *                    when the agent is unreachable the settings comfyPorts
+ *                    render as unmanaged rows without lifecycle controls
  *   2. GENERATION  — per ComfyUI port: queue depth, running prompt info,
- *                    live WS progress bar, job control buttons
- *   3. TRAINING    — ai-toolkit job table + per-GPU-set queue toggles
+ *                    live WS progress bar, job control buttons; ports come
+ *                    from the agent's discovered instances (settings list is
+ *                    the fallback only)
+ *   3. TRAINING    — ai-toolkit job table + per-GPU-set queue toggles, bound
+ *                    to the settings aiToolkitPort; its header shows the
+ *                    aitoolkit service active state from the agent
  *
- * The DOM skeleton (top bar, section boxes, cards, table header) is built
- * once in onOpen; poll ticks and WS events only update text, classes,
- * attributes and bar widths. The training <tbody> and the pending-prompt
- * list are refilled per tick because their rows legitimately appear and
- * disappear — everything else is cached.
+ * The DOM skeleton (service bar, top bar, section boxes, cards, table header)
+ * is built once in onOpen; poll ticks and WS events only update text,
+ * classes, attributes and bar widths. The instance rows, training <tbody>,
+ * the pending-prompt list and preview strip are refilled because their rows
+ * legitimately appear and disappear (spawn/stop) — everything else is cached
+ * per port.
+ *
+ * Instance discovery (agent API v0.5.0): /api/status lists services with
+ * computed instances; the generation panels + WS sockets attach to the
+ * comfyui service's instance ports in agent order. The panel set is rebuilt
+ * only when that ordered port list changes (or the profile host changed).
  *
  * The view never mutates state optimistically: everything rendered comes
  * from the last poll fetch or the last WS event.
@@ -27,14 +42,16 @@ import { ItemView, WorkspaceLeaf } from "obsidian";
 
 import type ArthurPlugin from "../main";
 import { AGENT_VERSION } from "../api/agent";
-import type { AgentInstanceSummary, AgentStatus } from "../api/agent";
+import type { AgentInstance, AgentService, AgentStatus } from "../api/agent";
 import type { AiToolkitJob } from "../api/aitoolkit";
 import type { ComfyUIClient, QueueResponse, SystemStats } from "../api/comfy";
 import { parseComfyBinaryFrame } from "../comfy-frame";
 import { WsConnection, WsState } from "../connection";
 import { renderLossChart } from "./loss-chart";
 import { el, fmtBytes, fmtClockTime, fmtDuration, truncate } from "../util";
-import { confirmModal, describeError, run, toastErr } from "./actions";
+import { ArthurApiError } from "../api/transport";
+import { ServiceBar } from "./service-bar";
+import { confirmModal, describeError, run, toastErr, toastOk } from "./actions";
 
 export const VIEW_TYPE_ARTHUR_DASHBOARD = "arthur-dashboard";
 
@@ -49,7 +66,7 @@ interface ComfyPortDetail {
 interface AgentDetail {
 	/** /health succeeded (process reachable, no auth involved). */
 	healthOk: boolean | null;
-	/** /api/status succeeded (token accepted) — gates lifecycle buttons. */
+	/** /api/status succeeded (token accepted) — gates lifecycle UI. */
 	statusOk: boolean | null;
 	status: AgentStatus | null;
 	error: string | null;
@@ -70,19 +87,18 @@ interface GenProgress {
 	nodeLabel: string;
 }
 
-/** Cached DOM widgets + bookkeeping for one comfy port. */
-interface ComfyPanel {
+/** One comfy port the generation cards are attached to. */
+interface DesiredPort {
 	port: number;
-	// instance card
-	instDot: HTMLElement;
-	instName: HTMLElement;
-	instMeta: HTMLElement;
-	vramFill: HTMLElement;
-	vramLabel: HTMLElement;
-	btnStart: HTMLButtonElement;
-	btnStop: HTMLButtonElement;
-	btnRestart: HTMLButtonElement;
+	/** Card title + topbar dot label: instance id + GPU, or "unmanaged". */
+	label: string;
+}
+
+/** Cached DOM widgets + bookkeeping for one comfy port. */
+interface GenPanel {
+	port: number;
 	// generation card
+	titleEl: HTMLElement;
 	genDot: HTMLElement;
 	wsDot: HTMLElement;
 	wsLabel: HTMLElement;
@@ -181,21 +197,25 @@ export class ArthurDashboardView extends ItemView {
 	// onOpen()). An `open` class field shadows it with a boolean and the leaf
 	// dies with "TypeError: e.open is not a function" (blank dashboard).
 	private isOpened = false;
-	private readonly panels = new Map<number, ComfyPanel>();
+	private readonly panels = new Map<number, GenPanel>();
 	private readonly wss = new Map<number, WsConnection>();
-	private readonly comfyByPort = new Map<number, ComfyUIClient>();
 	/** Host the current cards + WS sockets were built for (staleness check). */
 	private wsHost: string | null = null;
-	/** Port cards actually rendered? (empty profile → placeholder note). */
-	private cardsRendered = false;
+	/** Ports the generation cards are attached to, in render order. */
+	private activePorts: DesiredPort[] = [];
+	private skeletonBuilt = false;
 
 	// cached section roots
+	private serviceBarEl!: HTMLElement;
+	private serviceBar!: ServiceBar;
 	private profileEl!: HTMLElement;
 	private readonly topDots = new Map<string, HTMLElement>();
 	private updatedEl!: HTMLElement;
 	/** One-line last-errors summary (hidden while everything answers). */
 	private lastErrorsEl!: HTMLElement;
 	private bannerEl!: HTMLElement;
+	private instanceCardsEl!: HTMLElement;
+	private trainingSvcEl!: HTMLElement;
 	private trainingBodyEl!: HTMLElement;
 	private trainingQueueEl!: HTMLElement;
 	private trainingNoteEl!: HTMLElement;
@@ -260,8 +280,25 @@ export class ArthurDashboardView extends ItemView {
 		return this.refreshData();
 	}
 
+	/** Settings comfyPorts list — the offline fallback for instance discovery. */
 	private comfyPorts(): number[] {
 		return this.plugin.comfyPorts;
+	}
+
+	/**
+	 * Comfy ports to attach generation cards to: the comfyui service's
+	 * discovered instances (agent order) when /api/status answers — the
+	 * settings comfyPorts list (labeled unmanaged) only when it doesn't.
+	 */
+	private desiredPorts(): DesiredPort[] {
+		const comfy = this.agentDetail.status?.services.find((s) => s.id === "comfyui");
+		if (this.agentDetail.statusOk === true && comfy) {
+			return comfy.instances.map((i) => ({
+				port: i.port,
+				label: `${i.id}${i.gpu != null ? ` · GPU ${i.gpu}` : ""} · :${i.port}`,
+			}));
+		}
+		return this.comfyPorts().map((p) => ({ port: p, label: `ComfyUI :${p} · unmanaged` }));
 	}
 
 	/** Both pollers, handed to run() so mutations trigger an immediate re-poll. */
@@ -270,9 +307,9 @@ export class ArthurDashboardView extends ItemView {
 		return clients ? [clients.lightPoller, clients.detailPoller] : [];
 	}
 
-	private agentInstanceFor(port: number): AgentInstanceSummary | null {
-		const list = this.agentDetail.status?.instances ?? [];
-		return list.find((i) => i.port === port) ?? null;
+	/** Comfy client for a dynamically discovered port (settings client or on-demand). */
+	private clientFor(port: number): ComfyUIClient | null {
+		return this.plugin.comfyClientFor(port);
 	}
 
 	// ------------------------------------------------------------------
@@ -283,9 +320,10 @@ export class ArthurDashboardView extends ItemView {
 		this.isOpened = true;
 		this.contentEl.empty();
 		this.panels.clear();
-		this.comfyByPort.clear();
 		this.wsHost = null;
-		this.buildSkeleton();
+		this.activePorts = [];
+		this.skeletonBuilt = false;
+		this.buildSkeleton(this.desiredPorts());
 		this.openWss();
 		this.plugin.dashboardView = this;
 		// Belt-and-braces: if teardown ever skips onClose, sockets and caches
@@ -315,15 +353,6 @@ export class ArthurDashboardView extends ItemView {
 		const clients = this.plugin.clients;
 		if (!this.visible() || !clients) return;
 		const profile = clients.profile;
-		const ports = clients.comfyPorts;
-
-		// Settings may have changed while the view sat open — resync the cached
-		// cards + WS sockets with the current host/port set before fetching.
-		const staleHost = profile.host !== this.wsHost;
-		const stalePorts = !this.cardsRendered ||
-			ports.length !== this.panels.size ||
-			ports.some((p) => !this.panels.has(p));
-		if (staleHost || stalePorts) this.rebuildPortPanels();
 
 		// Not configured yet (still empty host) — paint the placeholder state,
 		// never the network. The skeleton + cards above are already up.
@@ -342,32 +371,19 @@ export class ArthurDashboardView extends ItemView {
 				error: "not configured",
 			};
 			this.lastTick = null;
+			// Port set may have changed in settings while the view sat open.
+			this.syncSkeleton();
 			this.renderTopBar(profile.name, "");
 			this.renderBanner();
-			this.renderInstances();
+			this.renderServiceBar();
+			this.renderInstanceRows();
 			this.renderGeneration();
 			this.renderTraining();
 			return;
 		}
 
-		// Inner promises never reject; per-port failures land in .error.
-		this.comfyDetail = await Promise.all(
-			clients.comfy.map(async (client): Promise<ComfyPortDetail> => {
-				try {
-					const stats = await client.systemStats();
-					const queue = await client.queue();
-					return { online: true, stats, queue, error: null };
-				} catch (err) {
-					return {
-						online: false,
-						stats: null,
-						queue: null,
-						error: describeError(err),
-					};
-				}
-			}),
-		);
-
+		// Agent status first — it defines the instance list every other card
+		// hangs off of (the settings port list is the unreachable fallback).
 		const health = await tryCall(() => clients.agent.health());
 		const healthOk = health.value !== null;
 		const statusRes = healthOk
@@ -388,6 +404,41 @@ export class ArthurDashboardView extends ItemView {
 						? describeError(statusRes.error)
 						: "status failed (token rejected?)",
 		};
+
+		// Settings may have changed, or the agent discovered/removed instances
+		// (spawn/stop) — resync the cached cards + WS sockets with the current
+		// host/port set before fetching. Rebuild only, never per tick; when the
+		// port set is unchanged the labels still follow each tick's discovery
+		// (e.g. discovered ↔ unmanaged fallback flips without a card rebuild).
+		this.syncSkeleton();
+		const desired = this.desiredPorts();
+		this.activePorts = desired;
+		const stale =
+			profile.host !== this.wsHost ||
+			!this.skeletonBuilt ||
+			desired.map((p) => p.port).join(",") !==
+				this.activePorts.map((p) => p.port).join(",");
+		if (stale) this.rebuildPortPanels(desired);
+
+		// Inner promises never reject; per-port failures land in .error.
+		this.comfyDetail = await Promise.all(
+			desired.map(async ({ port }): Promise<ComfyPortDetail> => {
+				const client = this.clientFor(port);
+				if (!client) return { online: null, stats: null, queue: null, error: null };
+				try {
+					const stats = await client.systemStats();
+					const queue = await client.queue();
+					return { online: true, stats, queue, error: null };
+				} catch (err) {
+					return {
+						online: false,
+						stats: null,
+						queue: null,
+						error: describeError(err),
+					};
+				}
+			}),
+		);
 
 		try {
 			const [jobs, queue] = await Promise.all([
@@ -418,7 +469,8 @@ export class ArthurDashboardView extends ItemView {
 		this.lastTick = Date.now();
 		this.renderTopBar(profile.name, profile.host);
 		this.renderBanner();
-		this.renderInstances();
+		this.renderServiceBar();
+		this.renderInstanceRows();
 		this.renderGeneration();
 		this.renderTraining();
 	}
@@ -427,32 +479,51 @@ export class ArthurDashboardView extends ItemView {
 	// skeleton
 	// ------------------------------------------------------------------
 
+	private syncSkeleton(): void {
+		const clients = this.plugin.clients;
+		const desired = this.desiredPorts();
+		const stale =
+			(clients?.profile.host ?? null) !== this.wsHost ||
+			!this.skeletonBuilt ||
+			desired.map((p) => p.port).join(",") !==
+				this.activePorts.map((p) => p.port).join(",");
+		if (!stale) return;
+		this.rebuildPortPanels(desired);
+	}
+
 	/**
 	 * Tear down and rebuild the port cards + WS sockets so they match the
-	 * current profile (host or port set changed in settings while open).
+	 * current profile (host or discovered port set changed while open).
 	 * Called from refreshData before any fetch — the poll cycle fills in data.
 	 */
-	private rebuildPortPanels(): void {
+	private rebuildPortPanels(desired: DesiredPort[]): void {
 		this.closeWss();
 		this.clearAllPreviews();
 		this.panels.clear();
-		this.comfyByPort.clear();
 		this.contentEl.empty();
-		this.buildSkeleton();
+		this.buildSkeleton(desired);
 		this.openWss();
 		this.wsHost = this.plugin.clients?.profile.host ?? null;
 	}
 
-	private buildSkeleton(): void {
+	private buildSkeleton(ports: DesiredPort[]): void {
 		this.topDots.clear();
 		const root = this.contentEl.createEl("div", { cls: "arthur-dashboard" });
+
+		// service pill row — top surface for service-level lifecycle
+		this.serviceBarEl = root.createEl("div", { cls: "arthur-service-bar" });
+		this.serviceBar = new ServiceBar(this.serviceBarEl, {
+			onStart: (svc) => void this.serviceStartAction(svc),
+			onSpawn: (svc) => void this.serviceSpawnAction(svc),
+			onKill: (svc) => this.serviceKillAction(svc),
+		});
 
 		// thin top summary bar
 		const top = root.createEl("div", { cls: "arthur-topbar" });
 		this.profileEl = top.createEl("span", { cls: "arthur-topbar-profile" });
 		const dotsBox = top.createEl("span", { cls: "arthur-topbar-dots" });
 		const dotSpecs: Array<[string, string]> = [
-			...this.comfyPorts().map((p) => [`c${p}`, `ComfyUI :${p}`] as [string, string]),
+			...ports.map((p) => [`c${p.port}`, p.label] as [string, string]),
 			["aitk", "ai-toolkit"],
 			["agent", "arthur-agent"],
 		];
@@ -477,30 +548,34 @@ export class ArthurDashboardView extends ItemView {
 		this.bannerEl = root.createEl("div", { cls: "arthur-banner" });
 		this.bannerEl.hide();
 
-		// instances + generation sections (one cached card pair per port)
+		// instances section — rows refilled per tick (instances legitimately
+		// appear/disappear on spawn/stop)
 		const instancesSection = root.createEl("div", { cls: "arthur-section" });
 		instancesSection.createEl("h4", { text: "Instances" });
-		const instancesBox = instancesSection.createEl("div", { cls: "arthur-cards" });
+		this.instanceCardsEl = instancesSection.createEl("div", { cls: "arthur-cards" });
+		this.instanceCardsEl.append(
+			el("p", { cls: "arthur-note", text: "loading…" }),
+		);
+
+		// generation section — one cached card per discovered/fallback port
 		const genSection = root.createEl("div", { cls: "arthur-section" });
 		genSection.createEl("h4", { text: "Generation" });
 		const generationBox = genSection.createEl("div", { cls: "arthur-cards" });
-		for (const port of this.comfyPorts()) {
-			const [instCard, genCard] = this.buildPortCards(port);
-			instancesBox.append(instCard);
-			generationBox.append(genCard);
+		for (const p of ports) {
+			generationBox.append(this.buildGenCard(p));
 		}
-		// Empty port set (nothing configured yet) — keep the section headers so
-		// the dashboard is never blank, and tell the user what's missing.
-		this.cardsRendered = this.comfyPorts().length > 0;
-		if (!this.cardsRendered) {
+		if (ports.length === 0) {
 			const note = "no ComfyUI instances configured — set Host and ComfyUI ports in the arthur settings";
-			instancesBox.append(el("p", { cls: "arthur-note", text: note }));
 			generationBox.append(el("p", { cls: "arthur-note", text: note }));
 		}
 
 		// training section
 		const trainingSection = root.createEl("div", { cls: "arthur-section" });
-		trainingSection.createEl("h4", { text: "Training (ai-toolkit)" });
+		const trainingHead = trainingSection.createEl("h4", { text: "Training (ai-toolkit)" });
+		this.trainingSvcEl = trainingHead.createEl("span", {
+			cls: "arthur-training-service",
+		});
+		this.trainingSvcEl.hide();
 		this.trainingNoteEl = trainingSection.createEl("p", {
 			cls: "arthur-note",
 			text: "loading…",
@@ -515,54 +590,19 @@ export class ArthurDashboardView extends ItemView {
 		this.trainingBodyEl = table.createEl("tbody");
 		trainingSection.createEl("h5", { text: "Queues" });
 		this.trainingQueueEl = trainingSection.createEl("div", { cls: "arthur-queue-rows" });
+
+		// Port list the cards+WS are now built for.
+		this.activePorts = ports;
+		this.skeletonBuilt = true;
 	}
 
-	/** Build the instance card + generation card for one port and cache them. */
-	private buildPortCards(port: number): [HTMLElement, HTMLElement] {
+	/** Build the generation card for one port and cache its widgets. */
+	private buildGenCard(p: DesiredPort): HTMLElement {
+		const port = p.port;
 		const buttonRow = (...btns: HTMLButtonElement[]) =>
 			el("div", { cls: "arthur-btn-row", children: btns });
 
-		// ---- instance card ------------------------------------------------
-		const instDot = el("span", { cls: "arthur-dot arthur-dot--gray" });
-		const instName = el("span", { cls: "arthur-card-title", text: `ComfyUI :${port}` });
-		const instMeta = el("span", { cls: "arthur-card-meta", text: "agent: n/a" });
-		const vramFill = el("div", { cls: "arthur-bar-fill" });
-		vramFill.style.width = "0%";
-		const vramLabel = el("span", { cls: "arthur-card-meta", text: "VRAM ?" });
-
-		const btnStart = newBtn("Start");
-		const btnStop = newBtn("Stop");
-		const btnRestart = newBtn("Restart");
-		btnStart.addEventListener("click", () => void this.startInstance(port));
-		btnStop.addEventListener("click", () => {
-			confirmModal(
-				this.app,
-				"Stop instance",
-				`Gracefully stop ComfyUI on port ${port}? The agent refuses while a generation is running.`,
-				() => void this.stopInstance(port),
-			);
-		});
-		btnRestart.addEventListener("click", () => {
-			confirmModal(
-				this.app,
-				"Restart instance",
-				`Restart ComfyUI on port ${port}? It is down until the port comes back up (~30s).`,
-				() => void this.restartInstance(port),
-			);
-		});
-
-		const instanceCard = el("div", { cls: "arthur-card" });
-		instanceCard.append(
-			el("div", {
-				cls: "arthur-card-head",
-				children: [instDot, instName, instMeta],
-			}),
-			el("div", { cls: "arthur-bar", children: [vramFill] }),
-			vramLabel,
-			buttonRow(btnStart, btnStop, btnRestart),
-		);
-
-		// ---- generation card ----------------------------------------------
+		const titleEl = el("span", { cls: "arthur-card-title", text: p.label });
 		const genDot = el("span", { cls: "arthur-dot arthur-dot--gray" });
 		const wsDot = el("span", { cls: "arthur-dot arthur-dot--gray" });
 		const wsLabel = el("span", { cls: "arthur-card-meta", text: "ws off" });
@@ -603,13 +643,7 @@ export class ArthurDashboardView extends ItemView {
 		genCard.append(
 			el("div", {
 				cls: "arthur-card-head",
-				children: [
-					genDot,
-					el("span", { cls: "arthur-card-title", text: `ComfyUI :${port}` }),
-					wsDot,
-					wsLabel,
-					queueEl,
-				],
+				children: [genDot, titleEl, wsDot, wsLabel, queueEl],
 			}),
 			el("div", { cls: "arthur-bar", children: [progressFill] }),
 			progressLabel,
@@ -621,14 +655,7 @@ export class ArthurDashboardView extends ItemView {
 
 		this.panels.set(port, {
 			port,
-			instDot,
-			instName,
-			instMeta,
-			vramFill,
-			vramLabel,
-			btnStart,
-			btnStop,
-			btnRestart,
+			titleEl,
 			genDot,
 			wsDot,
 			wsLabel,
@@ -647,7 +674,7 @@ export class ArthurDashboardView extends ItemView {
 			pendingIds: [],
 			previewUrls: [],
 		});
-		return [instanceCard, genCard];
+		return genCard;
 	}
 
 	// ------------------------------------------------------------------
@@ -658,8 +685,8 @@ export class ArthurDashboardView extends ItemView {
 		this.profileEl.setText(host ? `${profileName} @ ${host}` : profileName);
 		const clients = this.plugin.clients;
 		const hostPort = (port: number) => (host ? `${host}:${port}` : "(not configured)");
-		this.comfyPorts().forEach((port, i) => {
-			const dot = this.topDots.get(`c${port}`);
+		this.activePorts.forEach((p, i) => {
+			const dot = this.topDots.get(`c${p.port}`);
 			const d = this.comfyDetail[i] ?? null;
 			if (dot) {
 				setDot(dot, d?.online ?? null);
@@ -667,8 +694,8 @@ export class ArthurDashboardView extends ItemView {
 				dot.setAttribute(
 					"title",
 					(d?.online === false
-						? errTooltip(hostPort(port), d.error)
-						: `ComfyUI :${port} — ${d?.online === true ? "ok" : "waiting for data…"}`),
+						? errTooltip(hostPort(p.port), d.error)
+						: `${p.label} — ${d?.online === true ? "ok" : "waiting for data…"}`),
 				);
 			}
 		});
@@ -698,9 +725,9 @@ export class ArthurDashboardView extends ItemView {
 		// One-line last-errors summary: every service that failed on the last
 		// tick with its last error + attempted host:port (no token material).
 		const errors: string[] = [];
-		this.comfyPorts().forEach((port, i) => {
+		this.activePorts.forEach((p, i) => {
 			const d = this.comfyDetail[i];
-			if (d?.online === false) errors.push(`ComfyUI ${hostPort(port)} — ${d.error ?? "not responding"}`);
+			if (d?.online === false) errors.push(`ComfyUI ${hostPort(p.port)} — ${d.error ?? "not responding"}`);
 		});
 		if (this.aiDetail.reachable === false && this.aiDetail.error) {
 			errors.push(`ai-toolkit ${hostPort(clients?.profile.aiToolkitPort ?? 0)} — ${this.aiDetail.error}`);
@@ -744,81 +771,181 @@ export class ArthurDashboardView extends ItemView {
 		}
 	}
 
-	/** Lifecycle buttons: enabled only when /api/status answered (health AND token). */
-	private setLifecycleGating(panel: ComfyPanel): void {
+	/** Service pills: disabled unless /api/status answered (health AND token). */
+	private renderServiceBar(): void {
+		this.serviceBar.render({
+			agentOk: this.agentDetail.statusOk === true,
+			error: this.agentDetail.error,
+			services: this.agentDetail.status?.services ?? [],
+		});
+	}
+
+	/** Instance rows, refilled per tick (spawns/stops change the set). */
+	private renderInstanceRows(): void {
+		const container = this.instanceCardsEl;
+		container.empty();
+		const host = this.plugin.clients?.profile.host ?? "";
+		const hostPort = (port: number) => (host ? `${host}:${port}` : "(not configured)");
 		const ad = this.agentDetail;
-		const enabled = ad.statusOk === true;
-		for (const btn of [panel.btnStart, panel.btnStop, panel.btnRestart]) {
-			btn.disabled = !enabled;
-			btn.setAttribute(
-				"aria-label",
-				enabled ? "" : `agent ${ad.healthOk === false ? "unreachable" : "token rejected"} — lifecycle disabled`,
+
+		if (ad.statusOk === true && ad.status) {
+			for (const svc of ad.status.services) {
+				container.append(
+					el("h5", {
+						cls: "arthur-inst-group",
+						children: [
+							el("span", { text: svc.name ?? svc.id }),
+							el("span", {
+								cls: "arthur-card-meta",
+								text: `${svc.active ? "active" : "idle"} · ${svc.instances.length} instance${svc.instances.length === 1 ? "" : "s"}`,
+							}),
+						],
+					}),
+				);
+				if (svc.instances.length === 0) {
+					container.append(el("p", { cls: "arthur-note", text: "no instances" }));
+					continue;
+				}
+				for (const inst of svc.instances) {
+					container.append(this.buildInstanceRow(svc, inst, hostPort));
+				}
+			}
+			return;
+		}
+
+		// Agent unreachable / token rejected — the settings port list renders
+		// unmanaged: HTTP state is visible, lifecycle controls are not offered.
+		const reason = ad.healthOk === false ? "unreachable" : "token rejected";
+		container.append(
+			el("h5", {
+				cls: "arthur-inst-group",
+				children: [
+					el("span", { text: "ComfyUI" }),
+					el("span", { cls: "arthur-card-meta", text: `unmanaged — agent ${reason}` }),
+				],
+			}),
+		);
+		if (this.activePorts.length === 0) {
+			container.append(
+				el("p", {
+					cls: "arthur-note",
+					text: "no ComfyUI instances configured — set Host and ComfyUI ports in the arthur settings",
+				}),
 			);
+			return;
+		}
+		for (const p of this.activePorts) {
+			container.append(this.buildUnmanagedRow(p, hostPort));
 		}
 	}
 
-	private renderInstances(): void {
-		const host = this.plugin.clients?.profile.host ?? "";
-		this.comfyPorts().forEach((port, i) => {
-			const panel = this.panels.get(port);
-			if (!panel) return;
-			const detail = this.comfyDetail[i] ?? null;
-			const inst = this.agentInstanceFor(port);
-			const hostPort = host ? `${host}:${port}` : "(not configured)";
-			const offlineTip = errTooltip(hostPort, detail?.error ?? null);
+	/** One agent-reported instance card (lifecycle buttons + VRAM). */
+	private buildInstanceRow(svc: AgentService, inst: AgentInstance, hostPort: (port: number) => string): HTMLElement {
+		const detailIdx = this.activePorts.findIndex((p) => p.port === inst.port);
+		const detail = detailIdx >= 0 ? this.comfyDetail[detailIdx] ?? null : null;
+		const name = inst.name ?? inst.id;
+		const offlineTip = errTooltip(hostPort(inst.port), detail?.error ?? null);
 
-			setDot(panel.instDot, detail?.online ?? null);
-			panel.instDot.setAttribute("title", detail?.online === false ? offlineTip : `ComfyUI :${port} HTTP — ok`);
+		const dot = el("span", { cls: "arthur-dot arthur-dot--gray" });
+		setDot(dot, inst.up);
+		dot.setAttribute(
+			"title",
+			`agent: ${inst.up ? "instance up" : "instance down"}` +
+				(detail?.online === false ? ` · HTTP not responding (${offlineTip})` : ""),
+		);
+		const metaParts = [`:${inst.port}`];
+		if (inst.gpu != null) metaParts.push(`GPU ${inst.gpu}`);
+		metaParts.push(`agent: ${inst.up ? `up · uptime ${fmtDuration(inst.uptime ?? undefined)}` : "down"}`);
+		if (detail?.online === false) metaParts.push("HTTP not responding");
+		const meta = el("span", { cls: "arthur-card-meta", text: metaParts.join(" · ") });
 
-			if (inst) {
-				panel.instName.setText(inst.name ?? inst.id);
-				const agentText = inst.up
-					? `up · uptime ${fmtDuration(inst.uptime ?? undefined)}`
-					: "down";
-				panel.instMeta.setText(
-					`GPU ${inst.gpu ?? "?"} · agent: ${agentText}` +
-						(detail?.online === false ? " · HTTP not responding" : ""),
-				);
-				panel.instMeta.setAttribute("title", detail?.online === false ? offlineTip : "");
-			} else {
-				panel.instName.setText(`ComfyUI :${port}`);
-				panel.instMeta.setText(
-					this.agentDetail.statusOk === true
-						? "agent: no registry entry for this port"
-						: this.agentDetail.healthOk === false
-							? "agent unreachable"
-							: detail?.online === false
-								? "not responding"
-								: "waiting for data…",
-				);
-				panel.instMeta.setAttribute(
-					"title",
-					this.agentDetail.statusOk === true ? "" : offlineTip,
-				);
-			}
+		const card = el("div", { cls: "arthur-card" });
+		card.append(el("div", { cls: "arthur-card-head", children: [dot, el("span", { cls: "arthur-card-title", text: name }), meta] }));
 
-			// VRAM bar — devices[0] (instances are single-GPU).
+		// VRAM bar — devices[0] (instances are single-GPU).
+		if (inst.service === "comfyui") {
+			const vramFill = el("div", { cls: "arthur-bar-fill" });
+			vramFill.style.width = "0%";
+			const vramLabel = el("span", { cls: "arthur-card-meta", text: "VRAM ?" });
 			const device = detail?.stats?.devices?.[0];
 			if (device && device.vram_total > 0) {
 				const used = Math.max(0, device.vram_total - device.vram_free);
-				panel.vramFill.style.width = `${Math.round((100 * used) / device.vram_total)}%`;
-				panel.vramLabel.setText(`VRAM ${fmtBytes(used)} / ${fmtBytes(device.vram_total)}`);
-			} else {
-				panel.vramFill.style.width = "0%";
-				panel.vramLabel.setText(
-					detail?.online === false ? "VRAM n/a — not responding" : "VRAM ?",
-				);
-				panel.vramLabel.setAttribute("title", detail?.online === false ? offlineTip : "");
+				vramFill.style.width = `${Math.round((100 * used) / device.vram_total)}%`;
+				vramLabel.setText(`VRAM ${fmtBytes(used)} / ${fmtBytes(device.vram_total)}`);
+			} else if (detail?.online === false) {
+				vramLabel.setText("VRAM n/a — not responding");
+				vramLabel.setAttribute("title", offlineTip);
 			}
+			card.append(el("div", { cls: "arthur-bar", children: [vramFill] }), vramLabel);
+		}
 
-			this.setLifecycleGating(panel);
+		// Lifecycle — the agent refuses destructive ops while a generation runs
+		// (409), which the handlers escalate to a force-confirmation modal.
+		const label = (action: string) => `${action} ${name}`;
+		const btnStart = newBtn("Start");
+		const btnStop = newBtn("Stop");
+		const btnRestart = newBtn("Restart");
+		btnStart.addEventListener("click", () => void this.instanceLifecycle(svc.id, inst.id, label("start"), "start"));
+		btnStop.addEventListener("click", () => {
+			confirmModal(
+				this.app,
+				"Stop instance",
+				`Gracefully stop ${name} on port ${inst.port}? The agent refuses while a generation is running.`,
+				() => void this.instanceLifecycle(svc.id, inst.id, label("stop"), "stop"),
+			);
 		});
+		btnRestart.addEventListener("click", () => {
+			confirmModal(
+				this.app,
+				"Restart instance",
+				`Restart ${name} on port ${inst.port}? It is down until the port comes back up (~30s).`,
+				() => void this.instanceLifecycle(svc.id, inst.id, label("restart"), "restart"),
+			);
+		});
+		card.append(el("div", { cls: "arthur-btn-row", children: [btnStart, btnStop, btnRestart] }));
+		return card;
+	}
+
+	/** Unmanaged row for a settings port (no lifecycle controls). */
+	private buildUnmanagedRow(p: DesiredPort, hostPort: (port: number) => string): HTMLElement {
+		const i = this.activePorts.findIndex((q) => q.port === p.port);
+		const detail = i >= 0 ? this.comfyDetail[i] ?? null : null;
+		const offlineTip = errTooltip(hostPort(p.port), detail?.error ?? null);
+
+		const dot = el("span", { cls: "arthur-dot arthur-dot--gray" });
+		setDot(dot, detail?.online ?? null);
+		dot.setAttribute(
+			"title",
+			detail?.online === false
+				? offlineTip
+				: `ComfyUI :${p.port} HTTP — ${detail?.online === true ? "ok" : "waiting for data…"}`,
+		);
+		const meta = el("span", { cls: "arthur-card-meta", text: `:${p.port} · unmanaged — lifecycle disabled` });
+		meta.setAttribute("title", detail?.online === false ? offlineTip : "");
+
+		const card = el("div", { cls: "arthur-card" });
+		card.append(el("div", { cls: "arthur-card-head", children: [dot, el("span", { cls: "arthur-card-title", text: `ComfyUI :${p.port}` }), meta] }));
+
+		const vramFill = el("div", { cls: "arthur-bar-fill" });
+		vramFill.style.width = "0%";
+		const vramLabel = el("span", { cls: "arthur-card-meta", text: "VRAM ?" });
+		const device = detail?.stats?.devices?.[0];
+		if (device && device.vram_total > 0) {
+			const used = Math.max(0, device.vram_total - device.vram_free);
+			vramFill.style.width = `${Math.round((100 * used) / device.vram_total)}%`;
+			vramLabel.setText(`VRAM ${fmtBytes(used)} / ${fmtBytes(device.vram_total)}`);
+		} else if (detail?.online === false) {
+			vramLabel.setText("VRAM n/a — not responding");
+			vramLabel.setAttribute("title", offlineTip);
+		}
+		card.append(el("div", { cls: "arthur-bar", children: [vramFill] }), vramLabel);
+		return card;
 	}
 
 	private renderGeneration(): void {
 		const host = this.plugin.clients?.profile.host ?? "";
-		this.comfyPorts().forEach((port, i) => {
-			const panel = this.panels.get(port);
+		this.activePorts.forEach((p, i) => {
+			const panel = this.panels.get(p.port);
 			if (!panel) return;
 			const detail = this.comfyDetail[i] ?? null;
 			const online = detail?.online === true;
@@ -829,12 +956,13 @@ export class ArthurDashboardView extends ItemView {
 				? (detail!.queue!.queue_pending as unknown[])
 				: [];
 
+			panel.titleEl.setText(p.label);
 			setDot(panel.genDot, detail?.online ?? null);
 			panel.genDot.setAttribute(
 				"title",
 				detail?.online === false
-					? errTooltip(host ? `${host}:${port}` : "(not configured)", detail.error)
-					: `ComfyUI :${port} — ${detail?.online === true ? "ok" : "waiting for data…"}`,
+					? errTooltip(host ? `${host}:${p.port}` : "(not configured)", detail.error)
+					: `${p.label} — ${detail?.online === true ? "ok" : "waiting for data…"}`,
 			);
 			panel.queueEl.setText(`${running.length} running · ${pending.length} pending`);
 
@@ -870,7 +998,7 @@ export class ArthurDashboardView extends ItemView {
 				for (const id of panel.pendingIds) {
 					const del = newBtn("✕");
 					del.addClass("arthur-btn--tiny");
-					del.addEventListener("click", () => void this.deletePending(port, id));
+					del.addEventListener("click", () => void this.deletePending(p.port, id));
 					panel.pendingWrap.append(
 						el("div", {
 							cls: "arthur-pending-row",
@@ -894,7 +1022,7 @@ export class ArthurDashboardView extends ItemView {
 		});
 	}
 
-	private renderProgress(panel: ComfyPanel): void {
+	private renderProgress(panel: GenPanel): void {
 		const p = panel.progress;
 		if (p && p.max > 0) {
 			panel.progressFill.style.width = `${Math.min(100, Math.round((100 * p.value) / p.max))}%`;
@@ -906,6 +1034,15 @@ export class ArthurDashboardView extends ItemView {
 	}
 
 	private renderTraining(): void {
+		// Header service state: the aitoolkit service's live state from the agent.
+		const aitk = this.agentDetail.status?.services.find((s) => s.id === "aitoolkit");
+		if (this.agentDetail.statusOk === true && aitk) {
+			this.trainingSvcEl.setText(` — agent: ${aitk.active ? "active" : "idle"}`);
+			this.trainingSvcEl.show();
+		} else {
+			this.trainingSvcEl.hide();
+		}
+
 		const detail = this.aiDetail;
 		if (detail.reachable !== true) {
 			const host = this.plugin.clients?.profile.host ?? "";
@@ -1206,51 +1343,115 @@ export class ArthurDashboardView extends ItemView {
 	}
 
 	// ------------------------------------------------------------------
-	// controls — all funnel through run(): toast on result + pollNow()
+	// service-level controls (service bar) + instance lifecycle (rows)
+	// — all funnel through run()/toast + pollNow(): never optimistic UI
 	// ------------------------------------------------------------------
 
-	private async startInstance(port: number): Promise<void> {
-		const id = this.agentInstanceFor(port)?.id;
-		if (!id) {
-			toastErr(`no agent instance registered for port ${port}`);
-			return;
-		}
-		await run(this.pollers(), `start ${id}`, () =>
-			this.plugin.clients!.agent.start(id),
+	/** Inactive service clicked — start the default instance. */
+	private async serviceStartAction(svc: AgentService): Promise<void> {
+		const name = svc.name ?? svc.id;
+		await run(this.pollers(), `start ${name}`, () =>
+			this.plugin.clients!.agent.serviceStart(svc.id),
 		);
 	}
 
-	private async stopInstance(port: number): Promise<void> {
-		const id = this.agentInstanceFor(port)?.id;
-		if (!id) {
-			toastErr(`no agent instance registered for port ${port}`);
-			return;
+	/** Active service clicked — spawn a new instance. */
+	private async serviceSpawnAction(svc: AgentService): Promise<void> {
+		const agent = this.plugin.clients?.agent;
+		if (!agent) return;
+		const name = svc.name ?? svc.id;
+		try {
+			const res = await agent.serviceSpawn(svc.id);
+			toastOk(`Spawned ${name} instance on port ${res.instance?.port ?? "?"}`);
+		} catch (err) {
+			// 409 single-instance service / max instances reached — surface the
+			// agent's verbatim message; never crash on it.
+			toastErr(`spawn ${name} — ${describeError(err)}`);
+		} finally {
+			for (const p of this.pollers()) p.pollNow();
 		}
-		await run(this.pollers(), `stop ${id}`, () =>
-			this.plugin.clients!.agent.stop(id),
+	}
+
+	/** Kill zone clicked — confirm, then stop ALL instances (with force escalation). */
+	private serviceKillAction(svc: AgentService): void {
+		const name = svc.name ?? svc.id;
+		confirmModal(
+			this.app,
+			`Stop all ${name} instances`,
+			`Stop all ${name} instances? The agent refuses while a generation is running unless forced.`,
+			() => void this.serviceStopAll(svc),
 		);
 	}
 
-	private async restartInstance(port: number): Promise<void> {
-		const id = this.agentInstanceFor(port)?.id;
-		if (!id) {
-			toastErr(`no agent instance registered for port ${port}`);
-			return;
+	private async serviceStopAll(svc: AgentService, force = false): Promise<void> {
+		const agent = this.plugin.clients?.agent;
+		if (!agent) return;
+		const name = svc.name ?? svc.id;
+		try {
+			await agent.serviceStop(svc.id, force || undefined);
+			toastOk(`stop ${name} — done`);
+		} catch (err) {
+			if (!force && err instanceof ArthurApiError && err.status === 409) {
+				// Busied by running generations — offer the force path.
+				confirmModal(
+					this.app,
+					`Force stop ${name}`,
+					`Generations are running — ${describeError(err)}. Force stop all ${name} instances? Running generations are lost.`,
+					() => void this.serviceStopAll(svc, true),
+				);
+			} else {
+				toastErr(`stop ${name} — ${describeError(err)}`);
+			}
+		} finally {
+			for (const p of this.pollers()) p.pollNow();
 		}
-		await run(this.pollers(), `restart ${id}`, () =>
-			this.plugin.clients!.agent.restart(id),
-		);
+	}
+
+	/**
+	 * One instance's lifecycle via the agent's per-instance endpoints; 409
+	 * (generation running) escalates to a force-confirmation modal — exactly
+	 * the service-level kill-zone contract, scoped to one instance.
+	 */
+	private async instanceLifecycle(
+		svcId: string,
+		instId: string,
+		opLabel: string,
+		action: "start" | "stop" | "restart",
+		force = false,
+	): Promise<void> {
+		const agent = this.plugin.clients?.agent;
+		if (!agent) return;
+		const pollers = this.pollers();
+		try {
+			if (action === "start") await agent.instanceStart(svcId, instId);
+			else if (action === "stop") await agent.instanceStop(svcId, instId, force || undefined);
+			else await agent.instanceRestart(svcId, instId, force || undefined);
+			toastOk(`${opLabel} — done`);
+		} catch (err) {
+			if (!force && action !== "start" && err instanceof ArthurApiError && err.status === 409) {
+				confirmModal(
+					this.app,
+					"Generation running",
+					`${describeError(err)}. Force ${action} ${instId}? Running generations are lost.`,
+					() => void this.instanceLifecycle(svcId, instId, `${opLabel} (force)`, action, true),
+				);
+			} else {
+				toastErr(`${opLabel} — ${describeError(err)}`);
+			}
+		} finally {
+			for (const p of pollers) p.pollNow();
+		}
 	}
 
 	private async cancelRunning(port: number): Promise<void> {
-		const client = this.comfyByPort.get(port);
+		const client = this.clientFor(port);
 		if (!client) return;
 		const pid = this.panels.get(port)?.runningPromptId ?? undefined;
 		await run(this.pollers(), `cancel :${port}`, () => client.interrupt(pid));
 	}
 
 	private async deletePending(port: number, id: string): Promise<void> {
-		const client = this.comfyByPort.get(port);
+		const client = this.clientFor(port);
 		if (!client) return;
 		await run(this.pollers(), `delete queued prompt :${port}`, () =>
 			client.deleteQueueItems([id]),
@@ -1258,13 +1459,13 @@ export class ArthurDashboardView extends ItemView {
 	}
 
 	private async clearQueue(port: number): Promise<void> {
-		const client = this.comfyByPort.get(port);
+		const client = this.clientFor(port);
 		if (!client) return;
 		await run(this.pollers(), `clear queue :${port}`, () => client.clearQueue());
 	}
 
 	private async freeVram(port: number): Promise<void> {
-		const client = this.comfyByPort.get(port);
+		const client = this.clientFor(port);
 		if (!client) return;
 		await run(this.pollers(), `free VRAM :${port}`, () => client.free(true, true));
 	}
@@ -1277,11 +1478,12 @@ export class ArthurDashboardView extends ItemView {
 		const clients = this.plugin.clients;
 		if (!clients) return;
 		const profile = clients.profile;
-		clients.comfyPorts.forEach((port, i) => {
-			const client = clients.comfy[i];
-			if (!client || this.wss.has(port)) return;
-			if (!profile.host) return; // nothing to connect to without a host
-			this.comfyByPort.set(port, client);
+		for (const p of this.activePorts) {
+			const port = p.port;
+			if (this.wss.has(port)) continue;
+			if (!profile.host) continue; // nothing to connect to without a host
+			const client = this.clientFor(port);
+			if (!client) continue;
 			const clientId = `arthur-${port}-${Math.random().toString(36).slice(2, 8)}`;
 			const url = `${client.baseUrl.replace(/^http:/, "ws:")}/ws?clientId=${clientId}`;
 			const conn = new WsConnection(url, {
@@ -1292,7 +1494,7 @@ export class ArthurDashboardView extends ItemView {
 			});
 			conn.open();
 			this.wss.set(port, conn);
-		});
+		}
 	}
 
 	private closeWss(): void {
@@ -1339,7 +1541,7 @@ export class ArthurDashboardView extends ItemView {
 
 	/** ComfyUI emits both the classic "progress" event and the newer
 	 *  "progress_state" batch — accept either shape. */
-	private parseProgress(data: any, panel: ComfyPanel): GenProgress | null {
+	private parseProgress(data: any, panel: GenPanel): GenProgress | null {
 		if (!data || typeof data !== "object") return null;
 		const graph = (panel.promptGraph ?? {}) as Record<string, any>;
 		const classify = (nodeId: unknown, fallback: string | null): string => {
@@ -1433,7 +1635,7 @@ export class ArthurDashboardView extends ItemView {
 		this.renderPreviewStrip(panel);
 	}
 
-	private renderPreviewStrip(panel: ComfyPanel): void {
+	private renderPreviewStrip(panel: GenPanel): void {
 		panel.previewStrip.empty();
 		if (panel.previewUrls.length === 0) {
 			panel.previewStrip.hide();
