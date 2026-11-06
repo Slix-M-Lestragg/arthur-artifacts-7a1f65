@@ -9,7 +9,8 @@
  *   service active     → accent-colored button (sliced: right ~10% end is a full-
  *                        height red stop-all slice)
  *                        hover (multi-instance only) → compact GPU dropdown
- *                        ('Single GPU'/'Multi-GPUs' mode checkboxes + one
+ *                        ('Single GPU'/'Multi-GPUs' segmented mode toggle
+ *                        (accent-highlighted, no checkbox glyph) + one
  *                        checkbox line per machine GPU with VRAM/util + the
  *                        instances occupying it); the choice persists per
  *                        service in the plugin settings (spawnGpuSel)
@@ -373,6 +374,22 @@ export class ServiceBar {
 		return false;
 	}
 
+	/** One dropdown MODE row ('Single GPU' / 'Multi-GPUs'): NOT a checkbox —
+	 *  the effective mode's row is highlighted in the accent color (segmented-
+	 *  toggle look); clicking applies the mode (see buildMenuContent). */
+	private modeRow(label: string, active: boolean, onClick?: () => void): HTMLElement {
+		const row = document.createElement("span");
+		row.className = "arthur-gpu-mode" + (active ? " arthur-gpu-mode--active" : "");
+		row.setAttribute("role", "menuitemradio");
+		row.setAttribute("aria-checked", String(active));
+		const text = document.createElement("span");
+		text.className = "arthur-gpu-mode-text";
+		text.textContent = label;
+		row.append(text);
+		if (onClick) row.addEventListener("click", () => onClick());
+		return row;
+	}
+
 	/** One dropdown row: custom check glyph + label (clickable). */
 	private menuRow(label: string, checked: boolean, onClick?: () => void): HTMLElement {
 		const row = document.createElement("div");
@@ -391,10 +408,11 @@ export class ServiceBar {
 	}
 
 	/** (Re)build the dropdown's rows: the 'Single GPU' / 'Multi-GPUs' mode
-	 *  checkboxes, a separator, then one checkbox line per machine GPU
+	 *  toggle (segmented, accent-highlighted — no checkbox glyphs), a sep-
+	 *  arator, then one checkbox line per machine GPU
 	 *  ('GPU 0 — RTX 3060 · 9.4G/12G · 12%' + '(comfy-0)' occupant suffix).
-	 *  Mode marks are DERIVED from the checked GPU set (0/1 checked = single
-	 *  mode, ≥2 = multi mode) so the two surfaces can never disagree. */
+	 *  The mode highlight is DERIVED from the checked GPU set (0/1 checked =
+	 *  single mode, ≥2 = multi mode) so the two surfaces can never disagree. */
 	private buildMenuContent(entry: ServiceButton, data: GpuMenuData): void {
 		const menu = entry.menu;
 		if (!menu) return;
@@ -402,15 +420,25 @@ export class ServiceBar {
 		menu.empty();
 		const sel = [...(this.callbacks.gpuSelection?.(svcId) ?? [])].sort((a, b) => a - b);
 		const multi = sel.length >= 2;
-		menu.append(
-			this.menuRow("Single GPU", !multi, () =>
-				// Back to the default: no pinned GPUs (agent modulo rotation).
-				this.callbacks.setGpuSelection?.(svcId, []),
-			),
-			// 'Multi-GPUs' is indicative: it lights up as soon as ≥2 GPUs are
-			// checked — a single GPU can never be a multi-GPU spawn.
-			this.menuRow("Multi-GPUs", multi),
+		// The mode pair is a segmented toggle: exactly ONE side is accent-
+		// highlighted at a time, DERIVED from the checked GPU set (0/1 checked =
+		// single mode, ≥2 = multi mode). Clicking applies the mode: 'Single
+		// GPU' clears every GPU check (back to the default modulo rotation),
+		// 'Multi-GPUs' checks ALL GPUs so multi actually becomes effective
+		// (a single checked GPU can never be a multi-GPU spawn).
+		const modeGroup = document.createElement("div");
+		modeGroup.className = "arthur-gpu-mode-group";
+		modeGroup.append(
+			this.modeRow("Single GPU", !multi, () => {
+				this.callbacks.setGpuSelection?.(svcId, []);
+				this.buildMenuContent(entry, data); // repaint the highlight
+			}),
+			this.modeRow("Multi-GPUs", multi, () => {
+				this.callbacks.setGpuSelection?.(svcId, data.gpus.map((g) => g.index));
+				this.buildMenuContent(entry, data); // repaint the highlight
+			}),
 		);
+		menu.append(modeGroup);
 		const sep = document.createElement("div");
 		sep.className = "arthur-svc-menu-sep";
 		menu.append(sep);

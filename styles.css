@@ -211,6 +211,53 @@
 	font-variant-numeric: tabular-nums;
 }
 
+/* 'Single GPU' / 'Multi-GPUs' — a segmented toggle (NO checkbox glyphs):
+   exactly one side carries the accent highlight, derived from the checked
+   GPU set (accent-tint fill + accent text, like the running cards). */
+.arthur-gpu-mode-group {
+	display: flex;
+	gap: 1px;
+	padding: 2px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s, 8px);
+}
+
+.arthur-gpu-mode {
+	flex: 1 1 50%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 0.3em;
+	padding: 0.2em 0.5em;
+	border-radius: var(--radius-s, 6px);
+	cursor: pointer;
+	font-size: var(--font-ui-small);
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+	color: var(--text-muted);
+	border: 1px solid transparent;
+	transition:
+		border-color 0.15s ease,
+		background-color 0.15s ease;
+}
+
+.arthur-gpu-mode:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.arthur-gpu-mode--active {
+	border-color: var(--interactive-accent);
+	background: color-mix(in srgb, var(--interactive-accent) 14%, var(--background-primary));
+	color: var(--interactive-accent);
+}
+
+.arthur-gpu-mode--active:hover {
+	border-color: var(--interactive-accent-hover);
+	background: color-mix(in srgb, var(--interactive-accent) 20%, var(--background-primary));
+	color: var(--interactive-accent-hover);
+}
+
 .arthur-svc-menu-sep {
 	border-top: 1px solid var(--background-modifier-border);
 	margin: 0.25em 0;

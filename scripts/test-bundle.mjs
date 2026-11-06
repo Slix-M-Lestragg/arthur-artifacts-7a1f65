@@ -2256,9 +2256,21 @@ try {
 		const menu20 = sb20.menu;
 		assert(!!menu20 && menu20.hasClass("arthur-svc-menu--open"), "hover opens the GPU dropdown");
 		const gpuRows20 = () => findByClass(menu20, "arthur-gpu-opt");
-		const modeText20 = gpuRows20().map((r) => r.textContent).join(" | ");
+		const modeRows20 = () => findByClass(menu20, "arthur-gpu-mode");
+		const modeText20 = modeRows20().map((r) => r.textContent).join(" | ");
 		assert(modeText20.includes("Single GPU") && modeText20.includes("Multi-GPUs"),
-			"dropdown opens with the Single GPU / Multi-GPUs mode checkboxes");
+			"dropdown opens with the Single GPU / Multi-GPUs mode toggle");
+		assert(modeRows20().length === 2
+			&& modeRows20().every((r) => findByClass(r, "arthur-gpu-check").length === 0),
+			"the two mode rows render as toggle options, NOT checkboxes");
+		{
+			const [single20, multi20] = modeRows20();
+			assert(single20.hasClass("arthur-gpu-mode--active")
+				&& single20.getAttribute("aria-checked") === "true"
+				&& !multi20.hasClass("arthur-gpu-mode--active")
+				&& multi20.getAttribute("aria-checked") === "false",
+				"0 GPUs checked → 'Single GPU' is the highlighted (effective) mode");
+		}
 		const gpu0Row20 = gpuRows20().find((r) => (r.textContent ?? "").includes("GPU 0"));
 		assert(gpu0Row20 != null && gpu0Row20.textContent.includes("GPU 0 — RTX 3060 · 9.2G/12G · 36%"),
 			"GPU line lists the GPU with name + VRAM + utilization stats");
@@ -2291,15 +2303,24 @@ try {
 				`single-GPU selection spawns with body {"gpus":[1]} (got ${JSON.stringify(call?.body)})`);
 			assert(StubNotice.shown.some((m) => m.includes("GPU 1")), "spawn toast reports the placed GPUs");
 		}
+		// with exactly ONE GPU checked the mode stays 'Single GPU' (below the
+		// 2-GPU threshold) — the highlight derives from the checkbox set.
+		{
+			const [single1, multi1] = modeRows20();
+			assert(single1.hasClass("arthur-gpu-mode--active")
+				&& !multi1.hasClass("arthur-gpu-mode--active"),
+				"1 GPU checked → 'Single GPU' stays highlighted (still below the threshold)");
+		}
 
 		// a second check auto-switches to the multi-GPU mode
 		sb20.wrap.handlers.get("mouseenter")[0]?.();
 		gpuRows20().find((r) => (r.textContent ?? "").includes("GPU 0")).handlers.get("click")[0]?.();
 		assert((plugin.settings.spawnGpuSel?.comfyui ?? []).join(",") === "0,1", "two checked GPUs persist the multi-GPU set");
 		{
-			const multiRow = gpuRows20().find((r) => (r.textContent ?? "").includes("Multi-GPUs"));
-			assert(multiRow != null && multiRow.getAttribute("aria-checked") === "true",
-				"checking ≥2 GPUs switches the mode row to Multi-GPUs automatically");
+			const multiRow = modeRows20().find((r) => (r.textContent ?? "").includes("Multi-GPUs"));
+			assert(multiRow != null && multiRow.getAttribute("aria-checked") === "true"
+				&& multiRow.hasClass("arthur-gpu-mode--active") === true,
+				"checking ≥2 GPUs flips the accent highlight to 'Multi-GPUs' (derived, exactly one)");
 		}
 		await clickSpawn20();
 		{
@@ -2316,15 +2337,42 @@ try {
 			&& plugin._data?.spawnGpuSel?.comfyui === undefined,
 			"unchecking all GPUs clears the persisted selection (back to default)");
 		{
-			const singleRow = gpuRows20().find((r) => (r.textContent ?? "").includes("Single GPU"));
-			assert(singleRow != null && singleRow.getAttribute("aria-checked") === "true",
-				"unchecking all returns the mode row to 'Single GPU' (default)");
+			const singleRow = modeRows20().find((r) => (r.textContent ?? "").includes("Single GPU"));
+			assert(singleRow != null && singleRow.getAttribute("aria-checked") === "true"
+				&& singleRow.hasClass("arthur-gpu-mode--active") === true,
+				"unchecking all returns the highlight to 'Single GPU' (default)");
 		}
 		await clickSpawn20();
 		{
 			const call = spawnCalls20[spawnCalls20.length - 1];
 			assert(call != null && call.body === null,
 				"unchecking restores the default no-body spawn");
+		}
+
+		// the mode rows are CLICKABLE: 'Multi-GPUs' checks ALL GPUs (multi
+		// becomes effective from any checked count), 'Single GPU' clears every
+		// check (back to the default modulo rotation); the highlight follows.
+		{
+			const modeRow = (label) => findByClass(menu20, "arthur-gpu-mode")
+				.find((r) => (r.textContent ?? "").includes(label));
+			modeRow("Multi-GPUs").handlers.get("click")[0]?.();
+			assert((plugin.settings.spawnGpuSel?.comfyui ?? []).join(",") === "0,1",
+				"clicking 'Multi-GPUs' (from zero checked) checks ALL GPUs");
+			assert(modeRow("Multi-GPUs").hasClass("arthur-gpu-mode--active") === true,
+				"clicking 'Multi-GPUs' immediately highlights the multi mode");
+			// crossing back down through the GPU CHECKBOXES re-derives the highlight
+			sb20.wrap.handlers.get("mouseenter")[0]?.();
+			gpuRows20().find((r) => (r.textContent ?? "").includes("GPU 1")).handlers.get("click")[0]?.();
+			assert((plugin.settings.spawnGpuSel?.comfyui ?? []).join(",") === "0",
+				"unchecking one GPU checkbox drops the selection below the threshold");
+			assert(modeRow("Single GPU").hasClass("arthur-gpu-mode--active") === true
+				&& modeRow("Multi-GPUs").hasClass("arthur-gpu-mode--active") === false,
+				"the derived highlight flips back to 'Single GPU' across the 2-GPU threshold");
+			modeRow("Single GPU").handlers.get("click")[0]?.();
+			assert(plugin.settings.spawnGpuSel?.comfyui === undefined,
+				"clicking 'Single GPU' clears every GPU check (back to the default)");
+			assert(modeRow("Single GPU").hasClass("arthur-gpu-mode--active") === true,
+				"after the clear the 'Single GPU' mode stays highlighted");
 		}
 	}
 
