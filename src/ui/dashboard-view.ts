@@ -118,6 +118,8 @@ import type { ComfyUIClient, QueueResponse, SystemStats } from "../api/comfy";
 import { parseComfyBinaryFrame } from "../comfy-frame";
 import { WsConnection, WsState } from "../connection";
 import { renderLossChart } from "./loss-chart";
+import { PiPanel, piSessionLabel, piStateIcon } from "./pi-panel"; // piStateIcon for queue child rows
+import type { AgentPiDevice, AgentPiSession, AgentPiStatus, AgentPiSubagent } from "../api/agent";
 import {
 	el,
 	DETAIL_INTERVAL_MS,
@@ -438,6 +440,27 @@ function jobBadgeCls(status: AiToolkitJobStatus): string {
 	return "arthur-badge--idle";
 }
 
+/**
+ * One child row of a pi parent queue card — a subagent run of the parent
+ * session: state icon (running → spinner-green, done → check, failed → red
+ * cross, canceled → grey dash), agent name, task preview, live duration
+ * (running: now − startedAt; finished: finishedAt − startedAt).
+ */
+function piChildRow(sub: AgentPiSubagent): HTMLElement {
+	const startMs = sub.startedAt ? Date.parse(sub.startedAt) || 0 : 0;
+	const endMs = (sub.finishedAt ? Date.parse(sub.finishedAt) || 0 : 0)
+		|| (sub.state === "running" && startMs > 0 ? Date.now() : 0);
+	const dur = startMs > 0 && endMs > startMs ? fmtDuration((endMs - startMs) / 1000) : null;
+	const row = el("div", { cls: `arthur-pi-child arthur-pi-child--${sub.state}` });
+	row.append(
+		piStateIcon(sub.state),
+		el("span", { cls: "arthur-pi-child-agent", text: truncate(sub.agent, 24) }),
+		el("span", { cls: "arthur-card-meta arthur-pi-child-task", text: truncate(sub.taskPreview ?? "", 64), attrs: { title: sub.taskPreview ?? "" } }),
+		dur ? el("span", { cls: "arthur-card-meta arthur-pi-duration", text: dur }) : el("span"),
+	);
+	return row;
+}
+
 /** Training step % for progress bars (null → no bar). */
 function jobStepPct(job: AiToolkitJob): number | null {
 	return job.total_steps != null && job.total_steps > 0 && job.step > 0
@@ -512,6 +535,14 @@ export class ArthurDashboardView extends ItemView {
 	 *  errored (ai-toolkit collectors, unreachable comfy ports, or the
 	 *  watchdog's stuck-collector states) — never a fake empty state. */
 	private aiStateEl!: HTMLElement;
+	/** Pi panel (observational service, rendered ABOVE the GPU grid; own
+	 *  collapse toggle, NO lifecycle actions). */
+	private piPanel!: PiPanel;
+	/** Last GET /api/pi/status snapshot (null = collector failed / not yet). */
+	private piDetail: { status: AgentPiStatus | null; error: string | null } = {
+		status: null,
+		error: null,
+	};
 	/** True while the training collector sits degraded (watchdog); cleared on
 	 *  each settled tick — feeds the error banner. */
 	private trainingStuck = false;
@@ -572,6 +603,9 @@ export class ArthurDashboardView extends ItemView {
 	 *  live instance list (v0.5.4 stop-all forgets instances — a forgotten id
 	 *  must not linger expanded). */
 	private readonly expandedInstances = new Set<string>();
+	/** Expanded pi QUEUE parent cards (child rows visible), keyed
+	 *  `pi:<device>/<sessionId>` — survives the per-tick queue rebuild. */
+	private readonly piExpanded = new Set<string>();
 	/** Rows queued for an expand ANIMATION on the next grid render (a re-render
 	 *  from a poll must paint panels already-open, never re-run the animation). */
 	private readonly expandAnimationPending = new Set<string>();
@@ -684,6 +718,7 @@ export class ArthurDashboardView extends ItemView {
 		this.expandAnimationPending.clear();
 		this.spawnPendings.clear();
 		this.pluginStarts.clear();
+		this.piExpanded.clear();
 		this.buildSkeleton(this.desiredPorts());
 		this.openWss();
 		this.plugin.dashboardView = this;
@@ -723,6 +758,7 @@ export class ArthurDashboardView extends ItemView {
 		this.expandAnimationPending.clear();
 		this.spawnPendings.clear();
 		this.pluginStarts.clear();
+		this.piExpanded.clear();
 		if (this.plugin.dashboardView === this) this.plugin.dashboardView = null;
 		this.contentEl.empty();
 	}
@@ -831,6 +867,7 @@ export class ArthurDashboardView extends ItemView {
 				jobsError: "not configured",
 				queueError: "not configured",
 			};
+			this.piDetail = { status: null, error: null };
 			this.gpuDetail = { list: [], error: null };
 			this.spawnPendings.clear();
 			this.lastTick = null;
@@ -841,6 +878,7 @@ export class ArthurDashboardView extends ItemView {
 			this.syncSkeleton();
 			this.renderBanner();
 			this.renderServiceBar();
+			this.renderPi();
 			this.renderInstances();
 			this.renderQueue();
 			return;
@@ -882,6 +920,21 @@ export class ArthurDashboardView extends ItemView {
 		// out into the error row) BEFORE the grid renders.
 		this.tickSpawnPendings();
 		const agentError = this.agentDetail.error;
+
+		// pi observational snapshot (agent v0.7.0) — feeds the pi panel + the
+		// queue's pi parent jobs. Degradable: pipe absent → devices: [] (the
+		// panel renders its one muted warning line), never a thrown hard fail.
+		let piFetchError: unknown = null;
+		this.piDetail = { status: null, error: null };
+		if (healthOk) {
+			const piRes = await tryCall(() => clients.agent.piStatus());
+			if (piRes.value !== null) {
+				this.piDetail = { status: piRes.value, error: null };
+			} else {
+				piFetchError = piRes.error;
+				this.piDetail = { status: null, error: describeError(piRes.error) };
+			}
+		}
 
 		// Live GPU stats (detail cycle refresh for the grid columns + header
 		// stats). Degradable by design: nvidia-smi failure → {gpus: [], error};
@@ -980,6 +1033,7 @@ export class ArthurDashboardView extends ItemView {
 		this.trainingStuck = false;
 		this.renderBanner();
 		this.renderServiceBar();
+		this.renderPi();
 		this.pruneExpandedInstances();
 		this.renderInstances();
 		this.renderQueue();
@@ -1000,6 +1054,7 @@ export class ArthurDashboardView extends ItemView {
 				`aitk jobs ${this.outcomeFor(jobsRes.error)} · queues ${this.outcomeFor(queueRes.error)} ${hostPort(profile.aiToolkitPort)}`,
 			);
 			parts.push(`gpus ${this.outcomeFor(gpuFetchError)} ${hostPort(profile.agentPort)}`);
+			parts.push(`pi ${this.outcomeFor(piFetchError)} ${hostPort(profile.agentPort)}`);
 			console.debug(
 				`arthur dashboard-detail ok ${Date.now() - tickStarted}ms · ${parts.join(" · ")}`,
 			);
@@ -1060,6 +1115,24 @@ export class ArthurDashboardView extends ItemView {
 		// OUTSIDE both section collapsibles — it always shows when unhealthy.
 		this.bannerEl = root.createEl("div", { cls: "arthur-banner" });
 		this.bannerEl.hide();
+
+		// 0d. PI PANEL — the observational pi service (sessions + subagent runs):
+		// above the GPU grid because pi is NOT hardware-bound. Own collapse
+		// toggle reusing the section-head pattern (persisted piCollapsed,
+		// default expanded); carries NO lifecycle actions — read-only + peek.
+		this.piPanel = new PiPanel(root, {
+			isCollapsed: () => this.plugin.settings.piCollapsed === true,
+			onToggle: () => {
+				this.plugin.settings.piCollapsed = !(this.plugin.settings.piCollapsed === true);
+				void this.plugin.saveSettings();
+				this.piPanel.syncCollapse();
+			},
+			fetchTail: (device, sessionId) => {
+				const agent = this.plugin.clients?.agent;
+				if (!agent) return Promise.reject(new Error("agent unavailable"));
+				return agent.piSessionTail(device, sessionId, 10);
+			},
+		});
 
 		// 1. INSTANCES — collapsible section: a centered click-to-toggle title
 		// line ('Instances' + chevron) above the grid body (grid + notes +
@@ -1315,6 +1388,17 @@ export class ArthurDashboardView extends ItemView {
 			agentOk: this.agentDetail.statusOk === true,
 			error: this.agentDetail.error,
 			services: this.agentDetail.status?.services ?? [],
+		});
+	}
+
+	/** Sync the pi panel from the last pi snapshot (observational, no actions). */
+	private renderPi(): void {
+		const status = this.piDetail.status;
+		if (status) this.piPanel.prune(status.devices ?? []);
+		this.piPanel.render({
+			status,
+			error: this.piDetail.error,
+			agentOk: this.agentDetail.statusOk === true,
 		});
 	}
 
@@ -2282,6 +2366,33 @@ export class ArthurDashboardView extends ItemView {
 			if (counts.running + counts.pending === 0) setAnchor(p.port, null);
 		});
 
+		// pi active sessions — parent job cards in the RUNNING rank of the
+		// unified queue (slotted with comfy/training by startedAt duration desc;
+		// inactives live in the pi panel only). Children = subagent runs,
+		// collapsed by default with a chevron on the parent card.
+		if (this.piDetail.status) {
+			let piSeq = 0;
+			const liveKeys = new Set<string>();
+			for (const dev of this.piDetail.status.devices ?? []) {
+				for (const sess of dev.sessions ?? []) {
+					if (!sess.active) continue;
+					liveKeys.add(`pi:${dev.device}/${sess.id}`);
+					const subs = (dev.subagents ?? []).filter((s) => s.parentSessionId === sess.id);
+					const startMs = Date.parse(sess.startedAt ?? "") || 0;
+					const dur = startMs > 0 ? Math.max(0, (Date.now() - startMs) / 1000) : 0;
+					entries.push({
+						rank: 0,
+						sort: dur,
+						seq: 50 + piSeq++,
+						nodes: this.piParentNodes(dev, sess, subs, dur),
+					});
+				}
+			}
+			for (const key of [...this.piExpanded]) {
+				if (!liveKeys.has(key)) this.piExpanded.delete(key);
+			}
+		}
+
 		// ai-toolkit training cards — running (rank 0, duration-sorted),
 		// queued/stopping (rank 1, queue position first), recent stopped/error
 		// (rank 2, newest updated_at first, capped). Gated on the JOBS
@@ -2392,6 +2503,74 @@ export class ArthurDashboardView extends ItemView {
 
 	private renderProgress(panel: GenPanel): void {
 		this.paintProgress(panel.progress, panel.progressFill, panel.progressLabel);
+	}
+
+	/**
+	 * One active pi session as a parent job card in the unified queue: 'pi ·
+	 * <name>' with a device prefix, subagent child count badge, aggregate
+	 * subagent state counts ('N running · M done'), live duration, chevron
+	 * + collapsed child rows (state icon · agent · taskPreview · duration).
+	 * Click toggles the child expansion (state survives the per-tick rebuild).
+	 */
+	private piParentNodes(
+		dev: AgentPiDevice,
+		sess: AgentPiSession,
+		subs: AgentPiSubagent[],
+		dur: number,
+	): HTMLElement[] {
+		const key = `pi:${dev.device}/${sess.id}`;
+		const expanded = this.piExpanded.has(key);
+		const running = subs.filter((s) => s.state === "running").length;
+		const done = subs.filter((s) => s.state === "done").length;
+		const failed = subs.filter((s) => s.state === "failed").length;
+		const canceled = subs.filter((s) => s.state === "canceled").length;
+		const aggParts: string[] = [];
+		if (running > 0) aggParts.push(`${running} running`);
+		if (done > 0) aggParts.push(`${done} done`);
+		if (failed > 0) aggParts.push(`${failed} failed`);
+		if (canceled > 0) aggParts.push(`${canceled} canceled`);
+		const card = el("div", {
+			cls: `arthur-queue-job arthur-pi-parent${expanded ? " arthur-pi-parent--expanded" : ""}`,
+			attrs: { "data-pi-key": key },
+		});
+		const head = el("div", { cls: "arthur-card-head" });
+		head.append(
+			el("span", {
+				cls: `arthur-pi-chevron${expanded ? " arthur-pi-chevron--open" : ""}`,
+				text: expanded ? "▾" : "▸",
+			}),
+			el("span", { cls: "arthur-queue-label arthur-pi-parent-label", text: `pi · ${piSessionLabel(sess)}` }),
+			el("span", { cls: "arthur-card-meta arthur-pi-device", text: ((dev.hostname ?? "").trim() || dev.device) }),
+		);
+		if (subs.length > 0) {
+			head.append(el("span", {
+				cls: "arthur-badge arthur-badge--idle arthur-pi-count",
+				text: String(subs.length),
+				attrs: { title: `${subs.length} subagent run${subs.length === 1 ? "" : "s"}` },
+			}));
+		}
+		if (aggParts.length > 0) {
+			head.append(el("span", { cls: "arthur-card-meta arthur-pi-agg", text: aggParts.join(" · ") }));
+		}
+		if (dur > 0) {
+			head.append(el("span", { cls: "arthur-card-meta arthur-pi-duration", text: `${fmtDuration(dur)} run` }));
+		}
+		card.append(head);
+		if (expanded) {
+			const kids = el("div", { cls: "arthur-pi-children" });
+			if (subs.length === 0) {
+				kids.append(el("span", { cls: "arthur-card-meta arthur-pi-note", text: "no subagent runs" }));
+			} else {
+				for (const sub of subs) kids.append(piChildRow(sub));
+			}
+			card.append(kids);
+		}
+		card.addEventListener("click", () => {
+			if (this.piExpanded.has(key)) this.piExpanded.delete(key);
+			else this.piExpanded.add(key);
+			this.renderQueue();
+		});
+		return [card];
 	}
 
 	/** Paint one (bar-fill, label) progress widget pair — shared by the port

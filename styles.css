@@ -999,3 +999,295 @@
 	color: var(--text-on-accent);
 	background: color-mix(in srgb, var(--text-error) 70%, var(--background-modifier-border));
 }
+
+/* ---------------------------------------------------------------- pi panel */
+
+/* the pi section: observational service above the GPU grid — same outlined
+   card feel as the other sections, own collapse toggle ('Pi' head) */
+.arthur-section--pi {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m, 10px);
+	padding: 0.55em 0.75em;
+	background: var(--background-primary);
+	box-shadow: var(--shadow-s);
+	gap: 0.35em;
+}
+
+.arthur-pi-warning {
+	margin: 0.2em 0;
+	cursor: default;
+}
+
+.arthur-pi-device {
+	display: flex;
+	flex-direction: column;
+	gap: 0.3em;
+	min-width: 0;
+	padding-bottom: 0.3em;
+}
+
+.arthur-pi-device + .arthur-pi-device {
+	border-top: 1px solid var(--background-modifier-border);
+	padding-top: 0.45em;
+}
+
+.arthur-pi-device-head {
+	display: flex;
+	align-items: center;
+	gap: 0.55em;
+	min-width: 0;
+}
+
+.arthur-pi-device-name {
+	font-weight: var(--font-semibold);
+	font-size: var(--font-ui-small);
+	letter-spacing: 0.03em;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.arthur-pi-stale {
+	font-size: var(--font-ui-smaller);
+}
+
+/* session cards: compact outlined rows, green dot active / grey inactive */
+.arthur-pi-sessions {
+	display: flex;
+	flex-direction: column;
+	gap: 0.25em;
+	min-width: 0;
+}
+
+.arthur-pi-card {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	padding: 0.35em 0.5em;
+	display: flex;
+	flex-direction: column;
+	gap: 0.25em;
+	min-width: 0;
+	cursor: default;
+}
+
+.arthur-pi-card--active {
+	border-color: color-mix(in srgb, var(--interactive-accent) 45%, var(--background-modifier-border));
+	cursor: pointer;
+}
+
+.arthur-pi-card--active:hover {
+	background: color-mix(in srgb, var(--interactive-accent) 6%, var(--background-primary));
+}
+
+.arthur-pi-card--inactive {
+	opacity: 0.75;
+	cursor: pointer;
+}
+
+.arthur-pi-card-head {
+	display: flex;
+	align-items: center;
+	gap: 0.5em;
+	min-width: 0;
+}
+
+.arthur-pi-card-title {
+	font-weight: var(--font-medium);
+	font-size: var(--font-ui-small);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.arthur-pi-card-meta {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.arthur-pi-duration {
+	margin-inline-start: auto;
+	flex-shrink: 0;
+	font-variant-numeric: tabular-nums;
+}
+
+.arthur-pi-count {
+	font-size: var(--font-ui-smaller);
+	flex-shrink: 0;
+}
+
+.arthur-pi-count--running {
+	color: var(--text-on-accent);
+	background: color-mix(in srgb, var(--interactive-accent) 70%, var(--background-modifier-border));
+}
+
+.arthur-pi-peek {
+	flex-shrink: 0;
+}
+
+/* expanded session panel: the parent session's subagent runs */
+.arthur-pi-subs {
+	display: flex;
+	flex-direction: column;
+	gap: 0.15em;
+	padding: 0.15em 0 0.1em 1.2em;
+	border-top: 1px dashed var(--background-modifier-border);
+}
+
+.arthur-pi-sub {
+	display: flex;
+	align-items: center;
+	gap: 0.45em;
+	min-width: 0;
+	font-size: var(--font-ui-small);
+}
+
+.arthur-pi-sub-agent {
+	font-weight: var(--font-medium);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.arthur-pi-sub-task {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.arthur-pi-note {
+	font-style: italic;
+	color: var(--text-muted);
+}
+
+/* peek mini-log: last 10 tail entries, preview text only */
+.arthur-pi-log {
+	display: flex;
+	flex-direction: column;
+	gap: 0.1em;
+	padding: 0.25em 0 0.1em 1.2em;
+	border-top: 1px dashed var(--background-modifier-border);
+	font-size: var(--font-ui-smaller);
+}
+
+.arthur-pi-log-row {
+	display: flex;
+	align-items: baseline;
+	gap: 0.45em;
+	min-width: 0;
+}
+
+.arthur-pi-log-role {
+	flex-shrink: 0;
+	color: var(--text-muted);
+	font-weight: var(--font-medium);
+}
+
+.arthur-pi-log-preview {
+	color: var(--text-normal);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* subagent state icons (queue child rows share the same classes):
+   running → spinner-green, done → check, failed → red cross, canceled → dash */
+.arthur-pi-st {
+	flex-shrink: 0;
+	width: 1.1em;
+	text-align: center;
+	display: inline-block;
+}
+
+.arthur-pi-st--running {
+	color: var(--interactive-accent);
+	animation: arthur-pi-spin 1.1s linear infinite;
+}
+
+.arthur-pi-st--done {
+	color: var(--text-success, var(--interactive-accent));
+}
+
+.arthur-pi-st--failed {
+	color: var(--text-error);
+}
+
+.arthur-pi-st--canceled {
+	color: var(--text-faint);
+}
+
+@keyframes arthur-pi-spin {
+	to { transform: rotate(360deg); }
+}
+
+/* ------------------------------------------------- pi jobs in the queue */
+
+/* parent job card of an ACTIVE pi session (running rank of the queue) */
+.arthur-pi-parent {
+	cursor: pointer;
+}
+
+.arthur-pi-parent .arthur-card-head {
+	cursor: pointer;
+}
+
+.arthur-pi-chevron {
+	flex-shrink: 0;
+	color: var(--text-faint);
+	font-size: var(--font-ui-small);
+	transition: transform 0.15s ease;
+}
+
+.arthur-pi-chevron--open {
+	transform: rotate(90deg);
+}
+
+.arthur-pi-parent-label {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.arthur-pi-device,
+.arthur-pi-agg {
+	flex-shrink: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* INDENTED child rows under an expanded parent card */
+.arthur-pi-children {
+	display: flex;
+	flex-direction: column;
+	gap: 0.15em;
+	margin-left: 1.4em;
+	padding-left: 0.6em;
+	border-left: 2px solid var(--background-modifier-border);
+}
+
+.arthur-pi-child {
+	display: flex;
+	align-items: center;
+	gap: 0.5em;
+	min-width: 0;
+	font-size: var(--font-ui-small);
+	padding: 0.1em 0;
+}
+
+.arthur-pi-child-agent {
+	font-weight: var(--font-medium);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.arthur-pi-child-task {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.arthur-pi-child--canceled {
+	opacity: 0.6;
+}

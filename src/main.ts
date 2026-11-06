@@ -48,6 +48,8 @@ export interface ArthurSettings {
 	instancesCollapsed: boolean;
 	/** Job-queue section collapsed (dashboard title toggle; default expanded). */
 	queueCollapsed: boolean;
+	/** Pi panel section collapsed (pi title toggle; default expanded). */
+	piCollapsed: boolean;
 	/** Per-service GPU selection for service-button spawns — Record<serviceId,
 	 *  number[]> of checked GPU indexes (empty/missing = default: single GPU,
 	 *  no pinned index → agent's modulo rotation). */
@@ -86,6 +88,7 @@ const DEFAULT_SETTINGS: ArthurSettings = {
 	debugLogging: false,
 	instancesCollapsed: false,
 	queueCollapsed: false,
+	piCollapsed: false,
 	spawnGpuSel: {},
 };
 
@@ -138,6 +141,8 @@ export interface LightState {
 	/** Most advanced RUNNING training job, or null. */
 	train: { name: string; step: number; total: number | null } | null;
 	agentOnline: boolean | null;
+	/** pi active sessions across devices (light cycle; null until probed). */
+	piActive: number | null;
 	lastUpdated: number | null;
 }
 
@@ -304,6 +309,7 @@ export default class ArthurPlugin extends Plugin {
 		queueDepth: 0,
 		train: null,
 		agentOnline: null,
+		piActive: null,
 		lastUpdated: null,
 	};
 
@@ -482,10 +488,11 @@ export default class ArthurPlugin extends Plugin {
 
 		// /api/gpus (agent v0.5.2) is a degradable read — when it fails the pill
 		// falls back to the per-instance system_stats free-bytes view.
-		const [agentStatus, aiJobs, gpuResp] = await Promise.all([
+		const [agentStatus, aiJobs, gpuResp, piStatus] = await Promise.all([
 			best(clients.agent.status()),
 			best(clients.aitoolkit.jobs()),
 			best(clients.agent.gpus()),
+			best(clients.agent.piStatus()),
 		]);
 
 		// Comfy ports come from the agent's discovered instances when it
@@ -540,6 +547,16 @@ export default class ArthurPlugin extends Plugin {
 			),
 			train,
 			agentOnline: agentStatus !== null,
+			piActive: piStatus
+				? (piStatus.devices ?? []).reduce(
+						(acc, d) =>
+							acc +
+							(typeof d.activeSessions === "number"
+								? d.activeSessions
+								: (d.sessions ?? []).filter((s) => s.active).length),
+						0,
+				  )
+				: null,
 			lastUpdated: Date.now(),
 		};
 
@@ -562,6 +579,7 @@ export default class ArthurPlugin extends Plugin {
 			gpuStats: s.gpuStats,
 			queueDepth: s.queueDepth,
 			train: s.train ? { step: s.train.step, total: s.train.total } : null,
+			piActive: s.piActive,
 			lastUpdated: s.lastUpdated,
 		};
 		this.statusPill.update(state);
@@ -603,6 +621,7 @@ export default class ArthurPlugin extends Plugin {
 			debugLogging: data?.debugLogging === true,
 			instancesCollapsed: data?.instancesCollapsed === true,
 			queueCollapsed: data?.queueCollapsed === true,
+			piCollapsed: data?.piCollapsed === true,
 			spawnGpuSel: sanitizeGpuSel(data?.spawnGpuSel),
 		};
 	}

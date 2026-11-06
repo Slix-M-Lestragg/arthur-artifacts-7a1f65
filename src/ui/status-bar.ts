@@ -37,6 +37,9 @@ export interface StatusBarState {
 	queueDepth: number;
 	/** Most advanced RUNNING training job, or null when nothing is training. */
 	train: { step: number; total: number | null } | null;
+	/** pi active-session count across devices (light cycle); the pill renders
+	 *  a 'pi N' segment ONLY while N > 0. */
+	piActive?: number | null;
 	lastUpdated: number | null;
 }
 
@@ -46,6 +49,7 @@ export class StatusBarPill {
 	private readonly gpuEls = new Map<string, HTMLElement>();
 	private readonly queueEl: HTMLElement;
 	private readonly trainEl: HTMLElement;
+	private readonly piEl: HTMLElement;
 	private readonly openDashboard: () => void;
 
 	constructor(parent: HTMLElement, openDashboard: () => void) {
@@ -56,9 +60,11 @@ export class StatusBarPill {
 		this.el.addEventListener("click", () => this.openDashboard());
 		this.queueEl = el("span", { cls: "arthur-status-part" });
 		this.trainEl = el("span", { cls: "arthur-status-part" });
-		this.el.append(this.queueEl, this.trainEl);
+		this.piEl = el("span", { cls: "arthur-status-part" });
+		this.el.append(this.queueEl, this.trainEl, this.piEl);
 		this.queueEl.hide();
 		this.trainEl.hide();
+		this.piEl.hide();
 	}
 
 	/**
@@ -135,6 +141,14 @@ export class StatusBarPill {
 			this.trainEl.show();
 		} else {
 			this.trainEl.hide();
+		}
+
+		// pi active sessions (observational service) — only while any is active.
+		if (state.piActive != null && state.piActive > 0) {
+			this.piEl.textContent = `pi ${state.piActive}`;
+			this.piEl.show();
+		} else {
+			this.piEl.hide();
 		}
 
 		this.el.setAttribute(

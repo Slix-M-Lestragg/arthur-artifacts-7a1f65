@@ -120,13 +120,84 @@ export interface AgentActionResult {
 /** Agent version this plugin build was written against — mismatch → banner.
  *  0.6.0: POST /api/services/{svc}/instances accepts an optional JSON body
  *  {"gpus": [n, …]} to pin the new instance to specific GPU(s) (no body = the
- *  modulo rotation, as before). */
-export const AGENT_VERSION = "0.6.0";
+ *  modulo rotation, as before).
+ *  0.7.0: pi observational surface — GET /api/pi/status (pi sessions +
+ *  subagent runs per device) and GET /api/pi/sessions/{device}/{id}/tail.
+ *  pi is NOT a managed service: no lifecycle endpoints, pure observation. */
+export const AGENT_VERSION = "0.7.0";
 
 /** GET /health — unauthenticated {ok:true, version}; distinguishes "agent down" from "bad token". */
 export interface AgentHealth {
 	ok: boolean;
 	version?: string;
+}
+
+// ------------------------------------------------------------- pi surface ----
+
+/** One pi coding session of a device (GET /api/pi/status). */
+export interface AgentPiSession {
+	id: string;
+	path: string;
+	cwd: string;
+	/** Friendly session name; absent → UI falls back to the last cwd segment. */
+	name?: string | null;
+	model?: string | null;
+	provider?: string | null;
+	/** ISO timestamps (any unparseable value is treated as absent by the UI). */
+	startedAt?: string | null;
+	lastActivity?: string | null;
+	/** Session currently in use (drives queue placement: ACTIVE sessions only). */
+	active: boolean;
+}
+
+/** One pi subagent run (child job of its parentSessionId). */
+export interface AgentPiSubagent {
+	runId: string;
+	batchId?: string | null;
+	agent: string;
+	taskPreview?: string | null;
+	state: "running" | "done" | "failed" | "canceled";
+	parentSessionId: string;
+	startedAt?: string | null;
+	finishedAt?: string | null;
+}
+
+/** One pi-sync device (pi instances are NOT hardware-bound — they render
+ *  above the GPU grid, and their active sessions slot into the job queue). */
+export interface AgentPiDevice {
+	device: string;
+	hostname?: string | null;
+	repoUpdatedAt?: string | null;
+	sessionsCount?: number;
+	activeSessions?: number;
+	subagentsRunning?: number;
+	sessions: AgentPiSession[];
+	subagents: AgentPiSubagent[];
+	/** Data snapshot past its freshness budget — UI paints a stale badge. */
+	stale?: boolean;
+}
+
+/**
+ * GET /api/pi/status — degradable observation: when the pi-sync status pipe
+ * is absent the agent answers with an EMPTY devices list (never a hard
+ * failure); the UI renders one muted 'pi status unavailable' line for that.
+ */
+export interface AgentPiStatus {
+	devices: AgentPiDevice[];
+	generatedAt?: string | null;
+}
+
+/** One tail entry of a session transcript (preview text only). */
+export interface AgentPiTailLine {
+	type: string;
+	role?: string | null;
+	preview?: string | null;
+	timestamp?: string | null;
+}
+
+/** GET /api/pi/sessions/{device}/{sessionId}/tail?lines=N. */
+export interface AgentPiTail {
+	lines: AgentPiTailLine[];
 }
 
 export class ArthurAgentClient {
@@ -284,6 +355,27 @@ export class ArthurAgentClient {
 		return this.call<AgentForgetResult>(
 			`/api/services/${encodeURIComponent(svc)}/instances/${encodeURIComponent(id)}/forget`,
 			"POST",
+		);
+	}
+
+	// ---------------------------------------------------------- pi surface ----
+
+	/**
+	 * GET /api/pi/status — observational pi-sync snapshot (sessions + subagent
+	 * runs per device). Degradable: pipe absent → 200 with devices: [] (the
+	 * UI renders its muted 'pi status unavailable' line), never thrown.
+	 */
+	piStatus(): Promise<AgentPiStatus> {
+		return this.call<AgentPiStatus>("/api/pi/status");
+	}
+
+	/** GET /api/pi/sessions/{device}/{sessionId}/tail?lines=N — newest-last line
+	 *  list of a session transcript (preview text only). */
+	piSessionTail(device: string, sessionId: string, lines?: number): Promise<AgentPiTail> {
+		return this.call<AgentPiTail>(
+			`/api/pi/sessions/${encodeURIComponent(device)}/${encodeURIComponent(sessionId)}/tail`,
+			"GET",
+			lines != null ? { lines } : undefined,
 		);
 	}
 }

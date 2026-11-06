@@ -712,7 +712,7 @@ try {
 
 	const jsonBody = (status, body) => ({ status, body });
 	const agentStatusBody = {
-		version: "0.6.0",
+		version: "0.7.0",
 		host_uptime: 123456.7,
 		services: [
 			{
@@ -736,7 +736,7 @@ try {
 	// Default handler: agent handshake + status answer; everything else offline.
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.6.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.7.0" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/comfyui/start")) {
 			return jsonBody(200, { action: "start", result: "started", service: agentStatusBody.services[0] });
@@ -801,7 +801,7 @@ try {
 	StubNotice.reset();
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.6.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.7.0" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/comfyui/instances")) {
 			return jsonBody(201, {
@@ -821,7 +821,7 @@ try {
 	StubNotice.reset();
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.6.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.7.0" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/aitoolkit/instances")) {
 			return jsonBody(409, { error: "single-instance service" });
@@ -844,7 +844,7 @@ try {
 	calls9 = [];
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.6.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.7.0" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/stop")) {
 			return opts.url.includes("force=1")
@@ -946,7 +946,7 @@ try {
 	];
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.6.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.7.0" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/instances/") && opts.url.endsWith("/start")) {
 			return jsonBody(200, { action: "start", result: "started", instance: { id: "comfy-2", up: true, port: 8190 } });
@@ -1005,7 +1005,7 @@ try {
 	calls9 = [];
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.6.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.7.0" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/instances/") && opts.url.endsWith("/forget")) {
 			return jsonBody(409, { error: "instance is running" });
@@ -1033,7 +1033,7 @@ try {
 		.filter((i) => i.id !== "comfy-2");
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.6.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.7.0" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/instances/") && opts.url.endsWith("/forget")) {
 			return jsonBody(200, { action: "forget", result: "forgotten", id: "comfy-2" });
@@ -1131,7 +1131,7 @@ try {
 	const json14 = (status, body) => ({ status, body });
 	const calls14 = [];
 	const gridStatusBody = {
-		version: "0.6.0",
+		version: "0.7.0",
 		host_uptime: 123456.7,
 		services: [
 			{
@@ -1165,7 +1165,7 @@ try {
 	const comfyStats = { system: {}, devices: [{ name: "cuda", type: "cuda", vram_total: 12 * 1024 * 1024, vram_free: 4 * 1024 * 1024 }] };
 	httpResponder = (opts) => {
 		calls14.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return json14(200, { ok: true, version: "0.6.0" });
+		if (opts.url.endsWith("/health")) return json14(200, { ok: true, version: "0.7.0" });
 		if (opts.url.endsWith("/api/status")) return json14(200, gridStatusBody);
 		if (opts.url.endsWith("/api/gpus")) return json14(200, gpusBody);
 		if (opts.url.endsWith("/api/jobs")) return json14(200, aiJobsBody);
@@ -1471,10 +1471,10 @@ try {
 	}
 	assert(ok, "section-titles view attach + refresh did not throw");
 	const heads15 = findByClass(view15.contentEl, "arthur-section-head");
-	assert(heads15.length === 2, "each dashboard section opens with a collapse title head (2 total)");
+	assert(heads15.length === 3, "each dashboard section opens with a collapse title head (pi + instances + queue: 3 total)");
 	const sectionTitles15 = findByClass(view15.contentEl, "arthur-section-title").map((t) => t.textContent);
-	assert(sectionTitles15.includes("Instances") && sectionTitles15.includes("Queue"),
-		`title texts are 'Instances' + 'Queue' (got: ${sectionTitles15.join(" / ")})`);
+	assert(sectionTitles15.includes("Instances") && sectionTitles15.includes("Queue") && sectionTitles15.includes("Pi"),
+		`title texts are 'Pi' + 'Instances' + 'Queue' (got: ${sectionTitles15.join(" / ")})`);
 	// centered layout + chevron live in the dedicated CSS classes; the DOM must
 	// carry both on every head
 	assert(heads15.every((h) => h.hasClass("arthur-section-head") && findByClass(h, "arthur-section-chevron").length === 1),
@@ -1536,7 +1536,7 @@ try {
 	const json16 = (status, body) => ({ status, body });
 	// Agent status where NO comfy instance is alive (empty instance list).
 	const emptyStatus16 = {
-		version: "0.6.0",
+		version: "0.7.0",
 		host_uptime: 1,
 		services: [
 			{ id: "comfyui", name: "ComfyUI", active: true, multi_instance: true, max_instances: 4, default_port: 8188, unit_template: "comfy@{i}", instances: [] },
@@ -1603,7 +1603,7 @@ try {
 	// (b) agent UP but zero comfy instances + /api/queue broken (500):
 	// job cards must NOT disappear — only the queue toggles are lost
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.6.0" });
+		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.7.0" });
 		if (opts.url.endsWith("/api/status")) return json16(200, emptyStatus16);
 		if (opts.url.endsWith("/api/jobs")) return json16(200, aiJobs16);
 		if (opts.url.endsWith("/api/queue")) return json16(500, { error: "queue endpoint broken" });
@@ -1628,7 +1628,7 @@ try {
 	// (c) /api/jobs broken (500) with zero everything: NO cards + inline error
 	// state — never a fake 'no jobs' note
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.6.0" });
+		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.7.0" });
 		if (opts.url.endsWith("/api/status")) return json16(200, emptyStatus16);
 		if (opts.url.endsWith("/api/jobs")) return json16(500, { error: "jobs endpoint broken" });
 		if (opts.url.endsWith("/api/queue")) return json16(200, { queues: [] });
@@ -1651,7 +1651,7 @@ try {
 
 	// (d) every source answers + zero jobs anywhere → the clear note shows
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.6.0" });
+		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.7.0" });
 		if (opts.url.endsWith("/api/status")) return json16(200, emptyStatus16);
 		if (opts.url.endsWith("/api/jobs")) return json16(200, { jobs: [] });
 		if (opts.url.endsWith("/api/queue")) return json16(200, { queues: [] });
@@ -1687,7 +1687,7 @@ try {
 
 	const json17 = (status, body) => ({ status, body });
 	const status17 = {
-		version: "0.6.0",
+		version: "0.7.0",
 		host_uptime: 1,
 		services: [
 			{
@@ -1920,9 +1920,9 @@ try {
 	status17.version = "0.5.4";
 	await view17.refreshData();
 	assert(view17.bannerEl._shown === true
-		&& allText(view17.bannerEl).includes("agent version mismatch: server 0.5.4, expected 0.6.0"),
-		"older/newer server versions still trigger the mismatch banner (expected 0.6.0)");
-	status17.version = "0.6.0";
+		&& allText(view17.bannerEl).includes("agent version mismatch: server 0.5.4, expected 0.7.0"),
+		"older/newer server versions still trigger the mismatch banner (expected 0.7.0)");
+	status17.version = "0.7.0";
 
 	httpResponder = null;
 	StubNotice.reset();
@@ -1941,7 +1941,7 @@ try {
 		port, gpu, gpus: gpu != null ? [gpu] : [], up, uptime: up ? 100.0 : null,
 	});
 	const status18 = {
-		version: "0.6.0",
+		version: "0.7.0",
 		host_uptime: 1,
 		services: [
 			{
@@ -1957,7 +1957,7 @@ try {
 		],
 	};
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json18(200, { ok: true, version: "0.6.0" });
+		if (opts.url.endsWith("/health")) return json18(200, { ok: true, version: "0.7.0" });
 		if (opts.url.endsWith("/api/status")) return json18(200, status18);
 		if (opts.url.endsWith("/api/gpus")) return json18(200, { gpus: [
 			{ index: 0, name: "NVIDIA GeForce RTX 3060", mem_total_mb: 12288, mem_used_mb: 1000, util_percent: 0, temp_c: 35 },
@@ -2103,7 +2103,7 @@ try {
 		port, gpu, gpus: gpu != null ? [gpu] : [], up, uptime: up ? 100.0 : null,
 	});
 	const status20 = {
-		version: "0.6.0",
+		version: "0.7.0",
 		host_uptime: 1,
 		services: [
 			{
@@ -2131,7 +2131,7 @@ try {
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/comfyui/start")) {
 			return json20(200, { action: "start", result: "started", instance: { id: "comfy-0", service: "comfyui", port: 8188, up: false } });
 		}
-		if (opts.url.endsWith("/health")) return json20(200, { ok: true, version: "0.6.0" });
+		if (opts.url.endsWith("/health")) return json20(200, { ok: true, version: "0.7.0" });
 		if (opts.url.endsWith("/api/status")) return json20(200, status20);
 		if (opts.url.endsWith("/api/gpus")) return json20(200, gpus20);
 		if (opts.url.endsWith("/api/jobs")) return json20(200, { jobs: [] });
@@ -2505,7 +2505,7 @@ try {
 		port, gpu: gpus.length === 1 ? gpus[0] : null, gpus, up, uptime: up ? 100.0 : null, unit: `comfy@${id.slice(-1)}`,
 	});
 	const status21 = {
-		version: "0.6.0",
+		version: "0.7.0",
 		host_uptime: 1,
 		services: [
 			{
@@ -2542,7 +2542,7 @@ try {
 		],
 	};
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json21(200, { ok: true, version: "0.6.0" });
+		if (opts.url.endsWith("/health")) return json21(200, { ok: true, version: "0.7.0" });
 		if (opts.url.endsWith("/api/status")) return json21(200, status21);
 		if (opts.url.endsWith("/api/gpus")) return json21(200, gpus21);
 		if (opts.url.endsWith("/api/jobs")) return json21(200, jobs21);
@@ -2632,6 +2632,251 @@ try {
 	StubNotice.reset();
 	await app.workspace.detachLeavesOfType("arthur-dashboard");
 
+	// ---- 22. pi panel + pi session/subagent queue jobs (observational service) ---
+	console.log("== 22. pi panel + session/subagent queue jobs ==");
+	plugin.settings.profiles[0].comfyPorts = ""; // pi suite runs without comfy ports
+	plugin.settings.piCollapsed = false;
+	await plugin.saveSettings();
+	await sleep(700);
+
+	const json22 = (status, body) => ({ status, body });
+	const iso = (msAgo) => new Date(Date.now() - msAgo).toISOString();
+	let piStatusBody22 = {
+		generatedAt: iso(0),
+		devices: [
+			{
+				device: "dev-lt", hostname: "laptop", repoUpdatedAt: iso(3600000),
+				sessionsCount: 2, activeSessions: 1, subagentsRunning: 1,
+				sessions: [
+					{ id: "sess-a", path: "/home/me/.pi/sess-a.jsonl", cwd: "/home/me/deep/repo", name: "arthur plugin work", model: "GLM-5", provider: "zai", startedAt: iso(3600000), lastActivity: iso(5000), active: true },
+					{ id: "sess-b", path: "/home/me/.pi/sess-b.jsonl", cwd: "/srv/other", name: "", model: "MiMo", provider: "x", startedAt: iso(7200000), lastActivity: iso(120000), active: false },
+				],
+				subagents: [
+					{ runId: "r1", batchId: "b1", agent: "worker", taskPreview: "fix the pi badge", state: "running", parentSessionId: "sess-a", startedAt: iso(60000), finishedAt: null },
+					{ runId: "r2", batchId: "b1", agent: "reviewer", taskPreview: "review the diff", state: "done", parentSessionId: "sess-a", startedAt: iso(600000), finishedAt: iso(300000) },
+					{ runId: "r3", batchId: "b2", agent: "scout", taskPreview: "find styles", state: "failed", parentSessionId: "sess-b", startedAt: iso(600000), finishedAt: iso(590000) },
+					{ runId: "r4", batchId: "b2", agent: "planner", taskPreview: "plan pi", state: "canceled", parentSessionId: "sess-b", startedAt: iso(600000), finishedAt: iso(580000) },
+				],
+				stale: false,
+			},
+		],
+	};
+	const piTailBody22 = {
+		lines: Array.from({ length: 12 }, (_, i) => ({
+			type: "message", role: i % 2 ? "assistant" : "user",
+			preview: `preview line ${i}`, timestamp: iso(120000 - i),
+		})),
+	};
+	const calls22 = [];
+	httpResponder = (opts) => {
+		calls22.push({ url: opts.url, method: opts.method ?? "GET" });
+		if (opts.url.endsWith("/health")) return json22(200, { ok: true, version: "0.7.0" });
+		if (opts.url.endsWith("/api/status")) return json22(200, {
+			version: "0.7.0", host_uptime: 1,
+			services: [
+				{ id: "comfyui", name: "ComfyUI", active: true, multi_instance: true, max_instances: 4, default_port: 8188, unit_template: "comfy@{i}", instances: [] },
+			],
+		});
+		if (opts.url.endsWith("/api/gpus")) return json22(200, { gpus: [], count: 0 });
+		if (opts.url.endsWith("/api/jobs")) return json22(200, {
+			jobs: [{ id: "trainX", name: "train running", gpu_ids: "0", status: "running", step: 10, total_steps: 100, speed_string: "1.0it/s", queue_position: null, pid: 7 }],
+		});
+		if (opts.url.endsWith("/api/queue")) return json22(200, { queues: [] });
+		if (opts.url.endsWith("/api/pi/status")) return json22(200, piStatusBody22);
+		if (opts.url.includes("/api/pi/sessions/dev-lt/sess-a/tail")) return json22(200, piTailBody22);
+		return null;
+	};
+
+	app.workspace.detachLeavesOfType("arthur-dashboard");
+	let view22;
+	ok = true;
+	try {
+		await plugin.activateView();
+		view22 = app.workspace.getLeavesOfType("arthur-dashboard")[0]?.view;
+		await view22.refreshData();
+	} catch (err) {
+		ok = false;
+		console.error(`    view22 attach threw: ${err?.stack ?? err}`);
+	}
+	assert(ok, "pi view attach + refresh did not throw");
+	const piPanel22 = view22.piPanel;
+	assert(!!piPanel22, "view holds a piPanel");
+	const piSection22 = piPanel22.sectionEl;
+
+	// (a) panel ABOVE the grid — pi section precedes the section carrying .arthur-grid
+	{
+		const root22 = view22.contentEl.children[0];
+		const children22 = root22.children ?? [];
+		const piIdx = children22.indexOf(piSection22);
+		const gridSectionIdx = children22.findIndex((c) => findById(c, "arthur-section-instances") != null);
+		assert(piIdx >= 0 && gridSectionIdx >= 0 && piIdx < gridSectionIdx,
+			`pi panel sits ABOVE the GPU grid (pi=${piIdx}, grid section=${gridSectionIdx})`);
+		assert(findByClass(view22.contentEl, "arthur-pi-warning").every((w) => w._shown !== true),
+			"no pi warning line while devices are reported");
+		const head22 = findByClass(piSection22, "arthur-section-head")[0];
+		assert(!!head22 && head22.getAttribute("data-section") === "pi"
+			&& findByClass(piSection22, "arthur-section-title")[0]?.textContent === "Pi",
+			"pi section carries its own collapse head titled 'Pi'");
+		assert(head22.getAttribute("aria-expanded") === "true", "pi section starts expanded");
+		const devHead22 = findByClass(piSection22, "arthur-pi-device-head")[0];
+		assert(!!devHead22 && allText(devHead22).includes("laptop") && allText(devHead22).includes("1 active"),
+			"device header shows the hostname + active session count");
+		// collapse toggle persists through the settings
+		head22.handlers.get("click")[0]?.();
+		assert(findById(piSection22, "arthur-section-pi").isShown() === false, "pi head click collapses the pi body");
+		assert(plugin.settings.piCollapsed === true && plugin._data?.piCollapsed === true,
+			"pi collapse state persists through saveSettings");
+		head22.handlers.get("click")[0]?.();
+		assert(findById(piSection22, "arthur-section-pi").isShown() === true, "second click re-expands the pi body");
+	}
+
+	// (b) active + inactive session cards render with model/provider + duration
+	{
+		const cards22 = () => findByClass(piSection22, "arthur-pi-card");
+		assert(cards22().length === 2, "both device sessions render as session cards");
+		const activeCard22 = cards22().find((c) => c.hasClass("arthur-pi-card--active"));
+		const inactiveCard22 = cards22().find((c) => c.hasClass("arthur-pi-card--inactive"));
+		assert(!!activeCard22 && !!inactiveCard22, "one active + one inactive session card");
+		assert((activeCard22?.attributes.get("data-pi-session") ?? "").endsWith("sess-a"), "active card keyed to sess-a");
+		assert(allText(activeCard22).includes("arthur plugin work") && allText(activeCard22).includes("GLM-5 · zai"),
+			"active card shows session name + model · provider");
+		assert(allText(activeCard22).includes("1:00:00"), "active card shows the startedAt duration (1h)");
+		assert(findByClass(activeCard22, "arthur-dot--green").length === 1, "active card carries the green dot");
+		assert(allText(inactiveCard22).includes("MiMo · x") && allText(inactiveCard22).includes("2:00"),
+			"inactive card shows model + lastActivity duration");
+		assert(allText(inactiveCard22).includes("other"), "inactive card falls back to the last cwd segment as name");
+		assert(findButton(inactiveCard22, "Peek") === null, "inactive cards carry NO Peek button");
+		assert(findButton(activeCard22, "Peek") != null, "active cards carry the read-only Peek button");
+		// expanded card: subagent list
+		activeCard22.handlers.get("click")[0]?.({ target: activeCard22 });
+		const expandedCard22 = findByClass(piSection22, "arthur-pi-card").find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-a"));
+		const subs22 = findByClass(expandedCard22, "arthur-pi-sub");
+		assert(subs22.length === 2, "expanded session card lists its subagent runs");
+		assert(allText(subs22[0]).includes("worker") && allText(subs22[0]).includes("fix the pi badge"),
+			"subagent rows show agent name + task preview");
+		assert(findByClass(expandedCard22, "arthur-pi-st--running").length >= 1
+			&& findByClass(expandedCard22, "arthur-pi-st--done").length === 1, "subagent rows carry per-state icons");
+		expandedCard22.handlers.get("click")[0]?.({ target: expandedCard22 });
+		assert(findByClass(piSection22, "arthur-pi-sub").length === 0, "second click collapses the subagent list");
+	}
+
+	// (c) subagent badge counts on the session cards
+	{
+		const cards22c = () => findByClass(piSection22, "arthur-pi-card");
+		for (const card of cards22c()) {
+			const badge = findByClass(card, "arthur-pi-count")[0];
+			assert(!!badge && badge.textContent === "2", `session card carries the '2' subagent count badge (got ${badge?.textContent})`);
+		}
+	}
+
+	// (d) queue: ACTIVE session renders as a pi parent job with collapsed children
+	{
+		const parents22 = () => view22.queueEl.children.filter((c) => c.hasClass?.("arthur-pi-parent"));
+		assert(parents22().length === 1, "queue renders exactly ONE pi parent card (active session only)");
+		const parent22 = parents22()[0];
+		assert((parent22.attributes.get("data-pi-key") ?? "") === "pi:dev-lt/sess-a", "parent card keyed to the active session");
+		assert(allText(parent22).includes("pi · arthur plugin work"), "parent card labeled 'pi · <name>'");
+		assert(allText(parent22).includes("laptop"), "parent card carries the device prefix");
+		assert(findByClass(parent22, "arthur-pi-count")[0]?.textContent === "2", "parent card carries the child count badge");
+		assert(allText(parent22).includes("1 running · 1 done"), "parent card shows the aggregate subagent state counts");
+		assert(allText(parent22).includes("1:00:00 run"), "parent card shows the live duration");
+		// a queued training card must NOT precede the pi parent (rank order)
+		const jobCards22 = view22.queueEl.children.filter((c) => c.hasClass?.("arthur-queue-job"));
+		assert(jobCards22.indexOf(parent22) < jobCards22.findIndex((c) => c.hasClass("arthur-queue-job--training")),
+			"pi parent slots into the running rank ahead of queued training jobs");
+		// children collapsed by default → chevron click expands the child rows
+		assert(findByClass(parent22, "arthur-pi-children").length === 0, "children are collapsed by default (no child rows)");
+		assert(findByClass(parent22, "arthur-pi-chevron").length === 1, "parent card carries the chevron");
+		parent22.handlers.get("click")[0]?.();
+		const expanded22 = view22.queueEl.children.filter((c) => c.hasClass?.("arthur-pi-parent")).find(
+			(c) => (c.attributes.get("data-pi-key") ?? "") === "pi:dev-lt/sess-a");
+		const childRows22 = findByClass(expanded22, "arthur-pi-child");
+		assert(childRows22.length === 2, "chevron click reveals the INDENTED child rows (2 subagent runs)");
+		assert(findByClass(expanded22, "arthur-pi-st--running")[0]?.textContent === "⟳", "running child renders the spinner icon");
+		assert(findByClass(expanded22, "arthur-pi-st--done")[0]?.textContent === "✓", "done child renders the check icon");
+		assert(findByClass(expanded22, "arthur-pi-st--failed").length === 0 && findByClass(expanded22, "arthur-pi-st--canceled").length === 0,
+			"sess-a's children carry no failed/canceled icons (those belong to the inactive session)");
+		assert(allText(childRows22[0]).includes("fix the pi badge"), "child rows show the taskPreview");
+		// state icons for EVERY child state (panel of the inactive session covers failed/canceled)
+		const inactCard22b = findByClass(piSection22, "arthur-pi-card").find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-b"));
+		inactCard22b.handlers.get("click")[0]?.({ target: inactCard22b });
+		const expandedB22 = findByClass(piSection22, "arthur-pi-card").find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-b"));
+		assert(findByClass(expandedB22, "arthur-pi-st--failed")[0]?.textContent === "✕", "failed child renders the red cross icon");
+		assert(findByClass(expandedB22, "arthur-pi-st--canceled")[0]?.textContent === "–", "canceled child renders the grey dash icon");
+		// collapse again
+		view22.queueEl.children.filter((c) => c.hasClass?.("arthur-pi-parent"))[0].handlers.get("click")[0]?.();
+		assert(findByClass(
+			view22.queueEl.children.filter((c) => c.hasClass?.("arthur-pi-parent"))[0],
+			"arthur-pi-children").length === 0, "second click collapses the children again");
+	}
+
+	// (e) inactive sessions NEVER in the queue
+	{
+		const keys22 = view22.queueEl.children
+			.filter((c) => c.hasClass?.("arthur-pi-parent"))
+			.map((c) => c.attributes.get("data-pi-key"));
+		assert(keys22.every((k) => !k.includes("sess-b")), `inactive sessions never in the queue (keys: ${keys22.join(",")})`);
+	}
+
+	// (f) 'Open session' peek: tail fetch (?lines=10) renders the last 10 entries
+	{
+		calls22.length = 0;
+		const activeCard22f = findByClass(piSection22, "arthur-pi-card").find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-a"));
+		findButton(activeCard22f, "Peek").handlers.get("click")[0]?.();
+		await sleep(30);
+		assert(calls22.some((c) => c.url.includes("/api/pi/sessions/dev-lt/sess-a/tail") && c.url.includes("lines=10")) === true,
+			"peek calls the tail endpoint with lines=10");
+		const peekCard22 = findByClass(piSection22, "arthur-pi-card").find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-a"));
+		const logRows22 = findByClass(peekCard22, "arthur-pi-log-row");
+		assert(logRows22.length === 10, `peek mini-log renders the LAST 10 entries (got ${logRows22.length})`);
+		assert(allText(peekCard22).includes("preview line 11") && !allText(peekCard22).includes("preview line 0"),
+			"mini-log shows preview text of the newest entries only");
+		findButton(peekCard22, "Hide log").handlers.get("click")[0]?.();
+		assert(findByClass(piSection22, "arthur-pi-log-row").length === 0, "peek toggles closed");
+	}
+
+	// (g) devices=[] (pipe absent) → ONE muted warning line, never a crash
+	{
+		piStatusBody22.devices = [];
+		await view22.refreshData();
+		const warn22 = findByClass(piSection22, "arthur-pi-warning")[0];
+		assert(!!warn22 && warn22.isShown() && allText(warn22).includes("pi status unavailable (pi-sync status pipe not set up)"),
+			"devices=[] renders the muted pi warning line");
+		assert(findByClass(piSection22, "arthur-pi-device").length === 0, "no device blocks while the pipe is absent");
+		assert(findByClass(view22.queueEl, "arthur-pi-parent").length === 0, "no pi parent jobs while the pipe is absent");
+	}
+
+	// (h) stale device → 'stale' badge on the device header
+	{
+		piStatusBody22.devices = [piStatusBody22.devices, ...[]].length ? piStatusBody22.devices : piStatusBody22.devices;
+		piStatusBody22.devices = null;
+		// restore with a stale device
+		piStatusBody22.devices = [
+			{ device: "dev-st", hostname: "stalebox", sessions: [], subagents: [], stale: true, activeSessions: 0 },
+		];
+		await view22.refreshData();
+		const devHeads22 = findByClass(piSection22, "arthur-pi-device-head");
+		assert(devHeads22.length === 1 && findByClass(devHeads22[0], "arthur-pi-stale").length === 1
+			&& allText(devHeads22[0]).includes("stale"), "stale device header carries the stale badge");
+	}
+
+	// (i) status pill 'pi N' segment ONLY while active sessions > 0
+	{
+		piStatusBody22.devices = [
+			{ device: "dev-x", hostname: "h1", sessions: [], subagents: [], activeSessions: 2, stale: false },
+		];
+		await plugin.collectLightData();
+		assert(allText(plugin.statusPill.el).includes("pi 2"), "status pill renders 'pi 2' while active sessions > 0");
+		piStatusBody22.devices[0].activeSessions = 0;
+		await plugin.collectLightData();
+		const piSeg22 = findByClass(plugin.statusPill.el, "arthur-status-part").find((s) => (s.textContent ?? "").startsWith("pi "));
+		assert(piSeg22 != null && piSeg22._shown === false, "the zero-count pi segment is hidden (_shown=false, no 'pi 0' shown)");
+	}
+
+	httpResponder = null;
+	StubNotice.reset();
+	await app.workspace.detachLeavesOfType("arthur-dashboard");
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();
@@ -2647,4 +2892,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.6.0-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove / pure-job-list-queue / collapsible-section-titles / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.7.0-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove / pure-job-list-queue / collapsible-section-titles / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-panel+pi-queue-jobs all clean");
