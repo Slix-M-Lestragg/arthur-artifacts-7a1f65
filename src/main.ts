@@ -479,17 +479,24 @@ export default class ArthurPlugin extends Plugin {
 		this.scheduleRuntimeRebuild();
 	}
 
-	/** Open (or reveal) the dashboard view. */
+	/**
+	 * Open (or reveal) the dashboard view — canonical Obsidian
+	 * registerView/setViewState pattern:
+	 *   1. reuse an existing arthur-dashboard leaf (never open duplicates),
+	 *   2. otherwise create the view via leaf.setViewState({type}) — Obsidian
+	 *      runs the registerView factory, then calls the view's internal
+	 *      open(containerEl) → load() + onOpen(),
+	 *   3. reveal the leaf in case it sits in a collapsed sidebar.
+	 */
 	async activateView(): Promise<void> {
 		const { workspace } = this.app;
-		let leaf = workspace.getLeavesOfType(VIEW_TYPE_ARTHUR_DASHBOARD)[0];
-		if (!leaf) {
-			leaf = workspace.getLeaf("tab");
-			await leaf.setViewState({
-				type: VIEW_TYPE_ARTHUR_DASHBOARD,
-				active: true,
-			});
-		}
+		const leaves = workspace.getLeavesOfType(VIEW_TYPE_ARTHUR_DASHBOARD);
+		let leaf = leaves.length ? leaves[0] : workspace.getRightLeaf(false);
+		if (!leaf) leaf = workspace.getLeaf(true);
+		await leaf.setViewState({
+			type: VIEW_TYPE_ARTHUR_DASHBOARD,
+			active: true,
+		});
 		workspace.revealLeaf(leaf);
 	}
 

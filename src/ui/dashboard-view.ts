@@ -167,7 +167,12 @@ function setDot(dot: HTMLElement, online: boolean | null): void {
 }
 
 export class ArthurDashboardView extends ItemView {
-	private open = false;
+	// NOTE: never name a field `open` on an ItemView subclass — Obsidian's
+	// View base class has an internal open(containerEl) method that
+	// Leaf.setViewState → Leaf.open calls (await view.open(el) → load() +
+	// onOpen()). An `open` class field shadows it with a boolean and the leaf
+	// dies with "TypeError: e.open is not a function" (blank dashboard).
+	private isOpened = false;
 	private readonly panels = new Map<number, ComfyPanel>();
 	private readonly wss = new Map<number, WsConnection>();
 	private readonly comfyByPort = new Map<number, ComfyUIClient>();
@@ -234,7 +239,7 @@ export class ArthurDashboardView extends ItemView {
 
 	/** Poll gate: no detail fetches while the view is closed or hidden. */
 	private visible(): boolean {
-		return this.open && this.contentEl.isShown();
+		return this.isOpened && this.contentEl.isShown();
 	}
 
 	/**
@@ -265,7 +270,7 @@ export class ArthurDashboardView extends ItemView {
 	// ------------------------------------------------------------------
 
 	async onOpen(): Promise<void> {
-		this.open = true;
+		this.isOpened = true;
 		this.contentEl.empty();
 		this.panels.clear();
 		this.comfyByPort.clear();
@@ -287,7 +292,7 @@ export class ArthurDashboardView extends ItemView {
 	}
 
 	async onClose(): Promise<void> {
-		this.open = false;
+		this.isOpened = false;
 		this.closeWss();
 		this.clearAllPreviews();
 		this.clearTrainingState();
@@ -1199,7 +1204,7 @@ export class ArthurDashboardView extends ItemView {
 	}
 
 	private wsStateChanged(port: number, state: WsState): void {
-		if (!this.open) return;
+		if (!this.isOpened) return;
 		const panel = this.panels.get(port);
 		if (!panel) return;
 		switch (state) {
@@ -1225,7 +1230,7 @@ export class ArthurDashboardView extends ItemView {
 	}
 
 	private wsProgress(port: number, data: any): void {
-		if (!this.open) return;
+		if (!this.isOpened) return;
 		const panel = this.panels.get(port);
 		if (!panel) return;
 		const parsed = this.parseProgress(data, panel);
@@ -1291,7 +1296,7 @@ export class ArthurDashboardView extends ItemView {
 	/** Non-progress WS events we care about — terminal execution states clear
 	 *  the progress bar (PLAN 2.3: "job ended → clear progress"). */
 	private wsEvent(port: number, type: string, _data: any): void {
-		if (!this.open) return;
+		if (!this.isOpened) return;
 		const panel = this.panels.get(port);
 		if (!panel) return;
 		switch (type) {
@@ -1316,7 +1321,7 @@ export class ArthurDashboardView extends ItemView {
 
 	/** Parse a typed ComfyUI binary frame and slot it into the preview ring. */
 	private wsBinary(port: number, buffer: ArrayBuffer): void {
-		if (!this.open) return;
+		if (!this.isOpened) return;
 		const panel = this.panels.get(port);
 		if (!panel) return;
 		const frame = parseComfyBinaryFrame(buffer);

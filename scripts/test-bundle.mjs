@@ -15,6 +15,14 @@
  *      and the "not configured" placeholder state.
  *   4. Partially configured profile (host blank / whitespace) → cards render
  *      and WS setup degrades gracefully instead of throwing in onOpen.
+ *   5. activateView() (ribbon-click simulation) through a workspace stub that
+ *      emulates Obsidian's real leaf contract: setViewState looks up the
+ *      registerView factory for the type, instantiates the view, and — like
+ *      real Leaf.open — awaits view.open(containerEl) (the View base-class
+ *      internal method). This catches view-instantiation bugs of exactly the
+ *      real-device class "Failed to open view TypeError: e.open is not a
+ *      function" (a view class field shadowing the internal open method),
+ *      plus duplicate-leaf behavior on repeated clicks.
  *
  * Usage: node scripts/test-bundle.mjs       (builds main.js itself)
  */
@@ -163,6 +171,16 @@ class StubItemView {
 		this.contentEl = new StubEl("div");
 	}
 	register(_cb) {}
+	/** Obsidian's internal View.prototype.open(containerEl):
+	 *  appends the container and boots the component (load + onOpen).
+	 *  Leaf.open awaits this on every setViewState — which is why a subclass
+	 *  field named `open` (class-field shadowing) kills the leaf with
+	 *  "TypeError: e.open is not a function". Kept on the prototype here so
+	 *  subclass data fields shadow it exactly like on a real device. */
+	async open(containerEl) {
+		containerEl.appendChild(this.contentEl);
+		return this.onOpen();
+	}
 }
 
 class StubModal {
@@ -201,11 +219,39 @@ class StubLeaf {
 	constructor(app) {
 		this.app = app;
 		this.view = null;
+		this.containerEl = new StubEl("div");
 	}
+	/** Mirrors Obsidian's Leaf.setViewState → Leaf.open contract:
+	 *  look up the registerView factory for the type, instantiate the view,
+	 *  then await view.open(containerEl) — the real app.js does
+	 *    this.view = e; try { await e.open(this.containerEl) } catch { console.error("Failed to open view", r) }
+	 *  so a view whose `open` is not callable leaves a blank leaf. */
 	async setViewState(state) {
+		// Real app.js: same-type setViewState is a NO-OP for the view
+		// (let s = e.type !== n; if (s || a) { recreate… }) — never recreate.
+		if (this.view?.getViewType?.() === state.type) {
+			return this.view;
+		}
 		const factory = this.app.viewFactories.get(state.type);
 		if (!factory) throw new Error(`no registered view factory for '${state.type}'`);
-		this.view = factory(this);
+		const view = factory(this);
+		if (!view || typeof view !== "object") {
+			throw new TypeError(`factory for '${state.type}' did not return a view object`);
+		}
+		if (typeof view.open !== "function") {
+			throw new TypeError("e.open is not a function");
+		}
+		if (typeof view.getViewType !== "function" || typeof view.onOpen !== "function") {
+			throw new TypeError(`view for '${state.type}' is missing getViewType()/onOpen()`);
+		}
+		this.view = view;
+		await view.open(this.containerEl);
+		if (view.getViewType() !== state.type) {
+			throw new TypeError(
+				`view type mismatch: setViewState('${state.type}') attached a view reporting '${view.getViewType()}'`,
+			);
+		}
+		return view;
 	}
 }
 
@@ -215,6 +261,7 @@ function makeApp() {
 		viewFactories: new Map(),
 		workspace: {
 			getLeavesOfType: (type) => leaves.filter((l) => l.view?.getViewType?.() === type),
+			getRightLeaf: () => null, // force the canonical getLeaf(true) fallback
 			getLeaf: () => {
 				const leaf = new StubLeaf(app);
 				leaves.push(leaf);
@@ -331,8 +378,9 @@ try {
 	const leaf = app.workspace.getLeaf();
 	ok = true;
 	try {
+		// setViewState itself now runs the registerView factory and boots the
+		// view through Obsidian's internal open() contract (StubLeaf above).
 		await leaf.setViewState({ type: "arthur-dashboard", active: true });
-		await leaf.view.onOpen();
 		await leaf.view.refreshData(); // deterministic fill of the early-out path
 	} catch (err) {
 		ok = false;
@@ -389,6 +437,46 @@ try {
 	assert(ok, "invalid ws url did not throw");
 	assert(v4.includes("ws down — reconnecting"), "ws state degrades to backoff instead of crashing");
 
+	// ---- 5. activateView (ribbon click) — real leaf contract ---------------
+	console.log("== 5. activateView (ribbon click) attaches the view ==");
+	// Start clean: the section-3 leaf already carries a dashboard view — detach
+	// it so activateView must exercise the creation path (registerView factory
+	// + Obsidian's internal open() contract), not just leaf reuse.
+	app.workspace.detachLeavesOfType("arthur-dashboard");
+	ok = true;
+	try {
+		// Fails exactly like the real device if the view instantiation contract
+		// is broken (e.g. a view field shadowing the internal open() method):
+		await plugin.activateView();
+	} catch (err) {
+		ok = false;
+		console.error(`    activateView threw: ${err?.stack ?? err}`);
+	}
+	assert(ok, "activateView() did not throw");
+	const dashLeaves = app.workspace.getLeavesOfType("arthur-dashboard");
+	assert(dashLeaves.length === 1, "exactly one arthur-dashboard leaf after first click");
+	const ribbonView = dashLeaves[0]?.view;
+	assert(!!ribbonView, "view instantiated on the leaf");
+	assert(typeof ribbonView?.open === "function", "view exposes a callable open() (no shadowing)");
+	assert(ribbonView?.getViewType() === "arthur-dashboard", "attached view reports the registered type");
+	assert(ribbonView?.isOpened === true, "internal open() ran → view reports open/onOpen() executed");
+	let v5 = allText(ribbonView?.contentEl);
+	assert(v5.includes("Instances"), "attached view renders Instances header");
+	assert(v5.includes("Generation"), "attached view renders Generation header");
+	assert(v5.includes("Training (ai-toolkit)"), "attached view renders Training header");
+
+	// Second click must reuse the existing leaf, never open a duplicate.
+	ok = true;
+	try {
+		await plugin.activateView();
+	} catch (err) {
+		ok = false;
+		console.error(`    second activateView threw: ${err?.stack ?? err}`);
+	}
+	assert(ok, "second activateView did not throw");
+	assert(app.workspace.getLeavesOfType("arthur-dashboard").length === 1, "repeated click reuses the leaf (no duplicate)");
+	assert(app.workspace.getLeavesOfType("arthur-dashboard")[0]?.view === ribbonView, "repeated click keeps the same view instance");
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();
@@ -404,4 +492,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract all clean");
