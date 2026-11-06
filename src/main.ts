@@ -22,6 +22,7 @@ import { fmtBytes, fmtGigCompact, normalizeHost } from "./util";
 export { normalizeHost };
 export { WsConnection, WsState } from "./connection";
 export { injectIcon } from "./icons";
+export { isWebViewerEnabled, openWebUrl, openUiTooltip, WEBVIEWER_VIEW_TYPE } from "./ui/webviewer";
 
 /** One server profile — host + which ports the services live on + tokens. */
 export interface ServerProfile {

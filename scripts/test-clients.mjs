@@ -203,14 +203,16 @@ function agentAssert(label, cond, detail = "") {
 	if (!cond) { agentFailures++; console.log(`agent FAIL ${label} ${detail}`); }
 }
 
-// GET /health — unauthenticated, must answer {ok:true, version:"0.5.0"}
+// GET /health — unauthenticated, must answer {ok:true, version:"0.5.x"} —
+// pinned to the 0.5 API family, not an exact minor (the live agent moves:
+// 0.5.0 at introduction → 0.5.2 gpus → 0.5.3 forget → 0.5.4 stop-all forgets).
 try {
 	const resp = await requester.request({ url: `${agentBase}/health` });
 	await ensureOk(resp);
 	const health = resp.json();
 	console.log(`agent/health: ${JSON.stringify(health)}`);
 	agentAssert("health-ok", health?.ok === true);
-	agentAssert("health-version-0.5.0", health?.version === "0.5.0", `version=${health?.version}`);
+	agentAssert("health-version-0.5.x", /^0\.5\./.test(String(health?.version ?? "")), `version=${health?.version}`);
 } catch (err) {
 	agentFailures++;
 	console.log(`agent/health: FAILED ${err.status ?? ""} ${err.message}`);

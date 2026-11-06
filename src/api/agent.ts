@@ -94,11 +94,17 @@ export interface AgentForgetResult {
 	id: string;
 }
 
-/** POST /api/services/{svc}/stop — results over ALL active instances. */
+/**
+ * POST /api/services/{svc}/stop — results over ALL active instances.
+ * Agent v0.5.4: stop-all also FORGETS every non-default instance of the
+ * service (config extras stay) — `forgotten` lists the instance ids dropped
+ * from the registry. A v0.5.3 agent omits the field; treat as [] .
+ */
 export interface AgentServiceStopResult {
 	action: "stop";
 	result: string;
 	stopped: string[];
+	forgotten?: string[];
 	service?: AgentService;
 }
 
@@ -112,7 +118,7 @@ export interface AgentActionResult {
 }
 
 /** Agent version this plugin build was written against — mismatch → banner. */
-export const AGENT_VERSION = "0.5.3";
+export const AGENT_VERSION = "0.5.4";
 
 /** GET /health — unauthenticated {ok:true, version}; distinguishes "agent down" from "bad token". */
 export interface AgentHealth {
@@ -211,8 +217,8 @@ export class ArthurAgentClient {
 
 	/**
 	 * POST /api/services/{svc}/stop[?force=1] — stop ALL instances of the
-	 * service; the server refuses with 409 while a generation runs unless
-	 * force=true.
+	 * service AND forget every non-default one (v0.5.4); the server refuses
+	 * with 409 while a generation runs unless force=true.
 	 */
 	async serviceStop(svc: string, force?: boolean): Promise<AgentServiceStopResult> {
 		return this.call<AgentServiceStopResult>(

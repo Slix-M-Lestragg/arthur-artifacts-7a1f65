@@ -81,6 +81,17 @@ class StubEl extends StubNode {
 	appendChild(node) { this.append(node); return node; }
 	insertBefore(node, ref) { const i = this.children.indexOf(ref); this.children.splice(i < 0 ? this.children.length : i, 0, node); node._parent = this; return node; }
 	remove() { this._parent?.children && (this._parent.children = this._parent.children.filter((c) => c !== this)); }
+	/** Ancestor walk ('button'/'a') mirroring Element.closest — the view's
+	 *  click-to-expand guard uses it to ignore clicks on buttons/links. */
+	closest(sel) {
+		const tag = String(sel).toUpperCase();
+		let node = this;
+		while (node) {
+			if (node.tagName === tag) return node;
+			node = node._parent;
+		}
+		return null;
+	}
 	get textContent() {
 		if (this._text != null) return this._text;
 		return (this.children ?? []).map((c) => (typeof c === "string" ? c : c.textContent)).join("");
@@ -695,7 +706,7 @@ try {
 
 	const jsonBody = (status, body) => ({ status, body });
 	const agentStatusBody = {
-		version: "0.5.3",
+		version: "0.5.4",
 		host_uptime: 123456.7,
 		services: [
 			{
@@ -719,7 +730,7 @@ try {
 	// Default handler: agent handshake + status answer; everything else offline.
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.3" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.4" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/comfyui/start")) {
 			return jsonBody(200, { action: "start", result: "started", service: agentStatusBody.services[0] });
@@ -784,7 +795,7 @@ try {
 	StubNotice.reset();
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.3" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.4" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/comfyui/instances")) {
 			return jsonBody(201, {
@@ -804,7 +815,7 @@ try {
 	StubNotice.reset();
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.3" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.4" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/aitoolkit/instances")) {
 			return jsonBody(409, { error: "single-instance service" });
@@ -827,7 +838,7 @@ try {
 	calls9 = [];
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.3" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.4" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/stop")) {
 			return opts.url.includes("force=1")
@@ -929,7 +940,7 @@ try {
 	];
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.3" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.4" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/instances/") && opts.url.endsWith("/start")) {
 			return jsonBody(200, { action: "start", result: "started", instance: { id: "comfy-2", up: true, port: 8190 } });
@@ -988,7 +999,7 @@ try {
 	calls9 = [];
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.3" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.4" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/instances/") && opts.url.endsWith("/forget")) {
 			return jsonBody(409, { error: "instance is running" });
@@ -1016,7 +1027,7 @@ try {
 		.filter((i) => i.id !== "comfy-2");
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.3" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.4" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/instances/") && opts.url.endsWith("/forget")) {
 			return jsonBody(200, { action: "forget", result: "forgotten", id: "comfy-2" });
@@ -1114,7 +1125,7 @@ try {
 	const json14 = (status, body) => ({ status, body });
 	const calls14 = [];
 	const gridStatusBody = {
-		version: "0.5.3",
+		version: "0.5.4",
 		host_uptime: 123456.7,
 		services: [
 			{
@@ -1148,7 +1159,7 @@ try {
 	const comfyStats = { system: {}, devices: [{ name: "cuda", type: "cuda", vram_total: 12 * 1024 * 1024, vram_free: 4 * 1024 * 1024 }] };
 	httpResponder = (opts) => {
 		calls14.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return json14(200, { ok: true, version: "0.5.3" });
+		if (opts.url.endsWith("/health")) return json14(200, { ok: true, version: "0.5.4" });
 		if (opts.url.endsWith("/api/status")) return json14(200, gridStatusBody);
 		if (opts.url.endsWith("/api/gpus")) return json14(200, gpusBody);
 		if (opts.url.endsWith("/api/jobs")) return json14(200, aiJobsBody);
@@ -1260,10 +1271,10 @@ try {
 		assert(allText(r0).includes("KSampler 3/20") === false, "no stale progress before the WS tick");
 		view14.wsProgress(8188, { value: 3, max: 20, node: "5" });
 		assert(allText(r0).includes("KSampler 3/20"), "WS progress tick updates the row's step progress + node label");
-		const links = findLinks(r0);
-		assert(links.length >= 1, "running row carries a 'view in queue' link");
-		assert(links.every((l) => l.textContent.includes("view in queue")), "link is labeled 'view in queue'");
-		const link = links[0];
+		const queueLinks = findLinks(r0).filter((l) => (l.className ?? "").includes("arthur-grid-link"));
+		assert(queueLinks.length >= 1, "running row carries a 'view in queue' link");
+		assert(queueLinks.every((l) => l.textContent.includes("view in queue")), "link is labeled 'view in queue'");
+		const link = queueLinks[0];
 		assert(link.attributes.get("href") === "#arthur-queue-8188", "link points at the stable arthur-queue-<port> anchor");
 		const target = findById(view14.contentEl, "arthur-queue-8188");
 		assert(!!target, "anchor target (generation panel for port 8188) exists below the grid");
@@ -1294,7 +1305,8 @@ try {
 		await view14.refreshData();
 		const idleRow = rowByKey("inst:comfy-0");
 		assert(!!idleRow && idleRow.hasClass("arthur-grid-row--idle"), "empty-queue instance renders as idle");
-		assert(findLinks(idleRow).length === 0, "idle row with no queue jobs carries no 'view in queue' link");
+		assert(findLinks(idleRow).filter((l) => (l.className ?? "").includes("arthur-grid-link")).length === 0,
+			"idle row with no queue jobs carries no 'view in queue' link");
 		assert(findButton(idleRow, "Clear queue") != null && findButton(idleRow, "Free VRAM") != null,
 			"up comfy instance grid card carries the Clear-queue + Free-VRAM actions (moved from the queue headers)");
 		assert(findByClass(idleRow, "arthur-ws-chip").length === 1, "instance card carries the WS state chip");
@@ -1518,7 +1530,7 @@ try {
 	const json16 = (status, body) => ({ status, body });
 	// Agent status where NO comfy instance is alive (empty instance list).
 	const emptyStatus16 = {
-		version: "0.5.3",
+		version: "0.5.4",
 		host_uptime: 1,
 		services: [
 			{ id: "comfyui", name: "ComfyUI", active: true, multi_instance: true, max_instances: 4, default_port: 8188, unit_template: "comfy@{i}", instances: [] },
@@ -1585,7 +1597,7 @@ try {
 	// (b) agent UP but zero comfy instances + /api/queue broken (500):
 	// job cards must NOT disappear — only the queue toggles are lost
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.5.3" });
+		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.5.4" });
 		if (opts.url.endsWith("/api/status")) return json16(200, emptyStatus16);
 		if (opts.url.endsWith("/api/jobs")) return json16(200, aiJobs16);
 		if (opts.url.endsWith("/api/queue")) return json16(500, { error: "queue endpoint broken" });
@@ -1610,7 +1622,7 @@ try {
 	// (c) /api/jobs broken (500) with zero everything: NO cards + inline error
 	// state — never a fake 'no jobs' note
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.5.3" });
+		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.5.4" });
 		if (opts.url.endsWith("/api/status")) return json16(200, emptyStatus16);
 		if (opts.url.endsWith("/api/jobs")) return json16(500, { error: "jobs endpoint broken" });
 		if (opts.url.endsWith("/api/queue")) return json16(200, { queues: [] });
@@ -1633,7 +1645,7 @@ try {
 
 	// (d) every source answers + zero jobs anywhere → the clear note shows
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.5.3" });
+		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.5.4" });
 		if (opts.url.endsWith("/api/status")) return json16(200, emptyStatus16);
 		if (opts.url.endsWith("/api/jobs")) return json16(200, { jobs: [] });
 		if (opts.url.endsWith("/api/queue")) return json16(200, { queues: [] });
@@ -1660,6 +1672,257 @@ try {
 	StubNotice.reset();
 	await app.workspace.detachLeavesOfType("arthur-dashboard");
 
+	// ---- 17. row-packing, expandable instance cards, webviewer links, ------
+	//      v0.5.4 stop-all (forgotten) cleanup, version banner
+	console.log("== 17. row packing + expandable cards + webviewer + stop-all ==");
+	plugin.settings.profiles[0].comfyPorts = "8188,8189,8190";
+	await plugin.saveSettings();
+	await sleep(700);
+
+	const json17 = (status, body) => ({ status, body });
+	const status17 = {
+		version: "0.5.4",
+		host_uptime: 1,
+		services: [
+			{
+				id: "comfyui", name: "ComfyUI", active: true, multi_instance: true,
+				max_instances: 4, default_port: 8188, unit_template: "comfy@{i}",
+				instances: [
+					{ id: "comfy-0", service: "comfyui", name: "ComfyUI #0", port: 8188, gpu: 0, gpus: [0], up: true, uptime: 100.0, unit: "comfy@0" },
+					{ id: "comfy-1", service: "comfyui", name: "ComfyUI #1", port: 8189, gpu: 1, gpus: [1], up: true, uptime: 90.0, unit: "comfy@1" },
+					{ id: "comfy-dual", service: "comfyui", name: "comfy-dual", port: 8190, gpu: null, gpus: [0, 1], up: true, uptime: 10.0, unit: "comfy@dual" },
+				],
+			},
+		],
+	};
+	const gpus17 = {
+		gpus: [
+			{ index: 0, name: "NVIDIA GeForce RTX 3060", mem_total_mb: 12288, mem_used_mb: 9420, util_percent: 36, temp_c: 41 },
+			{ index: 1, name: "NVIDIA GeForce RTX 3060", mem_total_mb: 12288, mem_used_mb: 1000, util_percent: 4, temp_c: 35 },
+		],
+		count: 2,
+	};
+	const queue17 = {
+		8188: { queue_running: [], queue_pending: [] },
+		8189: { queue_running: [], queue_pending: [] },
+		8190: { queue_running: [], queue_pending: [] },
+	};
+	httpResponder = (opts) => {
+		if (opts.url.endsWith("/health")) return json17(200, { ok: true, version: status17.version });
+		if (opts.url.endsWith("/api/status")) return json17(200, status17);
+		if (opts.url.endsWith("/api/gpus")) return json17(200, gpus17);
+		if (opts.url.endsWith("/api/jobs")) return json17(200, { jobs: [{ id: "jobA", name: "LoRA run alpha", gpu_ids: "0,1", status: "running", step: 50, total_steps: 200, speed_string: "1.20it/s", queue_position: null, pid: 123 }, { id: "jobB", name: "queued job", gpu_ids: "1", status: "queued", step: 0, total_steps: 100, speed_string: "", queue_position: 1, pid: null }] });
+		if (opts.url.endsWith("/api/queue")) return json17(200, { queues: [] });
+		for (const port of [8188, 8189, 8190]) {
+			if (opts.url.startsWith(`http://10.0.0.9:${port}/`)) {
+				return opts.url.endsWith("/system_stats")
+					? json17(200, { system: {}, devices: [{ name: "cuda", type: "cuda", vram_total: 12 * 1024 * 1024, vram_free: 4 * 1024 * 1024 }] })
+					: opts.url.endsWith("/queue")
+						? json17(200, queue17[port])
+						: null;
+			}
+		}
+		return null;
+	};
+	app.workspace.detachLeavesOfType("arthur-dashboard");
+	let view17;
+	ok = true;
+	try {
+		await plugin.activateView();
+		view17 = app.workspace.getLeavesOfType("arthur-dashboard")[0]?.view;
+		await view17.refreshData();
+	} catch (err) {
+		ok = false;
+		console.error(`    view17 attach threw: ${err?.stack ?? err}`);
+	}
+	assert(ok, "view17 attach + refresh did not throw");
+	const gridRows17 = () =>
+		view17.gridEl.children.filter((c) => c.hasClass?.("arthur-grid-row"));
+	const rowByKey17 = (key) => gridRows17().find((r) => r.attributes.get("data-row-key") === key) ?? null;
+
+	// (a) row packing: disjoint GPU sets share a packed row, dual-GPU keeps		// its own full row, overlapping placements stack below it
+	assert(findByClass(view17.contentEl, "arthur-grid-colhead").length === 2,
+		"view17 renders the 2 GPU columns");
+	{
+		const r0 = rowByKey17("inst:comfy-0");
+		const r1 = rowByKey17("inst:comfy-1");
+		const rd = rowByKey17("inst:comfy-dual");
+		assert(!!r0 && !!r1 && !!rd, "all three instance rows render");
+		assert(r0.style.gridRow === r1.style.gridRow,
+			`GPU0-only + GPU1-only instances share one packed row (rows: ${r0.style.gridRow} vs ${r1.style.gridRow})`);
+		assert(r0.style.gridColumn === "1 / span 1" && r1.style.gridColumn === "2 / span 1",
+			"the shared row's two cells sit in their own GPU columns");
+		assert(parseInt(rd.style.gridRow, 10) !== parseInt(r0.style.gridRow, 10),
+			"the dual-GPU instance spans its own full row (disjoint from the shared row)");
+		assert(rd.style.gridColumn === "1 / span 2", "the dual-GPU row still spans both columns");
+		// queued jobB (gpu 1) collides with BOTH the shared row (col 1) and the
+		// dual row (col 1) → stacks below;
+		const rb = rowByKey17("job:jobB");
+		assert(!!rb && parseInt(rb.style.gridRow, 10) > parseInt(rd.style.gridRow, 10),
+			`an overlapping queued job stacks below the packed rows (row ${rb.style.gridRow})`);
+		// 5 specs → 4 packed rows total (one row was saved by the packer)
+		assert(new Set(gridRows17().map((r) => r.style.gridRow)).size === 4,
+			"5 specs pack into 4 grid rows (disjoint GPU sets share one row)");
+	}
+
+	// (b) click-to-expand instance cards: toggle, detail fields, poll persists
+	{
+		const r1 = rowByKey17("inst:comfy-1");
+		r1.handlers.get("click")[0]?.({ target: r1 }); // card click → expand
+		const r1x = rowByKey17("inst:comfy-1");
+		const panel = findByClass(r1x, "arthur-inst-panel")[0] ?? null;
+		assert(!!panel, "card click expands the detail panel (accordion mounted)");
+		assert(r1x.hasClass("arthur-grid-row--expanded") === true, "expanded card carries the expanded state class");
+		const ptxt = allText(panel);
+		for (const needle of ["comfy-1", "ComfyUI #1", "8189", "comfyui", "comfy@1"
+		]) {
+			assert(ptxt.includes(needle), `detail panel carries the '${needle}' value`);
+		}
+		assert(ptxt.includes("running 0 · pending 0"), "detail panel carries the queue depth breakdown");
+		assert(ptxt.includes("gpu 1") && ptxt.includes("VRAM 1G/12G") && ptxt.includes("util 4%") && ptxt.includes("35°"),
+			"detail panel carries the per-GPU live stats (VRAM/util/temp from /api/gpus)");
+		assert(/connected|connecting|down \(reconnecting\)|closed/.test(ptxt),
+			"detail panel carries the WS connection state (" + (ptxt.match(/connected|connecting|down \(reconnecting\)|closed/) ?? ["?"])[0] + " in the stub)");
+		assert(findByClass(r1x, "arthur-grid-actions").length === 0,
+			"expanded cards drop the inline head buttons (lifecycle set lives in the panel)");
+		assert(findButton(panel, "Restart") != null && findButton(panel, "Stop") != null,
+			"the panel carries the duplicated lifecycle buttons (start/stop/restart)");
+		assert(allText(panel).includes("Open instance UI"), "the panel carries the open-instance-UI link");
+
+		// poll re-render keeps the expansion open
+		await view17.refreshData();
+		const r1p = rowByKey17("inst:comfy-1");
+		assert(findByClass(r1p, "arthur-inst-panel").length === 1, "expansion persists across a poll re-render");
+		assert(findByClass(r1p, "arthur-inst-panel")[0].hasClass("arthur-inst-panel--open") === true,
+			"poll-driven re-render paints the panel already-open (no re-animation)");
+
+		// buttons own their clicks — a bubbled button click must NOT collapse
+		r1p.handlers.get("click")[0]?.({ target: findButton(r1p, "Restart") });
+		assert(findByClass(rowByKey17("inst:comfy-1"), "arthur-inst-panel").length === 1,
+			"a click on a panel button does not toggle the accordion");
+
+		// second card click collapses
+		rowByKey17("inst:comfy-1").handlers.get("click")[0]?.({ target: rowByKey17("inst:comfy-1") });
+		const r1c = rowByKey17("inst:comfy-1");
+		assert(findByClass(r1c, "arthur-inst-panel").length === 0, "second card click collapses the panel again");
+		assert(findByClass(r1c, "arthur-grid-actions").length === 1, "collapsed card restores its inline lifecycle buttons");
+	}
+
+	// (c) webviewer link branches (verified contract: Obsidian 1.15.0 app.js
+	// registers `webviewer:open` → getLeaf(true).setViewState({type:"webviewer",
+	// state:{url}}); no obsidian://webviewer protocol exists)
+	{
+	assert(bundle.isWebViewerEnabled(app) === false, "app stub without internalPlugins reports webviewer disabled");
+		// external fallback: window.open with the instance url
+		const openedExternal = [];
+		const realWindowOpen = window.open;
+		window.open = (url) => { openedExternal.push(String(url)); return null; };
+		const iconLink = findByClass(rowByKey17("inst:comfy-0"), "arthur-inst-webui--icon")[0];
+		assert(!!iconLink, "up comfy instance cards carry the small open-instance-UI icon");
+		assert((iconLink.getAttribute("title") ?? "").includes("external"),
+			"icon tooltip names the external fallback while the core plugin is disabled");
+		iconLink.handlers.get("click")[0]?.({ preventDefault() {} });
+		assert(openedExternal.includes("http://10.0.0.9:8188") === true,
+			"webviewer-disabled path opens the instance UI via window.open (external)");
+		assert(bundle.openWebUrl(app, "http://10.0.0.9:8188") === "external"
+			&& openedExternal.includes("http://10.0.0.9:8188"), "openWebUrl reports the 'external' branch");
+		window.open = realWindowOpen;
+
+		// webviewer command-exists path: leaf.setViewState({type:"webviewer", state:{url}})
+		app.internalPlugins = { getEnabledPluginById: (id) => (id === "webviewer" ? { id: "webviewer" } : null) };
+		assert(bundle.isWebViewerEnabled(app) === true, "enabled core plugin reports webviewer available");
+		assert((bundle.openUiTooltip(app) ?? "").includes("web viewer"), "tooltip names the web viewer as the target");
+		await view17.refreshData();
+		let wvState = null;
+		const realGetLeaf = app.workspace.getLeaf;
+		app.workspace.getLeaf = () => ({
+			setViewState: (state) => { wvState = state; return {}; },
+		});
+		const iconLinkWv = findByClass(rowByKey17("inst:comfy-0"), "arthur-inst-webui--icon")[0];
+		assert((iconLinkWv.getAttribute("title") ?? "").includes("web viewer"),
+			"icon tooltip names the web viewer while the core plugin is enabled");
+		assert(bundle.openWebUrl(app, "http://10.0.0.9:8188") === "webviewer", "openWebUrl reports the 'webviewer' branch");
+		// panel link uses the same mechanism:
+		const r0x = rowByKey17("inst:comfy-0");
+		r0x.handlers.get("click")[0]?.({ target: r0x }); // expand comfy-0
+		const panelLink = findByClass(findByClass(rowByKey17("inst:comfy-0"), "arthur-inst-panel")[0], "arthur-inst-webui")[0];
+		panelLink.handlers.get("click")[0]?.({ preventDefault() {} });
+		app.workspace.getLeaf = realGetLeaf;
+		assert(wvState != null && wvState.type === "webviewer" && wvState.active === true
+			&& wvState.state?.url === "http://10.0.0.9:8188",
+			`webviewer-enabled path opens via leaf.setViewState({type:'webviewer', state:{url}}) (got: ${JSON.stringify(wvState)})`);
+		delete app.internalPlugins;
+		rowByKey17("inst:comfy-0").handlers.get("click")[0]?.({ target: rowByKey17("inst:comfy-0") }); // collapse again
+	}
+
+	// (d) v0.5.4 service stop-all: FORGETS non-default instances → toast notes
+	// the forgotten ids; post-stop status without comfy-1 → row gone + pruned
+	// expanded state (comfy-0 stays expanded)
+	StubModal.reset();
+	StubNotice.reset();
+	{
+		const r0 = rowByKey17("inst:comfy-0");
+		r0.handlers.get("click")[0]?.({ target: r0 });
+		assert(findByClass(rowByKey17("inst:comfy-0"), "arthur-inst-panel").length === 1, "comfy-0 expanded before the stop-all");
+		const r1 = rowByKey17("inst:comfy-1");
+		r1.handlers.get("click")[0]?.({ target: r1 });
+		assert(view17.expandedInstances.has("comfy-1") === true, "comfy-1 expanded before the stop-all");
+	}
+	const stopCalls17 = [];
+	httpResponder = (opts) => {
+		stopCalls17.push({ url: opts.url, method: opts.method ?? "GET" });
+		if (opts.url.endsWith("/health")) return json17(200, { ok: true, version: status17.version });
+		if (opts.url.endsWith("/api/status")) return json17(200, status17);
+		if (opts.url.endsWith("/api/gpus")) return json17(200, gpus17);
+		if (opts.url.endsWith("/api/jobs")) return json17(200, { jobs: [] });
+		if (opts.url.endsWith("/api/queue")) return json17(200, { queues: [] });
+		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/stop")) {
+			return json17(200, { action: "stop", result: "stopped", stopped: ["comfy-0", "comfy-1"], forgotten: ["comfy-1"] });
+		}
+		for (const port of [8188, 8190]) {
+			if (opts.url.startsWith(`http://10.0.0.9:${port}/`)) {
+				return opts.url.endsWith("/system_stats")
+					? json17(200, { system: {}, devices: [{ name: "cuda", type: "cuda", vram_total: 12 * 1024 * 1024, vram_free: 4 * 1024 * 1024 }] })
+					: opts.url.endsWith("/queue")
+						? json17(200, queue17[port])
+						: null;
+			}
+		}
+		return null;
+	};
+	const sbKill17 = view17.serviceBar.buttons.get("comfyui").kill;
+	await sbKill17.handlers.get("click")[0]?.({ stopPropagation() {} });
+	const confirm17 = findButton(StubModal.opened[0]?.contentEl, "Confirm");
+	assert(!!confirm17, "stop-all confirm modal opens");
+	await confirm17.handlers.get("click")[0]?.();
+	await sleep(30);
+	assert(stopCalls17.some((c) => c.method === "POST" && c.url.includes("/api/services/comfyui/stop")) === true,
+		"confirmed kill hits the v0.5.4 stop endpoint");
+	assert(StubNotice.shown.some((m) => m.includes("stop ComfyUI — done") && m.includes("1 additional instance forgotten")) === true,
+		"stop-all toast reports the forgotten instance ids");
+	// the agent forgets comfy-1 — v0.5.4 status no longer reports it
+	status17.services[0].instances = status17.services[0].instances.filter((i) => i.id !== "comfy-1");
+	await view17.refreshData();
+	assert(rowByKey17("inst:comfy-1") === null, "post-stop-all the forgotten comfy-1 row is gone from the grid");
+	assert(rowByKey17("inst:comfy-0") != null && rowByKey17("inst:comfy-dual") != null, "kept instances keep their rows");
+	assert(view17.expandedInstances.has("comfy-1") === false, "stale expanded state for the forgotten id is pruned");
+	assert(view17.expandedInstances.has("comfy-0") === true, "expansion of a kept instance is retained");
+
+	// (e) AGENT_VERSION 0.5.4 accepted, mismatch banner logic intact
+	await view17.refreshData();
+	assert(view17.bannerEl._shown !== true, "agent v0.5.4 accepted — no version-mismatch line, banner hidden");
+	status17.version = "0.6.0";
+	await view17.refreshData();
+	assert(view17.bannerEl._shown === true
+		&& allText(view17.bannerEl).includes("agent version mismatch: server 0.6.0, expected 0.5.4"),
+		"older/newer server versions still trigger the mismatch banner (expected 0.5.4)");
+	status17.version = "0.5.4";
+
+	httpResponder = null;
+	StubNotice.reset();
+	StubModal.reset();
+	await app.workspace.detachLeavesOfType("arthur-dashboard");
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();
@@ -1675,4 +1938,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.5.3-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove / pure-job-list-queue / collapsible-section-titles / training-jobs-unified-queue all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.5.4-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove / pure-job-list-queue / collapsible-section-titles / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner all clean");

@@ -444,6 +444,83 @@
 	min-width: 1.6em;
 }
 
+/* ------------------------------------------------- expandable instance cards */
+
+/* clicking the card opens/closes the detail accordion (buttons/links keep
+   their own clicks); pointer cursor + a chevron-ish affordance hint */
+.arthur-grid-row--expandable {
+	cursor: pointer;
+}
+
+.arthur-grid-row--expanded {
+	border-color: var(--interactive-accent);
+}
+
+/* detail panel: max-height accordion opening toward the bottom; the --open
+   flag is set on the toggle that opened it (one-shot animation) and kept on
+   every render-driven rebuild so polls never re-run the transition */
+.arthur-inst-panel {
+	overflow: hidden;
+	max-height: 0;
+	opacity: 0;
+	padding-block: 0;
+	border-top: 1px solid transparent;
+	display: flex;
+	flex-direction: column;
+	gap: 0.5em;
+	transition: max-height 0.25s ease, opacity 0.2s ease, padding-block 0.2s ease;
+}
+
+.arthur-grid-row--expanded .arthur-inst-panel--open {
+	max-height: 30em;
+	opacity: 1;
+	padding-block: 0.55em 0;
+	border-top-color: var(--background-modifier-border);
+}
+
+/* detail rows: label column + value column */
+.arthur-inst-panel-grid {
+	display: grid;
+	grid-template-columns: auto 1fr;
+	gap: 0.15em 0.9em;
+	font-size: var(--font-ui-smaller);
+	min-width: 0;
+}
+
+.arthur-inst-panel-key {
+	opacity: 0.6;
+	white-space: nowrap;
+}
+
+.arthur-inst-panel-val {
+	font-family: var(--font-monospace);
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+.arthur-inst-panel-actions {
+	margin-inline-start: 0;
+}
+
+/* open-in-web-viewer / external link ('Open instance UI ↗' text link in the
+   detail panel + the small ↗ icon on collapsed up-instance cards) */
+.arthur-inst-webui {
+	cursor: pointer;
+	text-decoration: none;
+	white-space: nowrap;
+}
+
+.arthur-inst-webui--icon {
+	font-size: var(--font-ui-smaller);
+	opacity: 0.7;
+	padding: 0 0.2em;
+}
+
+.arthur-inst-webui--icon:hover {
+	opacity: 1;
+	color: var(--interactive-accent);
+}
+
 .arthur-grid-title {
 	font-weight: var(--font-semibold);
 	flex: none;

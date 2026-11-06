@@ -16,8 +16,10 @@
  *                    queueCollapsed). The error banner sits ABOVE both
  *                    collapsibles and never collapses.
  *   1. INSTANCES   — the GPU instance grid: one COLUMN per GPU (live stats
- *                    from GET /api/gpus, agent v0.5.3), one ROW per GPU-owning
- *                    instance (comfy, incl. multi-GPU spanning rows) and per
+ *                    from GET /api/gpus, agent v0.5.4) and a ROW-PACKED row
+ *                    set (instances whose GPU sets don't overlap share a
+ *                    visual row via the packer; multi-GPU/dual spans get their
+ *                    own full row) for each GPU-owning comfy instance
  *                    queued/running ai-toolkit training job. Rows are
  *                    self-contained outlined cards (running = accent tint,
  *                    idle = neutral, down = dashed muted + grayscale),
@@ -110,6 +112,7 @@ import {
 import { ArthurApiError, isTimeoutError } from "../api/transport";
 import { ServiceBar } from "./service-bar";
 import { confirmModal, describeError, run, toastErr, toastOk } from "./actions";
+import { openUiTooltip, openWebUrl } from "./webviewer";
 
 export const VIEW_TYPE_ARTHUR_DASHBOARD = "arthur-dashboard";
 
@@ -163,6 +166,8 @@ interface GridRowSpec {
 	instId: string | null;
 	/** Instance port (instance rows only) — run tracking + panel lookup. */
 	port: number | null;
+	/** systemd unit name (instance rows only, when the agent reports it). */
+	unit?: string | null;
 }
 
 /** Per-section stuck-state bookkeeping ("agent" / "training" / "gen:<port>"). */
@@ -313,6 +318,57 @@ function syntheticCol(index: number): GridCol {
 	return { index, name: `GPU ${index}`, usedMb: null, totalMb: null, util: null, tempC: null };
 }
 
+/** Column placement of one row: lowest matching column index + a span over
+ *  the columns the row's GPU list covers (multi-GPU rows bridge columns).
+ *  Shared by the row packer and the row element builder. */
+function gridRowPlacement(spec: GridRowSpec, cols: GridCol[]): { start: number; span: number } {
+	let colStart = -1;
+	for (const g of spec.gpus) {
+		const i = cols.findIndex((c) => c.index === g);
+		if (i >= 0 && (colStart < 0 || i < colStart)) colStart = i;
+	}
+	if (colStart < 0) colStart = Math.max(0, cols.length - 1);
+	const span = Math.min(
+		cols.length - colStart,
+		Math.max(1, spec.gpus.length),
+	);
+	return { start: colStart, span };
+}
+
+/**
+ * Row packer: walk the rows in their given (sorted) order and place each
+ * into the FIRST grid row whose covered columns are all free — instances
+ * whose GPU sets don't overlap share a visual row (comfy-0 on GPU0 + comfy-1
+ * on GPU1 = one row, two cells), while a dual-GPU row's covered columns push
+ * it onto its own full row. Column count is unchanged (one per GPU); only
+ * the row assignment changes. Returns the 0-based packed row per row key.
+ */
+function packRowPlacements(rows: GridRowSpec[], cols: GridCol[]): Map<string, number> {
+	const placements = new Map<string, number>();
+	/** Occupied column indexes per used grid row (0-based, header excluded). */
+	const occupied: Array<Set<number>> = [];
+	for (const spec of rows) {
+		const { start, span } = gridRowPlacement(spec, cols);
+		const covered: number[] = [];
+		for (let c = start; c < start + span && c < cols.length; c++) covered.push(c);
+		if (covered.length === 0) covered.push(start);
+		let row = -1;
+		for (let r = 0; r < occupied.length; r++) {
+			if (covered.every((c) => !occupied[r].has(c))) {
+				row = r;
+				break;
+			}
+		}
+		if (row < 0) {
+			row = occupied.length;
+			occupied.push(new Set());
+		}
+		for (const c of covered) occupied[row].add(c);
+		placements.set(spec.key, row);
+	}
+	return placements;
+}
+
 /** Parse an ai-toolkit gpu_ids string ("0" / "0,1") into usable indexes. */
 function parseGpuIds(raw: string): number[] {
 	return String(raw ?? "")
@@ -456,6 +512,16 @@ export class ArthurDashboardView extends ItemView {
 	 *  bookkeeping runs exactly once per tick. */
 	private readonly gridRowDurations = new Map<string, number | null>();
 
+	/** Expanded instance-card detail panels (accordion, keys = instance ids).
+	 *  Kept OUTSIDE the DOM because the grid rebuilds per poll tick — expansion
+	 *  must persist across re-renders. Pruned on each tick against the agent's
+	 *  live instance list (v0.5.4 stop-all forgets instances — a forgotten id
+	 *  must not linger expanded). */
+	private readonly expandedInstances = new Set<string>();
+	/** Rows queued for an expand ANIMATION on the next grid render (a re-render
+	 *  from a poll must paint panels already-open, never re-run the animation). */
+	private readonly expandAnimationPending = new Set<string>();
+
 	// training accordion state (job id → state; cleared on close/unload/job delete)
 	private readonly jobUi = new Map<string, JobPanelUi>();
 	private readonly jobLoss = new Map<string, JobLossCache>();
@@ -550,6 +616,8 @@ export class ArthurDashboardView extends ItemView {
 		this.skeletonBuilt = false;
 		this.sectionWatches.clear();
 		this.clearRunTracking();
+		this.expandedInstances.clear();
+		this.expandAnimationPending.clear();
 		this.buildSkeleton(this.desiredPorts());
 		this.openWss();
 		this.plugin.dashboardView = this;
@@ -585,6 +653,8 @@ export class ArthurDashboardView extends ItemView {
 		this.clearAllPreviews();
 		this.clearTrainingState();
 		this.clearRunTracking();
+		this.expandedInstances.clear();
+		this.expandAnimationPending.clear();
 		if (this.plugin.dashboardView === this) this.plugin.dashboardView = null;
 		this.contentEl.empty();
 	}
@@ -835,6 +905,7 @@ export class ArthurDashboardView extends ItemView {
 		this.trainingStuck = false;
 		this.renderBanner();
 		this.renderServiceBar();
+		this.pruneExpandedInstances();
 		this.renderInstances();
 		this.renderQueue();
 
@@ -1319,9 +1390,10 @@ export class ArthurDashboardView extends ItemView {
 				// 'view in queue ↓' only while the queue section actually holds
 				// a job card at that anchor (running or pending > 0).
 				linkable: running && runningCount + pendingCount > 0,
-				svcId: inst.service,
+					svcId: inst.service,
 				instId: inst.id,
 				port: inst.port,
+				unit: inst.unit ?? null,
 			});
 		}
 
@@ -1426,30 +1498,28 @@ export class ArthurDashboardView extends ItemView {
 			this.gridNoteEl.show();
 		}
 
-		rows.forEach((spec, r) => grid.append(this.gridRowEl(spec, cols, r)));
+		// Row packer: sorted rows stack onto the first packed row whose columns
+		// are free — disjoint GPU sets share a visual row, overlapping spans
+		// (multi-GPU) fall onto their own full row.
+		const pack = packRowPlacements(rows, cols);
+		rows.forEach((spec) =>
+			grid.append(this.gridRowEl(spec, cols, pack.get(spec.key) ?? 0)),
+		);
 	}
 
-	/** One row cell, spanning its GPU column(s). */
-	private gridRowEl(spec: GridRowSpec, cols: GridCol[], rowIdx: number): HTMLElement {
+	/** One row cell, spanning its GPU column(s); `packRow` is the 0-based packed
+	 *  grid row from packRowPlacements (the header occupies grid row 1). */
+	private gridRowEl(spec: GridRowSpec, cols: GridCol[], packRow: number): HTMLElement {
 		// Placement: lowest matching column index + a span over the columns the
 		// row's GPU list covers (multi-GPU rows visually bridge the columns).
-		let colStart = -1;
-		for (const g of spec.gpus) {
-			const i = cols.findIndex((c) => c.index === g);
-			if (i >= 0 && (colStart < 0 || i < colStart)) colStart = i;
-		}
-		if (colStart < 0) colStart = Math.max(0, cols.length - 1);
-		const span = Math.min(
-			cols.length - colStart,
-			Math.max(1, spec.gpus.length),
-		);
+		const { start: colStart, span } = gridRowPlacement(spec, cols);
 
 		const cell = el("div", {
 			cls: `arthur-grid-row arthur-grid-row--${spec.state}`,
 			attrs: { "data-row-key": spec.key },
 		});
 		cell.style.gridColumn = `${colStart + 1} / span ${span}`;
-		cell.style.gridRow = `${rowIdx + 2}`;
+		cell.style.gridRow = `${packRow + 2}`;
 
 		const dotCls =
 			spec.state === "running"
@@ -1457,6 +1527,12 @@ export class ArthurDashboardView extends ItemView {
 				: spec.state === "down"
 					? "arthur-dot arthur-dot--red"
 					: "arthur-dot arthur-dot--gray";
+		// Web-UI link (up comfy instance cards): small ↗ icon next to the badge —
+		// opens http://<host>:<port> in Obsidian's web-viewer core plugin (or the
+		// external browser when that plugin is disabled — the tooltip says which).
+		const webui = spec.kind === "instance" && spec.state !== "down" && spec.port != null
+			? this.buildOpenUiIcon(spec)
+			: null;
 		const head = el("div", { cls: "arthur-grid-row-head" });
 		head.append(
 			el("span", { cls: dotCls }),
@@ -1465,6 +1541,7 @@ export class ArthurDashboardView extends ItemView {
 			el("span", {
 				cls: "arthur-grid-head-tail",
 				children: [
+					...(webui ? [webui] : []),
 					...(spec.state === "running" && spec.durationSec != null
 						? [el("span", {
 								cls: "arthur-card-meta arthur-grid-duration",
@@ -1478,9 +1555,16 @@ export class ArthurDashboardView extends ItemView {
 		);
 		cell.append(head);
 
+		// Expanded-card tracking (click-to-expand accordion, see below).
+		const expanded = spec.kind === "instance"
+			&& spec.instId != null
+			&& this.expandedInstances.has(spec.instId);
+
 		// Lifecycle buttons (instance rows only) — up rows: Start/Stop/Restart;
 		// down rows: Start + Remove (forget the stopped instance from the agent).
-		if (spec.kind === "instance" && spec.svcId && spec.instId) {
+		// EXPANDED cards drop the inline buttons — the lifecycle set lives inside
+		// the detail panel instead, so the collapsed head stays clean.
+		if (spec.kind === "instance" && spec.svcId && spec.instId && !expanded) {
 			const buttons = this.gridLifecycleButtons(spec);
 			buttons.addClass("arthur-grid-actions");
 			cell.append(buttons);
@@ -1594,7 +1678,201 @@ export class ArthurDashboardView extends ItemView {
 			}
 			cell.append(statsRow);
 		}
+
+		// Click-to-expand (instance cards): clicking the card (but NOT its
+		// buttons/links) toggles a detail accordion below the card head. The
+		// expanded flag lives in this.expandedInstances — keyed by instance id —
+		// so it survives the grid's per-tick rebuilds. The panel renders on top
+		// here; a poll-driven re-render paints already-open, never re-animating.
+		if (spec.kind === "instance" && spec.instId != null) {
+			cell.addClass("arthur-grid-row--expandable");
+			cell.setAttribute("title", expanded ? "Click to collapse" : "Click to expand");
+			if (expanded) {
+				cell.addClass("arthur-grid-row--expanded");
+				cell.append(this.buildInstancePanel(spec, cols));
+			}
+			cell.addEventListener("click", (e) => this.toggleInstanceExpanded(spec, e));
+		}
 		return cell;
+	}
+
+	/**
+	 * Toggle one instance card's detail accordion. Clicks originating on a
+	 * button/link inside the card are ignored (they own their clicks). The
+	 * grid re-renders to mount/unmount the detail panel; an expansion is
+	 * flagged for the animated max-height/accordion opening on that render.
+	 */
+	private toggleInstanceExpanded(spec: GridRowSpec, ev?: Event): void {
+		if (ev) {
+			const target = (ev.target ?? null) as
+				| { closest?: (sel: string) => Element | null }
+				| null;
+			if (
+				typeof target?.closest === "function"
+				&& (target.closest("button") || target.closest("a"))
+			) {
+				return;
+			}
+		}
+		const id = spec.instId;
+		if (!id) return;
+		if (this.expandedInstances.has(id)) {
+			this.expandedInstances.delete(id);
+			this.expandAnimationPending.delete(id);
+		} else {
+			this.expandedInstances.add(id);
+			this.expandAnimationPending.add(id); // animate the OPEN only
+		}
+		this.renderInstances();
+	}
+
+	/**
+	 * Drop expanded-card state for instances the agent no longer reports —
+	 * v0.5.4 stop-all FORGETS every non-default instance, so a forgotten id
+	 * must not keep lingering expanded state. Runs ONLY while the agent
+	 * answers (a temporarily unreachable agent must not wipe the state).
+	 */
+	private pruneExpandedInstances(): void {
+		const ad = this.agentDetail;
+		if (ad.statusOk !== true || !ad.status) return;
+		const ids = new Set(
+			ad.status.services.flatMap((s) => s.instances.map((i) => i.id)),
+		);
+		for (const id of [...this.expandedInstances]) {
+			if (!ids.has(id)) this.expandedInstances.delete(id);
+		}
+		this.expandAnimationPending.clear();
+	}
+
+	/** The instance-UI url (comfy web UI) for one instance row. */
+	private instanceUiUrl(spec: GridRowSpec): string {
+		return `http://${this.plugin.clients?.profile.host ?? ""}:${spec.port}`;
+	}
+
+	/**
+	 * Small ↗ icon link on an up comfy instance card — opens the instance's
+	 * web UI (http://<host>:<port>) via openWebUrl (web viewer / external).
+	 */
+	private buildOpenUiIcon(spec: GridRowSpec): HTMLElement {
+		const url = this.instanceUiUrl(spec);
+		const link = el("a", {
+			cls: "arthur-inst-webui arthur-inst-webui--icon",
+			text: "↗",
+			attrs: { href: url },
+		});
+		link.setAttribute("title", openUiTooltip(this.app));
+		link.addEventListener("click", (e) => {
+			e.preventDefault();
+			openWebUrl(this.app, url);
+		});
+		return link;
+	}
+
+	/**
+	 * Open-instance-UI text link for the expanded detail panel + the tiny icon
+	 * link. Both route through openWebUrl — web-viewer leaf (core plugin
+	 * enabled) or external browser (disabled); the tooltip names the target.
+	 */
+	private buildOpenUiLink(spec: GridRowSpec): HTMLElement {
+		const url = this.instanceUiUrl(spec);
+		const link = el("a", {
+			cls: "arthur-inst-webui",
+			text: "Open instance UI ↗",
+			attrs: { href: url },
+		});
+		link.setAttribute("title", openUiTooltip(this.app));
+		link.addEventListener("click", (e) => {
+			e.preventDefault();
+			openWebUrl(this.app, url);
+		});
+		return link;
+	}
+
+	/**
+	 * The expanded detail panel of one instance card: identity (id / name /
+	 * port / service / systemd unit), per-GPU live stats (VRAM used/total +
+	 * util + temp from /api/gpus), state + uptime, queue depth breakdown
+	 * (running/pending for comfy), WS connection state, the full lifecycle
+	 * button row (start/stop/restart/forget + clear/free-VRAM, duplicated from
+	 * the collapsed head) and the open-instance-UI link. Rendered once per
+	 * grid rebuild — poll ticks repaint it with fresh values; expansion
+	 * persists because the state lives in this.expandedInstances.
+	 */
+	private buildInstancePanel(spec: GridRowSpec, cols: GridCol[]): HTMLElement {
+		const instId = spec.instId ?? "";
+		const detail = this.comfyDetailFor(spec.port ?? -1);
+		const running = Array.isArray(detail?.queue?.queue_running)
+			? detail!.queue!.queue_running.length
+			: 0;
+		const pending = Array.isArray(detail?.queue?.queue_pending)
+			? detail!.queue!.queue_pending.length
+			: 0;
+		const stateRows: Array<[string, string]> = [
+			["id", instId],
+			["name", spec.title],
+			["port", spec.port != null ? String(spec.port) : "—"],
+			["state", spec.badge + (spec.state === "running" && spec.durationSec != null ? ` · ${fmtDuration(spec.durationSec)}` : "")],
+			["uptime", spec.durationSec != null ? fmtDuration(spec.durationSec) : "—"],
+			["queue", `running ${running} · pending ${pending}`],
+			[
+				"ws",
+				(() => {
+					const state = this.wss.get(spec.port ?? 0)?.currentState ?? WsState.Closed;
+					return state === WsState.Open
+						? "connected"
+						: state === WsState.Connecting
+							? "connecting"
+							: state === WsState.Backoff
+								? "down (reconnecting)"
+								: "closed";
+				})(),
+			],
+			["service", spec.svcId ?? "—"],
+		];
+		if (spec.unit) stateRows.push(["unit", spec.unit]);
+		// Per-GPU live block (matched from /api/gpus columns by gpu index).
+		for (const g of spec.gpus) {
+			const col = cols.find((c) => c.index === g);
+			stateRows.push([
+				`gpu ${g}`,
+				[
+					col?.usedMb != null && col?.totalMb != null
+						? `VRAM ${fmtGigCompact(col.usedMb)}/${fmtGigCompact(col.totalMb)}`
+						: "VRAM ?",
+					col?.util != null ? `util ${Math.round(col.util)}%` : null,
+					col?.tempC != null ? `${Math.round(col.tempC)}°` : null,
+				].filter((s): s is string => s !== null).join(" · "),
+			]);
+		}
+		const dl = el("div", { cls: "arthur-inst-panel-grid" });
+		for (const [key, value] of stateRows) {
+			dl.append(
+				el("span", { cls: "arthur-inst-panel-key", text: key }),
+				el("span", { cls: "arthur-inst-panel-val", text: value }),
+			);
+		}
+
+		// Actions row: the lifecycle buttons + the open-instance-UI link.
+		const actions = spec.svcId && spec.instId ? this.gridLifecycleButtons(spec) : el("div", { cls: "arthur-btn-row" });
+		actions.addClass("arthur-inst-panel-actions");
+		actions.append(this.buildOpenUiLink(spec));
+
+		const panel = el("div", { cls: "arthur-inst-panel" });
+		panel.append(dl, actions);
+		// Animate the expansion on the toggle that opened it; render-driven
+		// rebuilds paint already-open (no re-animation on every 3s tick).
+		if (this.expandAnimationPending.has(instId)) {
+			this.expandAnimationPending.delete(instId);
+			// Start closed, flip to open the next animation frame → the CSS
+			// max-height transition runs (accordion opening). No rAF available
+			// (test stubs / a plain render) → paint already-open.
+			const raf = (globalThis as { requestAnimationFrame?: (cb: () => void) => void }).requestAnimationFrame;
+			if (typeof raf === "function") raf(() => panel.addClass("arthur-inst-panel--open"));
+			else panel.addClass("arthur-inst-panel--open");
+		} else {
+			panel.addClass("arthur-inst-panel--open");
+		}
+		return panel;
 	}
 
 	/** Start/stop/restart for one grid instance row (down rows: Start +
@@ -2374,8 +2652,17 @@ export class ArthurDashboardView extends ItemView {
 		if (!agent) return;
 		const name = svc.name ?? svc.id;
 		try {
-			await agent.serviceStop(svc.id, force || undefined);
-			toastOk(`stop ${name} — done`);
+			const res = await agent.serviceStop(svc.id, force || undefined);
+			// v0.5.4: stop-all also FORGETS every non-default instance — surface
+			// the dropped ids in the toast so the grid's vanishing rows explain
+			// themselves (older agents omit the field).
+			const forgotten = res.forgotten?.length ?? 0;
+			toastOk(
+				`stop ${name} — done`
+					+ (forgotten > 0
+						? ` · ${forgotten} additional instance${forgotten === 1 ? "" : "s"} forgotten`
+						: ""),
+			);
 		} catch (err) {
 			if (!force && err instanceof ArthurApiError && err.status === 409) {
 				// Busied by running generations — offer the force path.
