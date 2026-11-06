@@ -3,13 +3,17 @@
 
 Single-file Python 3 stdlib HTTP server (zero pip deps). Runs on the LAN
 home server, token-gated, and drives a *service registry* of systemd units
-(v0.5.4):
+(v0.6.0):
 
   services (from /etc/arthur-agent/config.json):
     comfyui    multi-instance  → template unit comfy@{i}
                  index i = lowest free index in 0..max_instances-1,
-                 port = default_port + i, gpus = [i % NUM_GPUS]
-                 (NUM_GPUS detected live via `nvidia-smi -L` at spawn time)
+                 port = default_port + i, gpus = [i % NUM_GPUS] by default;
+                 (v0.6.0) the spawn body may pin an explicit GPU set
+                 {"gpus": [1]} or {"gpus": [0, 1]} — written as a runtime
+                 systemd drop-in (/run/systemd/system/comfy@<i>.service.d/
+                 override.conf setting ARTHUR_GPUS) that the template unit
+                 honors; NUM_GPUS detected live via `nvidia-smi -L`
                plus optional named *extra instances* (config: extra_instances)
                  that ride their own units, e.g. comfy-dual.service =
                  ComfyUI on port 8190 spanning ALL GPUs (gpus [0, 1])
@@ -33,6 +37,8 @@ API (see server/README-install.md for the full documented surface):
                  service then shows cleanly down — only the default index-0
                  instance stays listed, as its single down row)
   POST /api/services/{svc}/instances            → spawn new instance (multi only)
+                 optional JSON body {"gpus": [...]}: pins CUDA_VISIBLE_DEVICES
+                 for the new instance (v0.6.0); no body → modulo default
   GET  /api/services/{svc}/instances            → instances of one service
   GET  /api/services/{svc}/instances/{id}/status
   POST /api/services/{svc}/instances/{id}/start
@@ -56,7 +62,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-AGENT_VERSION = "0.5.4"
+AGENT_VERSION = "0.6.0"
 
 CONFIG_PATH = os.environ.get("ARTHUR_AGENT_CONFIG", "/etc/arthur-agent/config.json")
 TOKEN_PATH = os.environ.get("ARTHUR_AGENT_TOKEN_FILE", "/etc/arthur-agent/token")
@@ -208,35 +214,68 @@ def load_token():
 def load_state():
     """Persisted memory of *spawned* instance indexes per service, so an
     instance stays visible (stopped) in listings after a stop/reboot.
-    File shape: {"comfyui": [0, 1, 2]}. Best-effort: unreadable → empty."""
+    File shape (v0.6.0): {"known": {"comfyui": {"1": [1], "2": null}}} —
+    index → explicit GPU list (from a spawn with a gpus body) or null
+    (template modulo default). The legacy v0.5.x array shape
+    ({"known": {"comfyui": [0, 1]}}) is migrated on read into
+    {idx: None} entries (modulo default). Best-effort: unreadable → {}."""
     try:
         with open(STATE_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
         known = data.get("known", {})
-        if isinstance(known, dict):
-            return {k: sorted(int(i) for i in v) for k, v in known.items()
-                    if isinstance(v, list)}
+        if not isinstance(known, dict):
+            return {}
+        out = {}
+        for svc_id, val in known.items():
+            if isinstance(val, list):  # legacy v0.5.x shape: plain indexes
+                try:
+                    out[svc_id] = {int(i): None for i in val}
+                except (ValueError, TypeError):
+                    continue
+            elif isinstance(val, dict):
+                m = {}
+                for idx, gpus in val.items():
+                    try:
+                        i = int(idx)
+                    except (ValueError, TypeError):
+                        continue
+                    m[i] = (sorted(gpus)
+                            if isinstance(gpus, list) and gpus
+                            and all(isinstance(g, int)
+                                    and not isinstance(g, bool) for g in gpus)
+                            else None)
+                out[svc_id] = m
+        return out
     except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _save_state(state):
+    try:
+        os.makedirs(os.path.dirname(STATE_PATH), mode=0o755, exist_ok=True)
+        tmp = STATE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"known": state}, f)
+        os.replace(tmp, STATE_PATH)
+    except OSError:
         pass
-    return {}
 
 
-def remember_instance(svc_id, idx):
-    """Record a spawned instance index so it survives restarts. Best-effort."""
+def remember_instance(svc_id, idx, gpus=None):
+    """Record a spawned instance index so it survives restarts; v0.6.0 also
+    records the instance's GPU set (None → template modulo default). Passing
+    gpus=None OVERWRITES any stale explicit record. Best-effort."""
     with _state_lock:
         state = load_state()
-        idxs = state.setdefault(svc_id, [])
-        if idx not in idxs:
-            idxs.append(idx)
-        state[svc_id] = sorted(idxs)
-        try:
-            os.makedirs(os.path.dirname(STATE_PATH), mode=0o755, exist_ok=True)
-            tmp = STATE_PATH + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump({"known": state}, f)
-            os.replace(tmp, STATE_PATH)
-        except OSError:
-            pass
+        state.setdefault(svc_id, {})[idx] = \
+            sorted(set(gpus)) if gpus else None
+        _save_state(state)
+
+
+def spawn_state_gpus(svc_id, idx):
+    """The persisted GPU set for a spawned index — a list when an explicit
+    set is recorded, else None (no record or modulo default)."""
+    return load_state().get(svc_id, {}).get(idx)
 
 
 def forget_spawn_index(svc_id, idx):
@@ -245,22 +284,13 @@ def forget_spawn_index(svc_id, idx):
     future spawn. Best-effort."""
     with _state_lock:
         state = load_state()
-        idxs = state.get(svc_id)
-        if idxs is None:
+        m = state.get(svc_id)
+        if m is None:
             return
-        kept = [i for i in idxs if i != idx]
-        if kept:
-            state[svc_id] = kept
-        else:
+        m.pop(idx, None)
+        if not m:
             state.pop(svc_id, None)
-        try:
-            os.makedirs(os.path.dirname(STATE_PATH), mode=0o755, exist_ok=True)
-            tmp = STATE_PATH + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump({"known": state}, f)
-            os.replace(tmp, STATE_PATH)
-        except OSError:
-            pass
+        _save_state(state)
 
 
 # --------------------------------------------------------------------------
@@ -409,6 +439,86 @@ def wait_port_free(port, timeout=PORT_FREE_WAIT):
 
 
 # --------------------------------------------------------------------------
+# per-index GPU drop-ins (v0.6.0)
+# --------------------------------------------------------------------------
+
+def dropin_path(unit):
+    """Runtime drop-in that pins a spawned instance's GPU set:
+    /run/systemd/system/<unit>.service.d/override.conf, content
+    `Environment=ARTHUR_GPUS="<list>"`. The agent runs as root and /run is
+    writable under its unit's ProtectSystem=full. Drop-ins survive unit
+    stop/start (only stop/forget/stop-all clear them) and are wiped by a
+    REBOOT — the start/restart paths re-create them from spawn-state."""
+    return os.path.join("/run/systemd/system", "%s.service.d" % unit, "override.conf")
+
+
+def write_gpu_dropin(unit, gpus):
+    path = dropin_path(unit)
+    os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write('# managed by arthur-agent (GPU-aware spawn, v%s);\n'
+                '# removed on stop/forget/stop-all — template default wins\n'
+                '[Service]\nEnvironment=ARTHUR_GPUS="%s"\n'
+                % (AGENT_VERSION, ",".join(str(g) for g in sorted(set(gpus)))))
+    os.replace(tmp, path)
+
+
+def sync_gpu_dropin(unit, gpus):
+    """Make the unit's runtime drop-in match `gpus`: a list → write it; None
+    → the template modulo default must win, so the drop-in is deleted.
+    Returns True when the filesystem changed (caller then needs a
+    systemctl daemon-reload)."""
+    path = dropin_path(unit)
+    if gpus:
+        content = '[Service]\nEnvironment=ARTHUR_GPUS="%s"\n' \
+            % ",".join(str(g) for g in sorted(set(gpus)))
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                if content in f.read():
+                    return False
+        except OSError:
+            pass
+        write_gpu_dropin(unit, gpus)
+        return True
+    try:
+        os.remove(path)
+    except OSError:
+        return False
+    try:
+        os.rmdir(os.path.dirname(path))
+    except OSError:
+        pass  # dir not empty (non-arthur override.conf) — leave it
+    return True
+
+
+def ensure_gpu_dropin(unit, gpus):
+    """sync_gpu_dropin + systemctl daemon-reload when it changed."""
+    if sync_gpu_dropin(unit, gpus):
+        run_cmd(["systemctl", "daemon-reload"])
+        return True
+    return False
+
+
+def validate_gpus(val):
+    """Check an optional spawn body's gpus array (v0.6.0). Returns None when
+    it is a valid set (non-empty list of unique ints, every index < the live
+    NUM_GPUS), else a message for the 400 response."""
+    if not isinstance(val, list) or not val:
+        return "'gpus' must be a non-empty array of GPU indexes"
+    if not all(isinstance(g, int) and not isinstance(g, bool) for g in val):
+        return "'gpus' entries must be integers"
+    n = num_gpus()
+    bad = [g for g in val if g < 0 or g >= n]
+    if bad:
+        return "GPU index(es) %s not found on this host (%d GPU(s) detected, "\
+               "valid: 0..%d)" % (",".join(str(g) for g in bad), n, n - 1)
+    if len(set(val)) != len(val):
+        return "'gpus' entries must be unique"
+    return None
+
+
+# --------------------------------------------------------------------------
 # audit log
 # --------------------------------------------------------------------------
 
@@ -478,7 +588,10 @@ def make_instance(svc, idx=None, extra=None):
     if svc["multi_instance"]:
         iid = "%s-%d" % (svc["instance_prefix"], idx)
         unit = svc["unit_template"].replace("{i}", str(idx))
-        gpus = [idx % num_gpus()]
+        # v0.6.0: gpus come from spawn-state (a spawn with a gpus body pins
+        # them); no record → the template's modulo default.
+        recorded = spawn_state_gpus(svc["id"], idx)
+        gpus = list(recorded) if recorded else [idx % num_gpus()]
         name = "%s #%d" % (svc["name"], idx)
     else:
         iid, unit, gpus, name = svc["id"], svc["unit"], [], svc["name"]
@@ -523,7 +636,7 @@ def service_instances(svc):
     plus config-declared extra instances (v0.5.2) at the end."""
     if not svc["multi_instance"]:
         return [make_instance(svc, 0)]
-    known = set(load_state().get(svc["id"], []))
+    known = set(load_state().get(svc["id"], {}))
     idxs = sorted({0} | set(active_indexes(svc)) | known)
     return [make_instance(svc, i) for i in idxs] + \
            [make_instance(svc, extra=e)
@@ -586,6 +699,12 @@ def action_start_instance(inst, ip):
         audit(svc["id"], inst["id"], "start", "already-running", ip)
         return 200, {"action": "start", "result": "already-running",
                      "instance": instance_detail(inst)}
+    # v0.6.0: sync the runtime GPU drop-in with spawn-state before start
+    # (e.g. a reboot wiped /run, or the instance was spawned with an explicit
+    # gpus set that must survive stop/start). Extras and single-instance
+    # services own their units — no drop-in management for them.
+    if svc["multi_instance"] and inst["index"] is not None:
+        ensure_gpu_dropin(inst["unit"], spawn_state_gpus(svc["id"], inst["index"]))
     rc, _out, err = run_cmd(["systemctl", "start", inst["unit"]])
     if rc != 0:
         audit(svc["id"], inst["id"], "start", "failed:" + err, ip)
@@ -611,6 +730,10 @@ def action_stop_instance(inst, force, ip):
     if rc != 0:
         audit(svc["id"], inst["id"], "stop", "failed:" + err, ip)
         return 500, {"error": "systemctl stop failed: %s" % err}
+    # v0.6.0: free the index of any pinned GPU set (the start/restart paths
+    # re-create the drop-in from spawn-state).
+    if svc["multi_instance"] and inst["index"] is not None:
+        ensure_gpu_dropin(inst["unit"], None)
     audit(svc["id"], inst["id"], "stop", "stopped", ip)
     return 200, {"action": "stop", "result": "stopped",
                  "instance": instance_detail(inst)}
@@ -632,6 +755,9 @@ def action_restart_instance(inst, force, ip):
     if not wait_port_free(inst["port"]):
         audit(svc["id"], inst["id"], "restart", "port-busy", ip)
         return 502, {"error": "port %d still in use after stop" % inst["port"]}
+    # v0.6.0: re-sync the GPU drop-in from spawn-state before starting.
+    if svc["multi_instance"] and inst["index"] is not None:
+        ensure_gpu_dropin(inst["unit"], spawn_state_gpus(svc["id"], inst["index"]))
     rc, _out, err = run_cmd(["systemctl", "start", inst["unit"]])
     if rc != 0:
         audit(svc["id"], inst["id"], "restart", "failed-start:" + err, ip)
@@ -677,12 +803,15 @@ def action_stop_service(svc, force, ip):
             return 409, {"error": "generation running: %s; pass ?force=1 to stop "
                                   "anyway" % names}
     stopped, errors = [], []
+    dropin_units = []  # template units of stopped instances (drop-in cleanup)
     for inst in insts:
         rc, _out, err = run_cmd(["systemctl", "stop", inst["unit"]])
         if rc != 0:
             errors.append({"id": inst["id"], "error": err})
         else:
             stopped.append(inst["id"])
+            if svc["multi_instance"] and inst["index"] is not None:
+                dropin_units.append(inst["unit"])
     if not errors:
         # v0.5.4 stop-all semantics: also FORGET every spawned / non-default
         # roster instance so the service ends up cleanly down in the UI.
@@ -690,16 +819,27 @@ def action_stop_service(svc, force, ip):
         # for every non-default index (remembered or running). Config-declared
         # extras are kept (no config rewrite) and index 0 is never forgotten
         # (the default instance stays listed as the single down row).
-        known = set(load_state().get(svc["id"], []))
+        known = set(load_state().get(svc["id"], {}))
         running_idxs = {i["index"] for i in insts}
         forgotten = []
         for idx in sorted((known | running_idxs) - {0}):
             iid = "%s-%d" % (svc["instance_prefix"], idx)
             forget_spawn_index(svc["id"], idx)
+            dropin_units.append(svc["unit_template"].replace("{i}", str(idx)))
             audit(svc["id"], iid, "forget", "forgotten:spawn-state:auto-stop-all", ip)
             forgotten.append(iid)
         if 0 in known:  # index 0 is always listed anyway; empty the spawn state
             forget_spawn_index(svc["id"], 0)
+            dropin_units.append(svc["unit_template"].replace("{i}", "0"))
+        # v0.6.0: stop-all/forget must clear the runtime GPU drop-ins of the
+        # stopped + forgotten indexes so freed indexes don't inherit stale
+        # GPU assignments. One daemon-reload for the whole batch.
+        removed = False
+        for unit in dict.fromkeys(dropin_units):
+            if sync_gpu_dropin(unit, None):
+                removed = True
+        if removed:
+            run_cmd(["systemctl", "daemon-reload"])
         result = "stopped:%s" % ",".join(stopped) if stopped else "already-stopped"
         audit(svc["id"], None, "service-stop", result, ip)
         return 200, {"action": "stop", "result": "stopped" if stopped
@@ -712,10 +852,12 @@ def action_stop_service(svc, force, ip):
                  "stopped": stopped, "errors": errors}
 
 
-def action_spawn(svc, ip):
+def action_spawn(svc, gpus, ip):
     """Spawn a NEW multi-instance unit on the lowest free index:
     index = lowest i in 0..max-1 whose unit is not active, port =
-    default_port + i, gpu = i % NUM_GPUS (detected live)."""
+    default_port + i; GPU set (v0.6.0): `gpus` None → the template's modulo
+    default [i % NUM_GPUS] (v0.5.x behavior); a validated list pins
+    CUDA_VISIBLE_DEVICES via a runtime drop-in written before start."""
     with _spawn_lock:
         used = set(active_indexes(svc))
         idx = next((i for i in range(svc["max_instances"]) if i not in used), None)
@@ -723,15 +865,26 @@ def action_spawn(svc, ip):
             audit(svc["id"], None, "spawn", "refused-max:%d" % svc["max_instances"], ip)
             return 409, {"error": "max instances reached (%d)" % svc["max_instances"]}
         inst = make_instance(svc, idx)
+        n = num_gpus()
+        if gpus is None:
+            inst["gpus"] = [idx % n]
+        else:
+            inst["gpus"] = sorted(set(gpus))
+            # pin the GPU set as a runtime drop-in, then pick the change up
+            write_gpu_dropin(inst["unit"], inst["gpus"])
+            run_cmd(["systemctl", "daemon-reload"])
         rc, _out, err = run_cmd(["systemctl", "start", inst["unit"]])
         if rc != 0:
+            if gpus is not None:  # failed spawn: don't leave the pin behind
+                ensure_gpu_dropin(inst["unit"], None)
             audit(svc["id"], inst["id"], "spawn", "failed:" + err, ip)
             return 500, {"error": "systemctl start failed: %s" % err}
         if not wait_for_port(inst["port"], svc["probe_path"], PORT_COMEUP_WAIT):
             audit(svc["id"], inst["id"], "spawn", "unit-up-port-down", ip)
             return 502, {"error": "unit started but port %d did not come up"
                                  % inst["port"]}
-        remember_instance(svc["id"], idx)
+        remember_instance(svc["id"], idx,
+                          inst["gpus"] if gpus is not None else None)
         audit(svc["id"], inst["id"], "spawn", "spawned:port=%d,gpus=%s"
               % (inst["port"], inst["gpus"]), ip)
         return 201, {"action": "spawn", "result": "spawned",
@@ -795,6 +948,8 @@ def action_forget_instance(inst, ip):
         audit(svc["id"], inst["id"], "forget", "forgotten:config", ip)
     else:
         forget_spawn_index(svc["id"], inst["index"])
+        # v0.6.0: free the index of its pinned GPU drop-in as well.
+        ensure_gpu_dropin(inst["unit"], None)
         audit(svc["id"], inst["id"], "forget", "forgotten:spawn-state", ip)
     return 200, {"action": "forget", "result": "forgotten", "id": inst["id"]}
 
@@ -829,6 +984,24 @@ class Handler(BaseHTTPRequestHandler):
 
     def client_ip(self):
         return self.client_address[0]
+
+    def read_json_body(self, limit=16384):
+        """Optional JSON request body: None when empty, else the parsed value.
+        Raises ValueError (→ 400 by the caller) on bad Content-Length or
+        invalid JSON."""
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+        except ValueError:
+            raise ValueError("bad Content-Length header")
+        if length <= 0:
+            return None
+        if length > limit:
+            raise ValueError("request body too large (>%d bytes)" % limit)
+        raw = self.rfile.read(length)
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            raise ValueError("request body is not valid JSON")
 
     def authorized(self):
         if not _token:
@@ -945,7 +1118,24 @@ class Handler(BaseHTTPRequestHandler):
                 audit(svc["id"], None, "spawn", "refused-single-instance",
                       self.client_ip())
                 return self.respond(409, {"error": "single-instance service"})
-            return self.respond(*action_spawn(svc, self.client_ip()))
+            # v0.6.0: optional {"gpus": [...]} body pins the instance's GPU
+            # set; no body → the template modulo default (v0.5.x behavior).
+            try:
+                body = self.read_json_body()
+            except ValueError as exc:
+                return self.respond(400, {"error": str(exc)})
+            gpus = None
+            if body is not None:
+                if not isinstance(body, dict):
+                    return self.respond(400,
+                                        {"error": "request body must be a "
+                                                  "JSON object"})
+                if "gpus" in body:
+                    err = validate_gpus(body["gpus"])
+                    if err is not None:
+                        return self.respond(400, {"error": err})
+                    gpus = list(body["gpus"])
+            return self.respond(*action_spawn(svc, gpus, self.client_ip()))
         if m and verb == "GET":
             svc = self.service(m.group(1))
             if svc is None:

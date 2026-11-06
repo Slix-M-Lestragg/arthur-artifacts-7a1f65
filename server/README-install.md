@@ -1,23 +1,75 @@
 # arthur-agent — server install (one page)
 
 `server/` holds the pieces that run on the arthur home server (the machine
-hosting ComfyUI + ai-toolkit), not the Obsidian plugin itself:
+hosting ComfyUI + ai-toolkit), not the Obsidian plugin itself. The agent is
+at **v0.6.0** (GPU-aware spawning):
+
+```json
+{"known": {"comfyui": {"0": null, "2": [1], "3": [0, 1]}}}
+```
+
+A runtime drop-in `/run/systemd/system/comfy@<i>.service.d/override.conf`
+containing `Environment=ARTHUR_GPUS="<list>"` pins each explicit set (the
+agent writes it + `systemctl daemon-reload` around every start/restart/spawn
+of a pinned index, and removes it on stop / forget / stop-all-forget, again
+with a daemon-reload). The template unit honors `ARTHUR_GPUS` when set and
+falls back to the modulo default otherwise.
 
 | file                  | deploy target                          | purpose |
 |-----------------------|----------------------------------------|---------|
 | `arthur-agent.py`     | `/opt/arthur-agent/arthur-agent.py`    | companion agent: service registry, dynamic instances, lifecycle control, audit log |
 | `config.json`         | `/etc/arthur-agent/config.json`        | the service registry (schema v2, below) |
-| `comfy@.service`      | `/etc/systemd/system/comfy@.service`   | multi-instance ComfyUI template unit: port = `8188+i`, GPU = `i % NUM_GPUS` (computed at start) |
+| `comfy@.service`      | `/etc/systemd/system/comfy@.service`   | multi-instance ComfyUI template unit: port = `8188+i`; GPU set = `i % NUM_GPUS` modulo default, or an explicit set pinned by an `ARTHUR_GPUS` runtime drop-in (v0.6.0) |
 | `comfy-dual.service`  | `/etc/systemd/system/comfy-dual.service` | dual-GPU ComfyUI unit (v0.5.2): one process on **both** GPUs (`CUDA_VISIBLE_DEVICES=0,1` + `--cuda-device 0,1`), port `8190`; installed **enabled but stopped** |
 | `arthur-agent.service`| `/etc/systemd/system/arthur-agent.service` | agent unit, listens on `0.0.0.0:8766` |
 
-The agent is a **single-file Python 3 stdlib server** (no pip deps, v0.5.4).
+The agent is a **single-file Python 3 stdlib server** (no pip deps, v0.6.0).
 It exposes a *service registry* — services are defined once in config.json and
 instances are **computed**, never stored from requests. Request data is never
 interpolated into shell commands; the agent only ever runs `systemctl
-start/stop/is-active|show <unit-from-config>`, `nvidia-smi -L` (GPU count)
-and the read-only `nvidia-smi --query-gpu=...` stats query, all with
-subprocess timeouts. Every mutation appends one JSON line to the audit log.
+start/stop/is-active|show <unit-from-config>`, `systemctl daemon-reload`,
+`nvidia-smi -L` (GPU count) and the read-only `nvidia-smi --query-gpu=...`
+stats query, all with subprocess timeouts. The only other writes besides the
+state/audit files are the per-index runtime drop-ins under
+`/run/systemd/system/comfy@<i>.service.d/` (v0.6.0, GPU-aware spawning).
+Every mutation appends one JSON line to the audit log.
+
+## GPU-aware spawning (v0.6.0): spawn-state + runtime drop-ins
+
+The spawned-instance state file (`/var/lib/arthur-agent/instances.json`) is,
+per service, a map of spawned instance index → GPU set: an explicit
+`number[]` for spawns pinned with a `gpus` body, or `null` for the template
+modulo default (`gpus = [i % NUM_GPUS]`). The legacy v0.5.x array shape
+(`{"known": {"comfyui": [0, 1]}}`) is migrated on read.
+
+```json
+{"known": {"comfyui": {"0": null, "2": [1], "3": [0, 1]}}}
+```
+
+A runtime drop-in `/run/systemd/system/comfy@<i>.service.d/override.conf`
+containing `Environment=ARTHUR_GPUS="<list>"` pins each explicit set:
+
+```ini
+# /run/systemd/system/comfy@2.service.d/override.conf — managed by arthur-agent
+[Service]
+Environment=ARTHUR_GPUS="0,1"
+```
+
+Lifecycle of the drop-in:
+
+- **spawn (explicit gpus body)** → written (atomic tmp+rename) +
+  `systemctl daemon-reload` **before** `systemctl start`.
+- **start / restart** of a spawned index → re-synced from spawn-state (so a
+  pinned instance keeps its GPUs across stop/start and after a reboot, which
+  wipes `/run`); no-body starts remove any stale pin.
+- **stop / forget / stop-all-forget** → removed (+ daemon-reload) so freed
+  indexes don't inherit stale GPU assignments.
+
+The template unit (`comfy@.service`) computes
+`GPUS="${ARTHUR_GPUS:-$(( i % NGPU ))}"`, exports `CUDA_VISIBLE_DEVICES=$GPUS`,
+and adds `--cuda-device 0,1` only when `$GPUS` contains a comma (multi-GPU
+instance; indexes are relative to the visible devices). A single pinned GPU
+runs as the only visible device (`cuda:0`) with no `--cuda-device`.
 
 ## Semantics (v0.5.0 model, extended in v0.5.2)
 
@@ -38,6 +90,23 @@ subprocess timeouts. Every mutation appends one JSON line to the audit log.
   so the instance stays listed while stopped. **Extra instances do NOT
   consume spawn indexes** — spawn allocation only ever walks the template
   index range.
+- **GPU-aware spawning (v0.6.0)**: the spawn endpoint accepts an optional
+  JSON body `{"gpus": [1]}` or `{"gpus": [0, 1]}` pinning the instance's
+  `CUDA_VISIBLE_DEVICES`. The set must be non-empty, unique and every index
+  must exist on the host (`nvidia-smi -L`); otherwise **400**. A pinned set
+  is written as a runtime systemd drop-in
+  (`/run/systemd/system/comfy@<i>.service.d/override.conf` setting
+  `ARTHUR_GPUS="<list>"`) + `systemctl daemon-reload` before start, recorded
+  in spawn-state (so stop→start keeps it; a reboot wipes the drop-in and the
+  start path re-creates it from spawn-state), and removed on
+  stop/forget/stop-all. A spawn **without a body** keeps the v0.5.x
+  behavior: `gpus = [i % NUM_GPUS]`, no drop-in (stale pins get cleared).
+  Port allocation is unchanged: `default_port + i`. The spawn response is
+  the usual `201 {"action": "spawn", "result": "spawned", "instance": {…}}`
+  with `gpus` (the pinned set) and `gpu` (`gpus[0]` iff exactly one GPU,
+  else `null`). Multi-GPU instances additionally launch ComfyUI with
+  `--cuda-device 0,1` (indexes relative to the visible devices, handled
+  inside `comfy@.service`).
 - **Extra instances (v0.5.2)**: config-declared named instances on units
   outside the template (`extra_instances`, e.g. `comfy-dual` on
   `comfy-dual.service`). They appear in status/instance lists exactly like
@@ -55,7 +124,7 @@ subprocess timeouts. Every mutation appends one JSON line to the audit log.
   `probe_path` (`/system_stats` for ComfyUI, `/` for ai-toolkit).
 - **`active`** (service level) = any instance up.
 
-## Deploy (v0.5.4)
+## Deploy (v0.6.0)
 
 ```sh
 sudo install -m 755 arthur-agent.py /opt/arthur-agent/arthur-agent.py
@@ -66,7 +135,7 @@ sudo install -m 644 comfy@.service comfy-dual.service arthur-agent.service \
 sudo systemctl daemon-reload
 sudo systemctl enable comfy-dual.service   # enabled but NOT started
 sudo systemctl restart arthur-agent
-curl -s http://127.0.0.1:8766/health   # → {"ok": true, "version": "0.5.4"}
+curl -s http://127.0.0.1:8766/health   # → {"ok": true, "version": "0.6.0"}
 ```
 
 Token lives in `/etc/arthur-agent/token` (root 0600) and `/etc/arthur-agent/env`
@@ -124,14 +193,14 @@ Same as schema v2 plus the optional per-service `extra_instances` array
 
 ---
 
-## API surface (v0.5.4; plugin code targets exactly this)
+## API surface (v0.6.0; plugin code targets exactly this)
 
 `GET /health` is unauthenticated. **Everything under `/api/` requires
 `Authorization: Bearer <token>`.** All responses are JSON; errors are always
 `{"error": "message"}` with a fitting HTTP code.
 
 ### GET /health (no auth)
-`{"ok": true, "version": "0.5.4"}`
+`{"ok": true, "version": "0.6.0"}`
 
 ### GET /api/gpus
 Live GPU stats straight from `nvidia-smi --query-gpu=...` (5 s subprocess
@@ -223,25 +292,49 @@ generation running
   The default instance (`comfy-0`) always stays listed (`up:false`).
 
 `result` is `"already-stopped"` (with empty `stopped`) when nothing was
-active; the forget-cleanup still runs in that case.
+active; the forget-cleanup still runs in that case. (v0.6.0: the forget
+cleanup also removes the runtime GPU drop-ins of all forgotten stopped
+indexes — `/run/systemd/system/comfy@<i>.service.d/` left empty.)
 
 The per-instance endpoint `POST /api/services/{svc}/instances/{id}/stop`
 keeps its old semantics — **no auto-forget**: a stopped single instance
 stays listed as `up:false`; users stop-and-keep one instance on purpose.
+(v0.6.0: a pinned GPU drop-in is removed on stop; the next start of this
+instance re-creates it from spawn-state.)
 
 ### POST /api/services/{svc}/instances  (spawn)
-Multi-instance services only:
+Multi-instance services only. Optional JSON body (v0.6.0):
+`{"gpus": [1]}` (single GPU) or `{"gpus": [0, 1]}` (multi-GPU). No body →
+the modulo default.
+
+- **Validation** (invalid → **400** `{"error": …}`): body must be a JSON
+  object; `gpus` must be a **non-empty array of unique integers** and every
+  index must exist on the host (live `NUM_GPUS` via `nvidia-smi -L`, e.g.
+  `"gpus": [2]` on a 2-GPU host → 400). An empty object `{}` behaves like no
+  body. Non-object / non-JSON bodies → 400.
+- **Index/port unchanged**: lowest free index, port = `8188+i`.
+- **With `gpus`**: the set is written as a runtime drop-in
+  (`/run/systemd/system/comfy@<i>.service.d/override.conf` →
+  `Environment=ARTHUR_GPUS="<list>"`) + `daemon-reload` **before** start,
+  and recorded in spawn-state; the multi-GPU case launches with
+  `--cuda-device 0,1`. A failed start removes the pin again.
+- **Without body**: `gpus = [i % NUM_GPUS]` (v0.5.x behavior, no drop-in;
+  a stale pin on the chosen index is cleared), and the spawn-state record
+  is cleared to the modulo default.
 
 ```json
+POST /api/services/comfyui/instances  {"gpus": [0, 1]}
 {"action": "spawn", "result": "spawned",
  "instance": {"id": "comfy-2", "service": "comfyui", "name": "ComfyUI #2",
-              "port": 8190, "gpu": 0, "gpus": [0], "unit": "comfy@2",
+              "port": 8190, "gpu": null, "gpus": [0, 1], "unit": "comfy@2",
               "up": true, "live": true, "uptime": 1.2}}
 ```
 
-- Index = lowest inactive index in `0..max-1`; port = `8188+i`;
-  `gpus` = `[i % NUM_GPUS]` (live-detected); `gpu` = `gpus[0]`.
-  **Extra instances do not consume spawn indexes.**
+(`gpu`: `gpus[0]` iff the array has exactly one element, else `null`.)
+
+- Index = lowest inactive index in `0..max-1`; port = `8188+i`; `gpus` per
+  the spawn body (or `[i % NUM_GPUS]` default); `gpu` = `gpus[0]` iff one
+  GPU. **Extra instances do not consume spawn indexes.**
 - Single-instance service → **409 `{"error": "single-instance service"}`**.
 - All indexes active → **409 `{"error": "max instances reached (4)"}`**.
 - Unit start failed → 500; unit up but port never served → 502.
@@ -284,7 +377,8 @@ appearing in status/instance lists:
 
 - **Spawned instance** (`comfy-2`): deleted from the spawn-state file
   (`/var/lib/arthur-agent/instances.json`) — its index/port become free for
-  the next spawn.
+  the next spawn — and its runtime GPU drop-in (if any) is removed
+  (+ `daemon-reload`, v0.6.0).
 - **Config-declared extra instance** (e.g. `comfy-dual`): the entry is
   removed from `/etc/arthur-agent/config.json` (atomic rewrite, file stays
   valid, rest untouched) and the live registry hot-reloads — after a forget
@@ -325,6 +419,12 @@ same: `comfy-0`, `comfy-1`, `aitoolkit`).
   cached `-L` count and the per-GPU stats query behind `/api/gpus`). All
   subprocess calls use 30 s timeouts (`/api/gpus`: 5 s). Spawn index selection
   is lock-protected.
+- **Spawn request bodies are parsed, never executed.** The optional `gpus`
+  body is validated (non-empty, unique integers < live NUM_GPUS → else 400)
+  and only ever rendered into a systemd drop-in file
+  (`Environment=ARTHUR_GPUS="<list>"`) under
+  `/run/systemd/system/comfy@<i>.service.d/` — the unit name comes from the
+  registry, never from the request. Bodies are capped (16 KiB).
 - The agent unit runs as root (it must control system units) and is hardened
   with `NoNewPrivileges`, `ProtectSystem=full`, `ProtectHome=read-only`,
   `PrivateTmp`. Audit log: `/var/log/arthur-agent/audit.jsonl`; spawn-state:
