@@ -2650,6 +2650,11 @@ try {
 				sessions: [
 					{ id: "sess-a", path: "/home/me/.pi/sess-a.jsonl", cwd: "/home/me/deep/repo", name: "arthur plugin work", model: "GLM-5", provider: "zai", startedAt: iso(3600000), lastActivity: iso(5000), active: true },
 					{ id: "sess-b", path: "/home/me/.pi/sess-b.jsonl", cwd: "/srv/other", name: "", model: "MiMo", provider: "x", startedAt: iso(7200000), lastActivity: iso(120000), active: false },
+					// v0.10.1 producer guards: a PATHLESS + INACTIVE one-shot (the old
+					// pre-guard worker pollution) must NEVER render anywhere…
+					{ id: "sess-c", path: "", cwd: "/srv/workers", name: null, model: "GLM-5", provider: "zai", startedAt: iso(60000), lastActivity: iso(30000), active: false },
+					// …while a PATHLESS + ACTIVE one-shot still renders but WITHOUT Peek.
+					{ id: "sess-d", path: "  ", cwd: "/srv/live-shot", name: "live one-shot", model: "MiMo", provider: "x", startedAt: iso(60000), lastActivity: iso(10000), active: true },
 				],
 				subagents: [
 					{ runId: "r1", batchId: "b1", agent: "worker", taskPreview: "fix the pi badge", state: "running", parentSessionId: "sess-a", startedAt: iso(60000), finishedAt: null },
@@ -2719,8 +2724,8 @@ try {
 			"pi section carries its own collapse head titled 'Pi'");
 		assert(head22.getAttribute("aria-expanded") === "true", "pi section starts expanded");
 		const devHead22 = findByClass(piSection22, "arthur-pi-device-head")[0];
-		assert(!!devHead22 && allText(devHead22).includes("laptop") && allText(devHead22).includes("1 active"),
-			"device header shows the hostname + active session count");
+		assert(!!devHead22 && allText(devHead22).includes("laptop") && allText(devHead22).includes("2 active"),
+			"device header shows the hostname + active session count (2: sess-a + pathless-active sess-d)");
 		// collapse toggle persists through the settings
 		head22.handlers.get("click")[0]?.();
 		assert(findById(piSection22, "arthur-section-pi").isShown() === false, "pi head click collapses the pi body");
@@ -2733,7 +2738,9 @@ try {
 	// (b) active + inactive session cards render with model/provider + duration
 	{
 		const cards22 = () => findByClass(piSection22, "arthur-pi-card");
-		assert(cards22().length === 2, "both device sessions render as session cards");
+		assert(cards22().length === 3, "3 renderable session cards (sess-c pathless+inactive DROPPED, sess-d pathless+active kept)");
+		assert(!cards22().some((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-c")),
+			"pathless+inactive sess-c never renders as a session card");
 		const activeCard22 = cards22().find((c) => c.hasClass("arthur-pi-card--active"));
 		const inactiveCard22 = cards22().find((c) => c.hasClass("arthur-pi-card--inactive"));
 		assert(!!activeCard22 && !!inactiveCard22, "one active + one inactive session card");
@@ -2746,7 +2753,11 @@ try {
 			"inactive card shows model + lastActivity duration");
 		assert(allText(inactiveCard22).includes("other"), "inactive card falls back to the last cwd segment as name");
 		assert(findButton(inactiveCard22, "Peek") === null, "inactive cards carry NO Peek button");
-		assert(findButton(activeCard22, "Peek") != null, "active cards carry the read-only Peek button");
+		assert(findButton(activeCard22, "Peek") != null, "active cards with a path carry the read-only Peek button");
+		const pathlessActive22 = cards22().find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-d"));
+		assert(!!pathlessActive22 && pathlessActive22.hasClass("arthur-pi-card--active"),
+			"pathless+ACTIVE sess-d still renders as an active card");
+		assert(findButton(pathlessActive22, "Peek") === null, "pathless+active session card carries NO Peek (nothing to tail)");
 		// expanded card: subagent list
 		activeCard22.handlers.get("click")[0]?.({ target: activeCard22 });
 		const expandedCard22 = findByClass(piSection22, "arthur-pi-card").find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-a"));
@@ -2762,7 +2773,10 @@ try {
 
 	// (c) subagent badge counts on the session cards
 	{
-		const cards22c = () => findByClass(piSection22, "arthur-pi-card");
+		const cards22c = () => findByClass(piSection22, "arthur-pi-card").filter((c) => {
+			const k = c.attributes.get("data-pi-session") ?? "";
+			return k.endsWith("sess-a") || k.endsWith("sess-b"); // the two carrying runs
+		});
 		for (const card of cards22c()) {
 			const badge = findByClass(card, "arthur-pi-count")[0];
 			assert(!!badge && badge.textContent === "2", `session card carries the '2' subagent count badge (got ${badge?.textContent})`);
@@ -2772,8 +2786,9 @@ try {
 	// (d) queue: ACTIVE session renders as a pi parent job with collapsed children
 	{
 		const parents22 = () => view22.queueEl.children.filter((c) => c.hasClass?.("arthur-pi-parent"));
-		assert(parents22().length === 1, "queue renders exactly ONE pi parent card (active session only)");
-		const parent22 = parents22()[0];
+		assert(parents22().length === 2, "queue renders exactly TWO pi parent cards (active: sess-a + pathless-active sess-d)");
+		const parent22 = parents22().find((c) => (c.attributes.get("data-pi-key") ?? "") === "pi:dev-lt/sess-a");
+		assert(!!parent22, "the sess-a pi parent card is present in the queue");
 		assert((parent22.attributes.get("data-pi-key") ?? "") === "pi:dev-lt/sess-a", "parent card keyed to the active session");
 		assert(allText(parent22).includes("pi · arthur plugin work"), "parent card labeled 'pi · <name>'");
 		assert(allText(parent22).includes("laptop"), "parent card carries the device prefix");
@@ -2815,7 +2830,8 @@ try {
 		const keys22 = view22.queueEl.children
 			.filter((c) => c.hasClass?.("arthur-pi-parent"))
 			.map((c) => c.attributes.get("data-pi-key"));
-		assert(keys22.every((k) => !k.includes("sess-b")), `inactive sessions never in the queue (keys: ${keys22.join(",")})`);
+		assert(keys22.every((k) => !k.includes("sess-b") && !k.includes("sess-c")), `inactive sessions never in the queue (keys: ${keys22.join(",")})`);
+		assert(keys22.includes("pi:dev-lt/sess-d"), "the pathless+active one-shot DOES join the queue (live process is meaningful)");
 	}
 
 	// (f) 'Open session' peek: tail fetch (?lines=10) renders the last 10 entries

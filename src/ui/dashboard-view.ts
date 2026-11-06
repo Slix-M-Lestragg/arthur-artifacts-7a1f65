@@ -118,7 +118,7 @@ import type { ComfyUIClient, QueueResponse, SystemStats } from "../api/comfy";
 import { parseComfyBinaryFrame } from "../comfy-frame";
 import { WsConnection, WsState } from "../connection";
 import { renderLossChart } from "./loss-chart";
-import { PiPanel, piSessionLabel, piStateIcon } from "./pi-panel"; // piStateIcon for queue child rows
+import { PiPanel, piRenderableSession, piSessionLabel, piStateIcon } from "./pi-panel"; // piStateIcon for queue child rows
 import type { AgentPiDevice, AgentPiSession, AgentPiStatus, AgentPiSubagent } from "../api/agent";
 import {
 	el,
@@ -2375,6 +2375,7 @@ export class ArthurDashboardView extends ItemView {
 			const liveKeys = new Set<string>();
 			for (const dev of this.piDetail.status.devices ?? []) {
 				for (const sess of dev.sessions ?? []) {
+					if (!piRenderableSession(sess)) continue; // pathless+inactive never render
 					if (!sess.active) continue;
 					liveKeys.add(`pi:${dev.device}/${sess.id}`);
 					const subs = (dev.subagents ?? []).filter((s) => s.parentSessionId === sess.id);

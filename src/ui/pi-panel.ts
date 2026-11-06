@@ -15,9 +15,13 @@
  *                   segment of cwd), model · provider, duration
  *                   (now − startedAt / lastActivity), active dot (green
  *                   active / grey inactive), running-subagent count badge,
- *                   and — on ACTIVE sessions only — a 'Peek' button opening
- *                   an inline mini-log of the session tail (last 10 entries,
- *                   preview text only, via GET /api/pi/sessions/…/tail).
+ *                   and — on ACTIVE sessions with a persisted path only — a
+ *                   'Peek' button opening an inline mini-log of the session
+ *                   tail (last 10 entries, preview text only, via
+ *                   GET /api/pi/sessions/…/tail; a pathless one-shot has no
+ *                   file to tail → no Peek). Pathless + inactive sessions
+ *                   (dead one-shot worker pollution) never render at all
+ *                   (piRenderableSession, shared with the queue).
  *   expanded card — the session's subagent runs (agent name, task preview,
  *                   state icon: running → spinner, done → check, failed →
  *                   red cross, canceled → grey dash).
@@ -68,6 +72,25 @@ export function piSessionLabel(sess: AgentPiSession): string {
 		if (last) return last;
 	}
 	return sess.id;
+}
+
+/**
+ * Renderability guard (belt-and-braces vs a polluted status file): a PATHLESS
+ * (empty/whitespace path — never persisted) and INACTIVE session is a dead
+ * one-shot entry (the pre-guard pi-arthur subagent self-registrations) — it
+ * must never render as a session card or queue job. A pathless ACTIVE entry
+ * still renders (a live one-shot process is meaningful in the report window)
+ * but carries NO Peek affordance — piSessionTail needs the file path
+ * (renderPeekableSession decides that).
+ */
+export function piRenderableSession(sess: AgentPiSession): boolean {
+	const pathless = !(sess.path ?? "").trim();
+	return !(pathless && sess.active === false);
+}
+
+/** Peek (session-tail) is for ACTIVE sessions with a persistable file only. */
+export function piPeekableSession(sess: AgentPiSession): boolean {
+	return Boolean(sess.active) && Boolean((sess.path ?? "").trim());
 }
 
 /** Parse an ISO-ish timestamp into epoch ms (0 when absent/unparseable). */
@@ -198,6 +221,7 @@ export class PiPanel {
 		wrap.append(head);
 		const cards = el("div", { cls: "arthur-pi-sessions" });
 		for (const sess of dev.sessions ?? []) {
+			if (!piRenderableSession(sess)) continue; // pathless + inactive: never render
 			cards.append(this.sessionCard(dev, sess, now));
 		}
 		wrap.append(cards);
@@ -237,9 +261,11 @@ export class PiPanel {
 				}),
 			);
 		}
-		// Read-only 'Open session' affordance on ACTIVE cards (observational —
-		// the ONLY button on a pi card; no lifecycle actions exist for pi).
-		if (sess.active) {
+		// Read-only 'Open session' affordance (observational — the ONLY button
+		// on a pi card; no lifecycle actions exist for pi). Needs an active
+		// session WITH a persisted file: piSessionTail tails the jsonl path, a
+		// pathless one-shot has nothing to tail (would 404).
+		if (piPeekableSession(sess)) {
 			const peek = document.createElement("button");
 			peek.textContent = this.peekOpen.has(key) ? "Hide log" : "Peek";
 			peek.addClass("arthur-btn", "arthur-btn--tiny", "arthur-pi-peek");
