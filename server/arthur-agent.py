@@ -2,26 +2,36 @@
 """arthur-agent — companion agent for the arthur Obsidian plugin.
 
 Single-file Python 3 stdlib HTTP server (zero pip deps). Runs on the LAN
-home server, token-gated, and drives ComfyUI instance lifecycle via systemd
-template units (comfy@0 → GPU 0/port 8188, comfy@1 → GPU 1/port 8189).
+home server, token-gated, and drives a *service registry* of systemd units
+(v0.5.0):
 
-See server/README-install.md in the arthur repo for deployment.
+  services (from /etc/arthur-agent/config.json):
+    comfyui    multi-instance  → template unit comfy@{i}
+                 index i = lowest free index in 0..max_instances-1,
+                 port = default_port + i, gpu = i % NUM_GPUS
+                 (NUM_GPUS detected live via `nvidia-smi -L` at spawn time)
+    aitoolkit  single-instance → ai-toolkit.service (must never be duplicated:
+                 shared SQLite state)
 
-Design (docs/PLAN.md §2.2):
-  GET  /health                      → unauthenticated {ok, version}
-  GET  /api/status                  → {version, instances[], host_uptime}
-  GET  /api/instances               → registry
-  GET  /api/instances/{id}/status   → runtime status + port liveness probe
-  POST /api/instances/{id}/start    → idempotent systemctl start
-  POST /api/instances/{id}/stop     → graceful; 409 if a generation is running
-                                       (bypass with ?force=1)
-  POST /api/instances/{id}/restart  → stop → wait port free (~30s) → start
-  GET  /api/log?offset=N            → byte-offset tail of the JSONL audit log
+Instance ids/units are *computed* from the registry, never stored from
+requests; request data is NEVER interpolated into shell commands — the only
+strings reaching systemd come from config. All subprocess calls have
+timeouts. Every mutation lands in the JSONL audit log.
 
-Security: Bearer token on everything under /api/; instance ids validated
-against the fixed allowlist from the config file (request data is NEVER
-interpolated into shell commands — units come from config); all subprocess
-calls go through systemctl with timeouts; structured JSON errors.
+API (see server/README-install.md for the full documented surface):
+  GET  /health                                  → unauthenticated {ok, version}
+  GET  /api/status                              → live per-service/instance state
+  GET  /api/services                            → registry + live state
+  GET  /api/services/{svc}                      → one service: registry + live
+  POST /api/services/{svc}/start                → ensure default instance up
+  POST /api/services/{svc}/stop[?force=1]       → stop ALL instances
+  POST /api/services/{svc}/instances            → spawn new instance (multi only)
+  GET  /api/services/{svc}/instances            → instances of one service
+  GET  /api/services/{svc}/instances/{id}/status
+  POST /api/services/{svc}/instances/{id}/start
+  POST /api/services/{svc}/instances/{id}/stop[?force=1]
+  POST /api/services/{svc}/instances/{id}/restart[?force=1]
+  GET  /api/log?offset=N                        → JSONL audit tail
 """
 
 import json
@@ -35,51 +45,94 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-AGENT_VERSION = "0.4.0"
+AGENT_VERSION = "0.5.0"
 
 CONFIG_PATH = os.environ.get("ARTHUR_AGENT_CONFIG", "/etc/arthur-agent/config.json")
 TOKEN_PATH = os.environ.get("ARTHUR_AGENT_TOKEN_FILE", "/etc/arthur-agent/token")
 AUDIT_PATH = os.environ.get("ARTHUR_AGENT_AUDIT", "/var/log/arthur-agent/audit.jsonl")
+STATE_PATH = os.environ.get("ARTHUR_AGENT_STATE", "/var/lib/arthur-agent/instances.json")
 
 HTTP_TIMEOUT = 5          # urllib probe timeout (s)
 CMD_TIMEOUT = 30          # systemctl subprocess timeout (s)
 PORT_COMEUP_WAIT = 90     # max wait for a freshly started instance to serve (s)
 PORT_FREE_WAIT = 30       # max wait for the port to be free after stop (s)
-INSTANCE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+GPU_CACHE_TTL = 60        # seconds to trust a NUM_GPU detection
+ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+UNIT_RE = re.compile(r"^[A-Za-z0-9:@._{}\\-]+$")
+PROBE_RE = re.compile(r"^/[A-Za-z0-9._~:/-]*$")
 
 _audit_lock = threading.Lock()
+_state_lock = threading.Lock()
+_spawn_lock = threading.Lock()   # spawns pick indexes one at a time
+_gpu_lock = threading.Lock()
 _config = None
 _token = None
+_gpu_cache = {"ts": 0.0, "n": None}
 
 
 # --------------------------------------------------------------------------
-# config / token
+# config / token / spawned-instance state
 # --------------------------------------------------------------------------
 
 def load_config():
-    """Load and validate the instance registry from config.json."""
+    """Load and validate the service registry (config.json v2 schema).
+
+    {
+      "services": {
+        "<svc-id>": {
+          "name": str,
+          "default_port": int,          # instance i listens on i + default_port
+          "multi_instance": bool,
+          "max_instances": int,         # >= 1
+          "unit_template": "comfy@{i}", # multi only; {i} → instance index
+          "unit": "ai-toolkit.service", # single only
+          "instance_prefix": "comfy",   # multi only; instance id "<prefix>-<i>"
+          "probe_path": "/system_stats" # optional, HTTP liveness path (default /)
+        }
+      },
+      "num_gpus": 2,          # optional static fallback hint
+      "bind": "0.0.0.0",      # optional; env ARTHUR_AGENT_BIND wins otherwise
+      "port": 8766            # optional; env ARTHUR_AGENT_PORT wins otherwise
+    }
+    """
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         raw = json.load(f)
-    instances = raw.get("instances")
-    if not isinstance(instances, dict) or not instances:
-        raise ValueError("config.json must contain a non-empty 'instances' object")
+    services = raw.get("services")
+    if not isinstance(services, dict) or not services:
+        raise ValueError("config.json must contain a non-empty 'services' object")
     registry = {}
-    for inst_id, spec in instances.items():
-        if not INSTANCE_RE.match(inst_id):
-            raise ValueError("instance id %r must match [a-z0-9-]" % inst_id)
-        port = int(spec["port"])
-        unit = str(spec["unit"])
-        if not isinstance(port, int) or port <= 0 or "/" in unit:
-            raise ValueError("bad port/unit for instance %r" % inst_id)
-        registry[inst_id] = {
-            "id": inst_id,
-            "name": spec.get("name", inst_id),
-            "port": port,
-            "gpu": spec.get("gpu"),
-            "unit": unit,
-        }
+    for svc_id, spec in services.items():
+        if not ID_RE.match(svc_id):
+            raise ValueError("service id %r must match [a-z0-9-]" % svc_id)
+        multi = bool(spec.get("multi_instance", False))
+        name = str(spec.get("name", svc_id))
+        port = int(spec["default_port"])
+        max_i = int(spec.get("max_instances", 1 if not multi else 2))
+        if port <= 0 or port > 65535 or max_i < 1:
+            raise ValueError("bad default_port/max_instances for service %r" % svc_id)
+        out = {"id": svc_id, "name": name, "default_port": port,
+               "multi_instance": multi, "max_instances": max_i}
+        probe = spec.get("probe_path", "/")
+        if not isinstance(probe, str) or not PROBE_RE.match(probe):
+            raise ValueError("bad probe_path for service %r" % svc_id)
+        out["probe_path"] = probe
+        if multi:
+            unit_tpl = str(spec["unit_template"])
+            prefix = str(spec.get("instance_prefix", svc_id))
+            if "{i}" not in unit_tpl or not UNIT_RE.match(unit_tpl) \
+               or "/" in unit_tpl or not ID_RE.match(prefix):
+                raise ValueError("bad unit_template/instance_prefix for service %r" % svc_id)
+            out["unit_template"] = unit_tpl
+            out["instance_prefix"] = prefix
+        else:
+            unit = str(spec["unit"])
+            if not UNIT_RE.match(unit) or "/" in unit:
+                raise ValueError("bad unit for service %r" % svc_id)
+            out["unit"] = unit
+        registry[svc_id] = out
     return {
-        "instances": registry,
+        "services": registry,
+        "num_gpus": int(raw.get("num_gpus", 1)),
         "bind": raw.get("bind", os.environ.get("ARTHUR_AGENT_BIND", "0.0.0.0")),
         "port": int(raw.get("port", os.environ.get("ARTHUR_AGENT_PORT", "8766"))),
     }
@@ -93,6 +146,40 @@ def load_token():
     with open(TOKEN_PATH, "r", encoding="utf-8") as f:
         tok = f.read().strip()
     return tok or None
+
+
+def load_state():
+    """Persisted memory of *spawned* instance indexes per service, so an
+    instance stays visible (stopped) in listings after a stop/reboot.
+    File shape: {"comfyui": [0, 1, 2]}. Best-effort: unreadable → empty."""
+    try:
+        with open(STATE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        known = data.get("known", {})
+        if isinstance(known, dict):
+            return {k: sorted(int(i) for i in v) for k, v in known.items()
+                    if isinstance(v, list)}
+    except (OSError, ValueError, TypeError):
+        pass
+    return {}
+
+
+def remember_instance(svc_id, idx):
+    """Record a spawned instance index so it survives restarts. Best-effort."""
+    with _state_lock:
+        state = load_state()
+        idxs = state.setdefault(svc_id, [])
+        if idx not in idxs:
+            idxs.append(idx)
+        state[svc_id] = sorted(idxs)
+        try:
+            os.makedirs(os.path.dirname(STATE_PATH), mode=0o755, exist_ok=True)
+            tmp = STATE_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"known": state}, f)
+            os.replace(tmp, STATE_PATH)
+        except OSError:
+            pass
 
 
 # --------------------------------------------------------------------------
@@ -131,11 +218,28 @@ def unit_uptime(unit):
     return max(0.0, time.time() - int(epoch))
 
 
-def probe_port(port):
-    """True if the instance answers /system_stats on 127.0.0.1:port."""
+def num_gpus():
+    """Live GPU count via `nvidia-smi -L` (cached GPU_CACHE_TTL); falls back
+    to the static config hint, then to 1."""
+    with _gpu_lock:
+        now = time.time()
+        if _gpu_cache["n"] is None or now - _gpu_cache["ts"] > GPU_CACHE_TTL:
+            rc, out, _err = run_cmd(["nvidia-smi", "-L"], timeout=10)
+            n = 0
+            if rc == 0:
+                n = sum(1 for line in out.splitlines() if line.strip())
+            if n <= 0:
+                n = max(1, int(_config.get("num_gpus", 1)))
+            _gpu_cache["ts"] = now
+            _gpu_cache["n"] = n
+        return _gpu_cache["n"]
+
+
+def probe_port(port, path="/system_stats"):
+    """True if 127.0.0.1:port answers 200 on the service's probe path."""
     try:
         with urllib.request.urlopen(
-            "http://127.0.0.1:%d/system_stats" % port, timeout=HTTP_TIMEOUT
+            "http://127.0.0.1:%d%s" % (port, path), timeout=HTTP_TIMEOUT
         ) as resp:
             return resp.status == 200
     except Exception:
@@ -167,31 +271,32 @@ def probe_host_uptime():
         return None
 
 
-def wait_for_port(port, timeout):
+def wait_for_port(port, path, timeout):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if probe_port(port):
+        if probe_port(port, path):
             return True
         time.sleep(1.0)
-    return probe_port(port)
+    return probe_port(port, path)
 
 
 def wait_port_free(port, timeout=PORT_FREE_WAIT):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if not probe_port(port):
+        if not probe_port(port, "/"):
             return True
         time.sleep(1.0)
-    return not probe_port(port)
+    return not probe_port(port, "/")
 
 
 # --------------------------------------------------------------------------
 # audit log
 # --------------------------------------------------------------------------
 
-def audit(instance, action, result, source_ip):
+def audit(service, instance, action, result, source_ip):
     entry = {
         "ts": _now_iso(),
+        "service": service,
         "instance": instance,
         "action": action,
         "result": result,
@@ -233,87 +338,241 @@ def tail_audit(offset):
 
 
 # --------------------------------------------------------------------------
-# lifecycle actions
+# service / instance model (computed from the registry — never from requests)
 # --------------------------------------------------------------------------
 
-def action_start(inst, ip):
-    if unit_is_active(inst["unit"]):
-        audit(inst["id"], "start", "already-running", ip)
-        return 200, {"instance": inst["id"], "action": "start", "result": "already-running"}
-    rc, _out, err = run_cmd(["systemctl", "start", inst["unit"]])
-    if rc != 0:
-        audit(inst["id"], "start", "failed:" + err, ip)
-        return 500, {"error": "systemctl start failed: %s" % err}
-    if not wait_for_port(inst["port"], PORT_COMEUP_WAIT):
-        audit(inst["id"], "start", "unit-up-port-down", ip)
-        return 502, {"error": "unit started but port %d did not come up" % inst["port"]}
-    audit(inst["id"], "start", "started", ip)
-    return 200, {"instance": inst["id"], "action": "start", "result": "started"}
+def make_instance(svc, idx):
+    """Internal representation of instance `idx` of service `svc` (spec dict)."""
+    if svc["multi_instance"]:
+        iid = "%s-%d" % (svc["instance_prefix"], idx)
+        unit = svc["unit_template"].replace("{i}", str(idx))
+    else:
+        iid = svc["id"]
+        unit = svc["unit"]
+    return {
+        "service": svc["id"],
+        "spec": svc,
+        "id": iid,
+        "index": idx,
+        "port": svc["default_port"] + idx,
+        "unit": unit,
+        "gpu": (idx % num_gpus()) if svc["multi_instance"] else None,
+    }
 
 
-def action_stop(inst, force, ip):
-    running = queue_running_count(inst["port"]) if probe_port(inst["port"]) else None
-    if running and not force:
-        audit(inst["id"], "stop", "refused-busy:%d" % running, ip)
-        return 409, {"error": "generation running on %s (%d job(s)); "
-                             "pass ?force=1 to stop anyway" % (inst["id"], running)}
-    rc, _out, err = run_cmd(["systemctl", "stop", inst["unit"]])
-    if rc != 0:
-        audit(inst["id"], "stop", "failed:" + err, ip)
-        return 500, {"error": "systemctl stop failed: %s" % err}
-    audit(inst["id"], "stop", "stopped", ip)
-    return 200, {"instance": inst["id"], "action": "stop", "result": "stopped"}
+def parse_instance_id(svc, iid):
+    """Map a request-supplied instance id to an index, or None if invalid."""
+    if svc["multi_instance"]:
+        m = re.match(r"^%s-(\d+)$" % re.escape(svc["instance_prefix"]), iid or "")
+        if not m:
+            return None
+        idx = int(m.group(1))
+        return idx if 0 <= idx < svc["max_instances"] else None
+    return 0 if iid == svc["id"] else None
 
 
-def action_restart(inst, force, ip):
-    if probe_port(inst["port"]):
-        running = queue_running_count(inst["port"])
-        if running and not force:
-            audit(inst["id"], "restart", "refused-busy:%d" % running, ip)
-            return 409, {"error": "generation running on %s (%d job(s)); "
-                                 "pass ?force=1 to restart anyway" % (inst["id"], running)}
-        rc, _out, err = run_cmd(["systemctl", "stop", inst["unit"]])
-        if rc != 0:
-            audit(inst["id"], "restart", "failed-stop:" + err, ip)
-            return 500, {"error": "systemctl stop failed: %s" % err}
-    if not wait_port_free(inst["port"]):
-        audit(inst["id"], "restart", "port-busy", ip)
-        return 502, {"error": "port %d still in use after stop" % inst["port"]}
-    rc, _out, err = run_cmd(["systemctl", "start", inst["unit"]])
-    if rc != 0:
-        audit(inst["id"], "restart", "failed-start:" + err, ip)
-        return 500, {"error": "systemctl start failed: %s" % err}
-    if not wait_for_port(inst["port"], PORT_COMEUP_WAIT):
-        audit(inst["id"], "restart", "unit-up-port-down", ip)
-        return 502, {"error": "unit started but port %d did not come up" % inst["port"]}
-    audit(inst["id"], "restart", "restarted", ip)
-    return 200, {"instance": inst["id"], "action": "restart", "result": "restarted"}
+def active_indexes(svc):
+    """Indexes 0..max-1 whose unit is currently active."""
+    return [i for i in range(svc["max_instances"])
+            if unit_is_active(svc["unit_template"].replace("{i}", str(i))
+                              if svc["multi_instance"] else svc["unit"])]
+
+
+def service_instances(svc):
+    """Instances worth listing: the default (index 0) plus every active unit
+    plus every previously spawned index (state file; shows stopped ones)."""
+    if not svc["multi_instance"]:
+        return [make_instance(svc, 0)]
+    known = set(load_state().get(svc["id"], []))
+    idxs = sorted({0} | set(active_indexes(svc)) | known)
+    return [make_instance(svc, i) for i in idxs]
+
+
+def default_instance(svc):
+    return make_instance(svc, 0)
 
 
 def instance_summary(inst):
-    up = unit_is_active(inst["unit"])
+    unit_up = unit_is_active(inst["unit"])
+    live = probe_port(inst["port"], inst["spec"]["probe_path"])
     return {
         "id": inst["id"],
-        "name": inst["name"],
+        "service": inst["service"],
+        "name": ("%s #%d" % (inst["spec"]["name"], inst["index"]))
+                if inst["spec"]["multi_instance"] else inst["spec"]["name"],
         "port": inst["port"],
         "gpu": inst["gpu"],
-        "up": up,
-        "uptime": unit_uptime(inst["unit"]) if up else None,
+        "up": bool(unit_up and live),
+        "uptime": unit_uptime(inst["unit"]) if unit_up else None,
     }
 
 
 def instance_detail(inst):
-    up = unit_is_active(inst["unit"])
-    return {
-        "id": inst["id"],
-        "name": inst["name"],
-        "port": inst["port"],
-        "gpu": inst["gpu"],
-        "unit": inst["unit"],
-        "up": up,
-        "live": probe_port(inst["port"]),
-        "uptime": unit_uptime(inst["unit"]) if up else None,
+    d = instance_summary(inst)
+    d["unit"] = inst["unit"]
+    d["live"] = probe_port(inst["port"], inst["spec"]["probe_path"])
+    return d
+
+
+def service_summary(svc, detailed=False):
+    insts = service_instances(svc)
+    bodies = [instance_detail(i) if detailed else instance_summary(i) for i in insts]
+    out = {
+        "id": svc["id"],
+        "name": svc["name"],
+        "active": any(b["up"] for b in bodies),
+        "multi_instance": svc["multi_instance"],
+        "max_instances": svc["max_instances"],
+        "default_port": svc["default_port"],
+        "instances": bodies,
     }
+    if svc["multi_instance"]:
+        out["unit_template"] = svc["unit_template"]
+    else:
+        out["unit"] = svc["unit"]
+    return out
+
+
+# --------------------------------------------------------------------------
+# lifecycle actions
+# --------------------------------------------------------------------------
+
+def action_start_instance(inst, ip):
+    svc = inst["spec"]
+    if unit_is_active(inst["unit"]):
+        audit(svc["id"], inst["id"], "start", "already-running", ip)
+        return 200, {"action": "start", "result": "already-running",
+                     "instance": instance_detail(inst)}
+    rc, _out, err = run_cmd(["systemctl", "start", inst["unit"]])
+    if rc != 0:
+        audit(svc["id"], inst["id"], "start", "failed:" + err, ip)
+        return 500, {"error": "systemctl start failed: %s" % err}
+    if not wait_for_port(inst["port"], svc["probe_path"], PORT_COMEUP_WAIT):
+        audit(svc["id"], inst["id"], "start", "unit-up-port-down", ip)
+        return 502, {"error": "unit started but port %d did not come up"
+                             % inst["port"]}
+    audit(svc["id"], inst["id"], "start", "started", ip)
+    return 200, {"action": "start", "result": "started",
+                 "instance": instance_detail(inst)}
+
+
+def action_stop_instance(inst, force, ip):
+    svc = inst["spec"]
+    running = queue_running_count(inst["port"]) \
+        if probe_port(inst["port"], svc["probe_path"]) else None
+    if running and not force:
+        audit(svc["id"], inst["id"], "stop", "refused-busy:%d" % running, ip)
+        return 409, {"error": "generation running on %s (%d job(s)); "
+                              "pass ?force=1 to stop anyway" % (inst["id"], running)}
+    rc, _out, err = run_cmd(["systemctl", "stop", inst["unit"]])
+    if rc != 0:
+        audit(svc["id"], inst["id"], "stop", "failed:" + err, ip)
+        return 500, {"error": "systemctl stop failed: %s" % err}
+    audit(svc["id"], inst["id"], "stop", "stopped", ip)
+    return 200, {"action": "stop", "result": "stopped",
+                 "instance": instance_detail(inst)}
+
+
+def action_restart_instance(inst, force, ip):
+    svc = inst["spec"]
+    if probe_port(inst["port"], svc["probe_path"]):
+        running = queue_running_count(inst["port"])
+        if running and not force:
+            audit(svc["id"], inst["id"], "restart", "refused-busy:%d" % running, ip)
+            return 409, {"error": "generation running on %s (%d job(s)); "
+                                 "pass ?force=1 to restart anyway"
+                                 % (inst["id"], running)}
+        rc, _out, err = run_cmd(["systemctl", "stop", inst["unit"]])
+        if rc != 0:
+            audit(svc["id"], inst["id"], "restart", "failed-stop:" + err, ip)
+            return 500, {"error": "systemctl stop failed: %s" % err}
+    if not wait_port_free(inst["port"]):
+        audit(svc["id"], inst["id"], "restart", "port-busy", ip)
+        return 502, {"error": "port %d still in use after stop" % inst["port"]}
+    rc, _out, err = run_cmd(["systemctl", "start", inst["unit"]])
+    if rc != 0:
+        audit(svc["id"], inst["id"], "restart", "failed-start:" + err, ip)
+        return 500, {"error": "systemctl start failed: %s" % err}
+    if not wait_for_port(inst["port"], svc["probe_path"], PORT_COMEUP_WAIT):
+        audit(svc["id"], inst["id"], "restart", "unit-up-port-down", ip)
+        return 502, {"error": "unit started but port %d did not come up"
+                             % inst["port"]}
+    audit(svc["id"], inst["id"], "restart", "restarted", ip)
+    return 200, {"action": "restart", "result": "restarted",
+                 "instance": instance_detail(inst)}
+
+
+def action_start_service(svc, ip):
+    """Ensure the service's DEFAULT instance (index 0) is up. Idempotent."""
+    inst = default_instance(svc)
+    code, body = action_start_instance(inst, ip)
+    result = body.get("result", "failed")
+    audit(svc["id"], None, "service-start", result, ip)
+    if code != 200:
+        return code, body
+    return 200, {"action": "start", "result": result,
+                 "service": service_summary(svc)}
+
+
+def action_stop_service(svc, force, ip):
+    """Stop ALL active instances of the service (graceful guard per instance,
+    skipped with ?force=1). Returns the list of stopped instance ids."""
+    insts = [make_instance(svc, i) for i in active_indexes(svc)]
+    if not force:
+        busy = []
+        for inst in insts:
+            n = queue_running_count(inst["port"]) \
+                if probe_port(inst["port"], svc["probe_path"]) else None
+            if n:
+                busy.append({"id": inst["id"], "jobs": n})
+        if busy:
+            names = ", ".join("%s (%d)" % (b["id"], b["jobs"]) for b in busy)
+            audit(svc["id"], None, "service-stop", "refused-busy", ip)
+            return 409, {"error": "generation running: %s; pass ?force=1 to stop "
+                                  "anyway" % names}
+    stopped, errors = [], []
+    for inst in insts:
+        rc, _out, err = run_cmd(["systemctl", "stop", inst["unit"]])
+        if rc != 0:
+            errors.append({"id": inst["id"], "error": err})
+        else:
+            stopped.append(inst["id"])
+    if not errors:
+        result = "stopped:%s" % ",".join(stopped) if stopped else "already-stopped"
+        audit(svc["id"], None, "service-stop", result, ip)
+        return 200, {"action": "stop", "result": "stopped" if stopped
+                     else "already-stopped", "stopped": stopped,
+                     "service": service_summary(svc)}
+    audit(svc["id"], None, "service-stop", "partial:" +
+          ";".join(e["id"] for e in errors), ip)
+    return 500, {"error": "some instances failed to stop",
+                 "stopped": stopped, "errors": errors}
+
+
+def action_spawn(svc, ip):
+    """Spawn a NEW multi-instance unit on the lowest free index:
+    index = lowest i in 0..max-1 whose unit is not active, port =
+    default_port + i, gpu = i % NUM_GPUS (detected live)."""
+    with _spawn_lock:
+        used = set(active_indexes(svc))
+        idx = next((i for i in range(svc["max_instances"]) if i not in used), None)
+        if idx is None:
+            audit(svc["id"], None, "spawn", "refused-max:%d" % svc["max_instances"], ip)
+            return 409, {"error": "max instances reached (%d)" % svc["max_instances"]}
+        inst = make_instance(svc, idx)
+        rc, _out, err = run_cmd(["systemctl", "start", inst["unit"]])
+        if rc != 0:
+            audit(svc["id"], inst["id"], "spawn", "failed:" + err, ip)
+            return 500, {"error": "systemctl start failed: %s" % err}
+        if not wait_for_port(inst["port"], svc["probe_path"], PORT_COMEUP_WAIT):
+            audit(svc["id"], inst["id"], "spawn", "unit-up-port-down", ip)
+            return 502, {"error": "unit started but port %d did not come up"
+                                 % inst["port"]}
+        remember_instance(svc["id"], idx)
+        audit(svc["id"], inst["id"], "spawn", "spawned:port=%d,gpu=%s"
+              % (inst["port"], inst["gpu"]), ip)
+        return 201, {"action": "spawn", "result": "spawned",
+                     "instance": instance_detail(inst)}
 
 
 # --------------------------------------------------------------------------
@@ -321,9 +580,9 @@ def instance_detail(inst):
 # --------------------------------------------------------------------------
 
 STATUS = {
-    200: "OK", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found",
-    405: "Method Not Allowed", 409: "Conflict", 500: "Internal Server Error",
-    502: "Bad Gateway", 503: "Service Unavailable",
+    200: "OK", 201: "Created", 400: "Bad Request", 401: "Unauthorized",
+    404: "Not Found", 405: "Method Not Allowed", 409: "Conflict",
+    500: "Internal Server Error", 502: "Bad Gateway", 503: "Service Unavailable",
 }
 
 
@@ -358,15 +617,23 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def instance(self, inst_id):
-        if not INSTANCE_RE.match(inst_id or ""):
-            self.respond(400, {"error": "invalid instance id"})
+    def service(self, svc_id):
+        if not ID_RE.match(svc_id or ""):
+            self.respond(400, {"error": "invalid service id"})
             return None
-        inst = _config["instances"].get(inst_id)
-        if inst is None:
-            self.respond(404, {"error": "unknown instance %r" % inst_id})
+        svc = _config["services"].get(svc_id)
+        if svc is None:
+            self.respond(404, {"error": "unknown service %r" % svc_id})
             return None
-        return inst
+        return svc
+
+    def instance(self, svc, inst_id):
+        idx = parse_instance_id(svc, inst_id)
+        if idx is None:
+            self.respond(404, {"error": "unknown instance %r of service %r"
+                                       % (inst_id, svc["id"])})
+            return None
+        return make_instance(svc, idx)
 
     # --- verbs ------------------------------------------------------------
     def do_GET(self):
@@ -390,6 +657,7 @@ class Handler(BaseHTTPRequestHandler):
         parts = urlsplit(self.path)
         path = parts.path.rstrip("/") or "/"
         query = parse_qs(parts.query)
+        force = query.get("force", ["0"])[0] in ("1", "true", "yes")
 
         if path == "/health":
             if verb != "GET":
@@ -402,40 +670,92 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorized():
             return
 
+        # ---- status / registry ----------------------------------------
         if path == "/api/status" and verb == "GET":
             return self.respond(200, {
                 "version": AGENT_VERSION,
-                "instances": [instance_summary(i) for i in _config["instances"].values()],
                 "host_uptime": probe_host_uptime(),
+                "services": [service_summary(s) for s in _config["services"].values()],
             })
 
-        if path == "/api/instances" and verb == "GET":
+        if path == "/api/services" and verb == "GET":
+            # registry (config) merged with live state
             return self.respond(200, {
-                "instances": [
-                    {"id": i["id"], "name": i["name"], "port": i["port"],
-                     "gpu": i["gpu"], "unit": i["unit"]}
-                    for i in _config["instances"].values()
-                ]
+                "version": AGENT_VERSION,
+                "services": [service_summary(s, detailed=True)
+                             for s in _config["services"].values()],
             })
 
-        m = re.match(r"^/api/instances/([^/]+)/status$", path)
+        m = re.match(r"^/api/services/([^/]+)$", path)
         if m and verb == "GET":
-            inst = self.instance(m.group(1))
+            svc = self.service(m.group(1))
+            if svc is None:
+                return
+            return self.respond(200, service_summary(svc, detailed=True))
+
+        # ---- service lifecycle ------------------------------------------
+        m = re.match(r"^/api/services/([^/]+)/(start|stop)$", path)
+        if m and verb == "POST":
+            svc = self.service(m.group(1))
+            if svc is None:
+                return
+            if m.group(2) == "start":
+                return self.respond(*action_start_service(svc, self.client_ip()))
+            return self.respond(*action_stop_service(svc, force, self.client_ip()))
+
+        # ---- instances ---------------------------------------------------
+        m = re.match(r"^/api/services/([^/]+)/instances$", path)
+        if m and verb == "POST":
+            svc = self.service(m.group(1))
+            if svc is None:
+                return
+            if not svc["multi_instance"]:
+                audit(svc["id"], None, "spawn", "refused-single-instance",
+                      self.client_ip())
+                return self.respond(409, {"error": "single-instance service"})
+            return self.respond(*action_spawn(svc, self.client_ip()))
+        if m and verb == "GET":
+            svc = self.service(m.group(1))
+            if svc is None:
+                return
+            return self.respond(200, {"service": svc["id"],
+                                      "instances": [instance_detail(i)
+                                                    for i in service_instances(svc)]})
+
+        m = re.match(r"^/api/services/([^/]+)/instances/([^/]+)$", path)
+        if m and verb == "GET":
+            svc = self.service(m.group(1))
+            if svc is None:
+                return
+            inst = self.instance(svc, m.group(2))
             if inst is None:
                 return
             return self.respond(200, instance_detail(inst))
 
-        m = re.match(r"^/api/instances/([^/]+)/(start|stop|restart)$", path)
-        if m and verb == "POST":
-            inst = self.instance(m.group(1))
+        m = re.match(r"^/api/services/([^/]+)/instances/([^/]+)/(status)$", path)
+        if m and verb == "GET":
+            svc = self.service(m.group(1))
+            if svc is None:
+                return
+            inst = self.instance(svc, m.group(2))
             if inst is None:
                 return
-            action = m.group(2)
-            force = query.get("force", ["0"])[0] in ("1", "true", "yes")
+            return self.respond(200, instance_detail(inst))
+
+        m = re.match(r"^/api/services/([^/]+)/instances/([^/]+)"
+                     r"/(start|stop|restart)$", path)
+        if m and verb == "POST":
+            svc = self.service(m.group(1))
+            if svc is None:
+                return
+            inst = self.instance(svc, m.group(2))
+            if inst is None:
+                return
+            action = m.group(3)
             code, body = (
-                action_start(inst, self.client_ip()) if action == "start" else
-                action_stop(inst, force, self.client_ip()) if action == "stop" else
-                action_restart(inst, force, self.client_ip())
+                action_start_instance(inst, self.client_ip()) if action == "start" else
+                action_stop_instance(inst, force, self.client_ip()) if action == "stop" else
+                action_restart_instance(inst, force, self.client_ip())
             )
             return self.respond(code, body)
 
@@ -466,10 +786,12 @@ def main():
         _token = load_token()
     except OSError:
         _token = None
+    load_state()  # touch once so corrupt state never surprises later
     bind, port = _config["bind"], _config["port"]
     httpd = ThreadingHTTPServer((bind, port), Handler)
-    print("arthur-agent %s listening on %s:%d (audit: %s)"
-          % (AGENT_VERSION, bind, port, AUDIT_PATH), flush=True)
+    print("arthur-agent %s listening on %s:%d (config: %s, state: %s, audit: %s)"
+          % (AGENT_VERSION, bind, port, CONFIG_PATH, STATE_PATH, AUDIT_PATH),
+          flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
