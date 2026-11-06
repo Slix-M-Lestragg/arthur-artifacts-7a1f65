@@ -750,7 +750,10 @@ try {
 	agentStatusBody.services[0].active = false;
 	await view9.refreshData();
 	assert(sbComfy?.btn.hasClass("arthur-svc-btn--offline") === true, "inactive service button gets the grey/offline state");
-	assert(sbComfy?.kill.style.display === "none", "offline button hides the kill zone");
+	// v0.6.x sliced pill (3b6362b): the red slice stays part of the pill in
+	// every state — offline pills mute it via the button's grayscale filter.
+	assert(sbComfy?.kill.style.display === "" && sbComfy?.btn.hasClass("arthur-svc-btn--offline") === true,
+		"sliced pill keeps the muted red stop-all zone in the offline state");
 	calls9 = [];
 	StubNotice.reset();
 	await sbComfy?.btn.handlers.get("click")[0]?.();
@@ -1235,7 +1238,212 @@ try {
 	StubNotice.reset();
 	await app.workspace.detachLeavesOfType("arthur-dashboard");
 
-	// ---- cleanup ----------------------------------------------------------
+	// ---- 15. collapsible section titles: centered heads, chevrons, toggle,
+	// persisted settings, survives reopen -----------------------------
+	console.log("== 15. collapsible section titles + persisted collapse ===" );
+	let view15;
+	ok = true;
+	try {
+		await plugin.activateView();
+		view15 = app.workspace.getLeavesOfType("arthur-dashboard")[0]?.view;
+		await view15.refreshData();
+	} catch (err) {
+		ok = false;
+		console.error(`    view15 attach threw: ${err?.stack ?? err}`);
+	}
+	assert(ok, "section-titles view attach + refresh did not throw");
+	const heads15 = findByClass(view15.contentEl, "arthur-section-head");
+	assert(heads15.length === 2, "each dashboard section opens with a collapse title head (2 total)");
+	const sectionTitles15 = findByClass(view15.contentEl, "arthur-section-title").map((t) => t.textContent);
+	assert(sectionTitles15.includes("Instances") && sectionTitles15.includes("Queue"),
+		`title texts are 'Instances' + 'Queue' (got: ${sectionTitles15.join(" / ")})`);
+	// centered layout + chevron live in the dedicated CSS classes; the DOM must
+	// carry both on every head
+	assert(heads15.every((h) => h.hasClass("arthur-section-head") && findByClass(h, "arthur-section-chevron").length === 1),
+		"every title head is the centered arthur-section-head with one chevron glyph");
+	const instancesHead15 = heads15.find((h) => h.getAttribute("data-section") === "instances");
+	const queueHead15 = heads15.find((h) => h.getAttribute("data-section") === "queue");
+	assert(!!instancesHead15 && !!queueHead15, "heads are tagged per section (instances / queue)");
+	assert(instancesHead15.getAttribute("aria-expanded") === "true" && queueHead15.getAttribute("aria-expanded") === "true",
+		"both sections start expanded (sensible default)");
+
+	// click a title → its section body collapses to the head + setting flips
+	instancesHead15.handlers.get("click")[0]?.();
+	assert(view15.gridBodyEl.isShown() === false, "clicking the Instances title collapses the instance-grid body");
+	assert(plugin.settings.instancesCollapsed === true, "grid collapse flips the persisted instancesCollapsed setting");
+	assert(plugin._data?.instancesCollapsed === true, "instancesCollapsed persisted via saveData");
+	assert(instancesHead15.getAttribute("aria-expanded") === "false", "collapsed head reports aria-expanded=false");
+	queueHead15.handlers.get("click")[0]?.();
+	assert(view15.queueBodyEl.isShown() === false, "clicking the Queue title collapses the job-queue body");
+	assert(plugin.settings.queueCollapsed === true && plugin._data?.queueCollapsed === true,
+		"queueCollapsed persisted through saveSettings");
+	// second click re-expands + persists the flip back
+	queueHead15.handlers.get("click")[0]?.();
+	await sleep(700); // settings-driven debounced rebuild applies through the tick
+	assert(view15.queueBodyEl.isShown() === true, "second click re-expands the queue section");
+	assert(plugin.settings.queueCollapsed === false, "re-expanding flips queueCollapsed back to false");
+
+	// (iv) collapse persists across reopen (fresh view reads saved settings)
+	await sleep(700); // let the debounced rebuild settle before reopening
+	await app.workspace.detachLeavesOfType("arthur-dashboard");
+	await plugin.loadSettings(); // the reopen path reloads persisted data
+	assert(plugin.settings.instancesCollapsed === true, "instancesCollapsed reloads from saved settings");
+	await plugin.activateView();
+	const view15b = app.workspace.getLeavesOfType("arthur-dashboard")[0]?.view;
+	assert(view15b.gridBodyEl.isShown() === false, "Instances section stays collapsed across reopen");
+	assert(view15b.queueBodyEl.isShown() === true, "Queue section stays expanded across reopen");
+	// restore: click the collapsed Instances title back open for later sections
+	const instHead15b = findByClass(view15b.contentEl, "arthur-section-head").find((h) => h.getAttribute("data-section") === "instances");
+	instHead15b.handlers.get("click")[0]?.();
+	await sleep(700);
+	assert(view15b.gridBodyEl.isShown() === true, "restored Instances section expands again");
+	assert(plugin.settings.instancesCollapsed === false && plugin._data?.instancesCollapsed === false,
+		"restored expanded state persists too");
+
+	// ---- 16. training jobs in the unified queue (incl. NO comfy instance) ---
+	console.log("== 16. training jobs in the unified queue + decoupled ai-toolkit parts ===" );
+	const aiJobs16 = {
+		jobs: [
+			{ id: "trainA", name: "Lora train A", gpu_ids: "0", status: "running", step: 10, total_steps: 100, speed_string: "2.0it/s", queue_position: null, pid: 4321, save_now: false, sample_now: false, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T01:00:00Z", stop: false, return_to_queue: false, job_config: "{}" },
+			{ id: "trainB", name: "Lora train B", gpu_ids: "1", status: "queued", step: 0, total_steps: 100, speed_string: "", queue_position: 2, pid: null, save_now: false, sample_now: false, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T01:00:00Z", stop: false, return_to_queue: false, job_config: "{}" },
+			{ id: "trainC", name: "crashed run", gpu_ids: "0", status: "error", step: 5, total_steps: 100, speed_string: "", queue_position: null, pid: null, save_now: false, sample_now: false, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T01:30:00Z", stop: false, return_to_queue: false, job_config: "{}" },
+		],
+	};
+	const json16 = (status, body) => ({ status, body });
+	// Agent status where NO comfy instance is alive (empty instance list).
+	const emptyStatus16 = {
+		version: "0.5.2",
+		host_uptime: 1,
+		services: [
+			{ id: "comfyui", name: "ComfyUI", active: true, multi_instance: true, max_instances: 4, default_port: 8188, unit_template: "comfy@{i}", instances: [] },
+		],
+	};
+	const openView16 = async () => {
+		await app.workspace.detachLeavesOfType("arthur-dashboard");
+		await plugin.activateView();
+		const v = app.workspace.getLeavesOfType("arthur-dashboard")[0]?.view;
+		await v.refreshData();
+		return v;
+	};
+
+	// (a) NO comfy instance alive (agent down, ports unreachable) but ai-toolkit
+	// answers → training cards MUST still render in the unified queue
+	httpResponder = (opts) => {
+		if (opts.url.startsWith("http://10.0.0.9:8675")) {
+			if (opts.url.endsWith("/api/jobs")) return json16(200, aiJobs16);
+			if (opts.url.endsWith("/api/queue")) return json16(200, { queues: [{ id: 0, gpu_ids: "0", is_running: true }] });
+			return null;
+		}
+		return null; // agent + both comfy ports fully offline
+	};
+	let view16a;
+	ok = true;
+	try {
+		view16a = await openView16();
+	} catch (err) {
+		ok = false;
+		console.error(`    view16a threw: ${err?.stack ?? err}`);
+	}
+	assert(ok, "agent-down + ai-toolkit-up refresh did not throw");
+	const trainCards16 = () => findByClass(view16a.contentEl, "arthur-queue-job--training");
+	assert(trainCards16().length === 3, "agent down → ai-toolkit training cards still render in the queue (running + queued + recent-error)");
+	assert(findById(view16a.contentEl, "arthur-training-row-trainA") != null
+		&& findById(view16a.contentEl, "arthur-training-row-trainB") != null
+		&& findById(view16a.contentEl, "arthur-training-row-trainC") != null,
+		"training cards keep the stable arthur-training-row-<id> anchors");
+	const cardA16 = () => findById(view16a.contentEl, "arthur-training-row-trainA");
+	for (const label of ["Chart", "Logs", "Kill", "Delete", "Mark stopped", "Save now", "Sample now", "Start", "Stop"]) {
+		assert(findButton(cardA16(), label) != null, `running training card carries the ${label} action`);
+	}
+	assert(findButton(cardA16(), "Stop").disabled === false && findButton(cardA16(), "Start").disabled === true,
+		"running training card enables Stop (and disables Start)");
+	assert(findButton(cardA16(), "Kill").disabled === false, "Kill enabled while the job holds a pid");
+	// order: running → queued → recent stopped/error
+	const order16 = trainCards16().map((c) => c.getAttribute("id"));
+	assert(order16.join(",") === "arthur-training-row-trainA,arthur-training-row-trainB,arthur-training-row-trainC",
+		`queue orders running → queued → recent-error (got: ${order16.join(",")})`);
+	// chart accordion expands inside the training card
+	findButton(cardA16(), "Chart").handlers.get("click")[0]?.();
+	const cardA16b = findById(view16a.contentEl, "arthur-training-row-trainA");
+	assert(findByClass(cardA16b, "arthur-chart-wrap").length === 1, "chart accordion expands inside a training card (no comfy instance needed)");
+	assert(allText(cardA16b).includes("loading loss data…"), "chart panel shows its loading state before data arrives");
+	findButton(findById(view16a.contentEl, "arthur-training-row-trainA"), "Chart").handlers.get("click")[0]?.();
+	assert(findByClass(findById(view16a.contentEl, "arthur-training-row-trainA"), "arthur-chart-wrap").length === 0,
+		"chart accordion collapses again");
+	assert(view16a.queueEmptyEl.isShown() === false, "no fake empty note while training jobs render");
+
+	// (b) agent UP but zero comfy instances + /api/queue broken (500):
+	// job cards must NOT disappear — only the queue toggles are lost
+	httpResponder = (opts) => {
+		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.5.2" });
+		if (opts.url.endsWith("/api/status")) return json16(200, emptyStatus16);
+		if (opts.url.endsWith("/api/jobs")) return json16(200, aiJobs16);
+		if (opts.url.endsWith("/api/queue")) return json16(500, { error: "queue endpoint broken" });
+		return null;
+	};
+	let view16b;
+	ok = true;
+	try {
+		view16b = await openView16();
+	} catch (err) {
+		ok = false;
+		console.error(`    view16b threw: ${err?.stack ?? err}`);
+	}
+	assert(ok, "queue-endpoint-failure refresh did not throw");
+	assert(findByClass(view16b.contentEl, "arthur-queue-job--training").length === 3,
+		"a broken /api/queue does NOT hide the training job cards");
+	assert(view16b.aiStateEl.isShown() === true && allText(view16b.aiStateEl).includes("queue toggles unavailable"),
+		"failed ai-toolkit part shows its degraded state inline in the queue");
+	assert(view16b.queueEmptyEl.isShown() === false, "no 'every queue is clear' note while a source is degraded");
+
+	// (c) /api/jobs broken (500) with zero everything: NO cards + inline error
+	// state — never a fake 'no jobs' note
+	httpResponder = (opts) => {
+		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.5.2" });
+		if (opts.url.endsWith("/api/status")) return json16(200, emptyStatus16);
+		if (opts.url.endsWith("/api/jobs")) return json16(500, { error: "jobs endpoint broken" });
+		if (opts.url.endsWith("/api/queue")) return json16(200, { queues: [] });
+		return null;
+	};
+	let view16c;
+	ok = true;
+	try {
+		view16c = await openView16();
+	} catch (err) {
+		ok = false;
+		console.error(`    view16c threw: ${err?.stack ?? err}`);
+	}
+	assert(ok, "jobs-endpoint-failure refresh did not throw");
+	assert(findByClass(view16c.contentEl, "arthur-queue-job--training").length === 0, "no training cards without the jobs endpoint");
+	assert(view16c.aiStateEl.isShown() === true && allText(view16c.aiStateEl).includes("training jobs unavailable"),
+		"failed jobs collector shows its inline error state in the queue");
+	assert(view16c.queueEmptyEl.isShown() === false, "unreachable source → inline error state, NOT the empty note");
+
+	// (d) every source answers + zero jobs anywhere → the clear note shows
+	httpResponder = (opts) => {
+		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.5.2" });
+		if (opts.url.endsWith("/api/status")) return json16(200, emptyStatus16);
+		if (opts.url.endsWith("/api/jobs")) return json16(200, { jobs: [] });
+		if (opts.url.endsWith("/api/queue")) return json16(200, { queues: [] });
+		return null;
+	};
+	let view16d;
+	ok = true;
+	try {
+		view16d = await openView16();
+	} catch (err) {
+		ok = false;
+		console.error(`    view16d threw: ${err?.stack ?? err}`);
+	}
+	assert(ok, "all-clear refresh did not throw");
+	assert(view16d.aiStateEl.isShown() === false, "no degraded state while every source answers");
+	assert(view16d.queueEmptyEl.isShown() === true && allText(view16d.queueEmptyEl).includes("no jobs — every queue is clear"),
+		"both sources answered + zero jobs → the 'no jobs — every queue is clear' note shows");
+
+	httpResponder = null;
+	StubNotice.reset();
+	await app.workspace.detachLeavesOfType("arthur-dashboard");
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();
@@ -1251,4 +1459,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.5.0-service-bar / hung-request-timeout-guard / down-instance-filtering / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+icons+fallback / unified-job-queue all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.5.0-service-bar / hung-request-timeout-guard / down-instance-filtering / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+icons+fallback / unified-job-queue / collapsible-section-titles / training-jobs-unified-queue all clean");

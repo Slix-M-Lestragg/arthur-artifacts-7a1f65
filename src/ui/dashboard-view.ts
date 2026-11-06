@@ -9,6 +9,12 @@
  *                    dead services + last error + attempted host:port; hidden
  *                    entirely while everything answers (also carries the
  *                    'not configured' / token / version-mismatch states).
+ *   0c. SECTION TITLES — INSTANCES and JOB QUEUE each open with a centered,
+ *                    click-to-toggle collapse header ('Instances', 'Queue')
+ *                    with a rotating chevron; collapsed state persists per
+ *                    section in the plugin settings (instancesCollapsed /
+ *                    queueCollapsed). The error banner sits ABOVE both
+ *                    collapsibles and never collapses.
  *   1. INSTANCES   — the GPU instance grid: one COLUMN per GPU (live stats
  *                    from GET /api/gpus, agent v0.5.2), one ROW per GPU-owning
  *                    instance (comfy, incl. multi-GPU spanning rows) and per
@@ -34,8 +40,13 @@
  *                    the instance's running card (live WS progress + cancel)
  *                    and pending cards (per-prompt ✕ delete); ai-toolkit
  *                    training entries (arthur-training-row-<id> anchor) with
- *                    their existing action buttons + chart/log accordion;
- *                    per-GPU-set queue toggles close the queue. Ordering:
+ *                    their existing action buttons + accordion (running,
+ *                    queued and recent stopped/error jobs render); per-GPU-set
+ *                    queue toggles close the queue. The two ai-toolkit
+ *                    collectors (jobs / queues) are decoupled: a broken queue
+ *                    endpoint never hides job cards, and a failed part is
+ *                    shown as an inline degraded state instead of an
+ *                    empty-queue note. Ordering:
  *                    running (by run duration desc) → pending/queued →
  *                    recent stopped/error training (cap 5). Ports come from
  *                    the agent's discovered instances (settings list is the
@@ -165,11 +176,18 @@ interface AgentDetail {
 }
 
 interface AiToolkitDetail {
+	/** GET /api/jobs answered? false = the jobs fetch failed (part-decoupled:
+	 *  a queue failure never hides job cards, and vice versa). */
 	reachable: boolean | null;
 	jobs: AiToolkitJob[];
-	/** Flattened per-GPU-set queue rows. */
+	/** GET /api/queue answered? Tracks the queue toggles independently of the
+	 *  job list so a broken queue endpoint keeps training cards visible. */
+	queuesOk: boolean | null;
+	/** Flattened per-GPU-set queue rows (empty when the endpoint failed). */
 	queues: Array<{ id: string | number; gpu_ids: string; is_running: boolean }>;
-	error: string | null;
+	/** Last error text per part (banner + inline queue state). */
+	jobsError: string | null;
+	queueError: string | null;
 }
 
 /** Latest WS-driven progress tick for one comfy port. */
@@ -349,9 +367,16 @@ export class ArthurDashboardView extends ItemView {
 	// cached element roots
 	private serviceBarEl!: HTMLElement;
 	private serviceBar!: ServiceBar;
-	/** Slim error banner — hidden while every service answers (v0.6.1: the one
-	 *  error surface, replacing the old top bar's errors/dots/profile line). */
+	/** Error banner — sits outside both collapsibles; always shows when
+	 *  unhealthy (hidden while every service answers). */
 	private bannerEl!: HTMLElement;
+	/** Instances section: centered collapsible title head + scrollable body
+	 *  holding the grid, its notes and the unmanaged-row fallback. */
+	private gridHeadEl!: HTMLElement;
+	private gridBodyEl!: HTMLElement;
+	/** Job queue section: centered collapsible title head + body. */
+	private queueHeadEl!: HTMLElement;
+	private queueBodyEl!: HTMLElement;
 	/** Instance grid + its notes (replaced by unmanaged rows when agent down). */
 	private gridEl!: HTMLElement;
 	private gridNoteEl!: HTMLElement;
@@ -359,8 +384,10 @@ export class ArthurDashboardView extends ItemView {
 	/** Unified job queue (comfy groups + training cards + aitk queue toggles). */
 	private queueEl!: HTMLElement;
 	/** Tail of the unified queue: per-GPU-set ai-toolkit queue toggles (shown
-	 *  only while ai-toolkit answers) + the empty-queue note. */
+	 *  only while the queue endpoint answers) + the inline degraded state for
+	 *  a failed ai-toolkit collector + the empty-queue note. */
 	private aiQueueToggleEl!: HTMLElement;
+	private aiStateEl!: HTMLElement;
 	private queueEmptyEl!: HTMLElement;
 	/** True while the training collector sits degraded (watchdog); cleared on
 	 *  each settled tick — feeds the error banner. */
@@ -377,8 +404,10 @@ export class ArthurDashboardView extends ItemView {
 	private aiDetail: AiToolkitDetail = {
 		reachable: null,
 		jobs: [],
+		queuesOk: null,
 		queues: [],
-		error: null,
+		jobsError: null,
+		queueError: null,
 	};
 	/** Live GPU columns from GET /api/gpus (detail cycle). Empty list + error
 	 *  = collector unreachable/degraded → grid falls back to derived columns. */
@@ -641,10 +670,12 @@ export class ArthurDashboardView extends ItemView {
 				error: null,
 			};
 			this.aiDetail = {
-				reachable: false,
+				reachable: null,
 				jobs: [],
+				queuesOk: null,
 				queues: [],
-				error: "not configured",
+				jobsError: "not configured",
+				queueError: "not configured",
 			};
 			this.gpuDetail = { list: [], error: null };
 			this.lastTick = null;
@@ -756,35 +787,31 @@ export class ArthurDashboardView extends ItemView {
 			}),
 		);
 
-		const aiError: unknown = await (async () => {
-			try {
-				const [jobs, queue] = await Promise.all([
-					clients.aitoolkit.jobs(),
-					clients.aitoolkit.queueList(),
-				]);
-				this.aiDetail = {
-					reachable: true,
-					jobs: jobs.jobs ?? [],
-					queues: (queue.queues ?? []).map(
+		const [jobsRes, queueRes] = await Promise.all([
+			tryCall(() => clients.aitoolkit.jobs()),
+			tryCall(() => clients.aitoolkit.queueList()),
+		]);
+		// The two ai-toolkit collectors are decoupled ON PURPOSE: /api/jobs
+		// answers → training job cards render even when /api/queue fails (the
+		// broken queue endpoint only costs the per-GPU-set toggles), and a jobs
+		// failure collapses to an inline degraded state in the queue instead of
+		// a fake "every queue is clear" note.
+		this.aiDetail = {
+			reachable: jobsRes.value !== null,
+			jobs: jobsRes.value?.jobs ?? [],
+			queuesOk: queueRes.value !== null,
+			queues: queueRes.value
+				? (queueRes.value.queues ?? []).map(
 						(q): AiToolkitQueueRow => ({
 							id: q.id,
 							gpu_ids: q.gpu_ids,
 							is_running: q.is_running,
 						}),
-					),
-					error: null,
-				};
-				return null;
-			} catch (err) {
-				this.aiDetail = {
-					reachable: false,
-					jobs: [],
-					queues: [],
-					error: describeError(err),
-				};
-				return err;
-			}
-		})();
+				  )
+				: [],
+			jobsError: jobsRes.value === null ? describeError(jobsRes.error) : null,
+			queueError: queueRes.value === null ? describeError(queueRes.error) : null,
+		};
 		// Jobs/queues settled — data or error, always a renderable state.
 		this.watchSettle("training");
 
@@ -807,7 +834,9 @@ export class ArthurDashboardView extends ItemView {
 			for (const p of desired) {
 				parts.push(`comfy ${this.outcomeFor(comfyErrors.get(p.port) ?? null)} ${hostPort(p.port)}`);
 			}
-			parts.push(`aitk ${this.outcomeFor(aiError)} ${hostPort(profile.aiToolkitPort)}`);
+			parts.push(
+				`aitk jobs ${this.outcomeFor(jobsRes.error)} · queues ${this.outcomeFor(queueRes.error)} ${hostPort(profile.aiToolkitPort)}`,
+			);
 			parts.push(`gpus ${this.outcomeFor(gpuFetchError)} ${hostPort(profile.agentPort)}`);
 			console.debug(
 				`arthur dashboard-detail ok ${Date.now() - tickStarted}ms · ${parts.join(" · ")}`,
@@ -859,36 +888,53 @@ export class ArthurDashboardView extends ItemView {
 
 		// ONE slim error banner under the service bar — dead services + last
 		// error + attempted host:port; hidden entirely while all healthy. Also
-		// carries the 'not configured' / token / version-mismatch states.
+		// carries the 'not configured' / token / version-mismatch states. It is
+		// OUTSIDE both section collapsibles — it always shows when unhealthy.
 		this.bannerEl = root.createEl("div", { cls: "arthur-banner" });
 		this.bannerEl.hide();
 
-		// instance grid (no section header — the cards are self-describing):
-		// one column per GPU, one card row per instance/training job; below it
-		// the unmanaged-row fallback container (only rendered while the agent
-		// is unreachable)
-		this.gridEl = root.createEl("div", { cls: "arthur-grid" });
+		// 1. INSTANCES — collapsible section: a centered click-to-toggle title
+		// line ('Instances' + chevron) above the grid body (grid + notes +
+		// unmanaged-row fallback). Collapse state persists in the settings.
+		const gridSection = root.createEl("div", { cls: "arthur-section" });
+		this.gridHeadEl = this.buildSectionHead("instances");
+		gridSection.append(this.gridHeadEl);
+		this.gridBodyEl = gridSection.createEl("div", { cls: "arthur-section-body" });
+		this.gridHeadEl.setAttribute("aria-controls", "arthur-section-instances");
+		this.gridBodyEl.setAttribute("id", "arthur-section-instances");
+		this.gridEl = this.gridBodyEl.createEl("div", { cls: "arthur-grid" });
 		this.gridEl.append(el("p", { cls: "arthur-note", text: "loading…" }));
-		this.gridNoteEl = root.createEl("p", {
+		this.gridNoteEl = this.gridBodyEl.createEl("p", {
 			cls: "arthur-note",
 			text: "",
 		});
 		this.gridNoteEl.hide();
-		this.unmanagedEl = root.createEl("div", { cls: "arthur-cards" });
+		this.unmanagedEl = this.gridBodyEl.createEl("div", { cls: "arthur-cards" });
 		this.unmanagedEl.hide();
 
-		// ONE unified job queue: per-port cached group (header + running card +
+		// 2. JOB QUEUE — collapsible section ('Queue' + chevron) wrapping the
+		// ONE unified queue: per-port cached group (header + running card +
 		// pending card) ordered per tick by the queue sorting rules, training
 		// job cards rebuilt per tick. Re-attaching the cached nodes preserves
 		// the WS-facing widget refs (progress bars never need a rebuild).
-		this.queueEl = root.createEl("div", { cls: "arthur-queue" });
+		const queueSection = root.createEl("div", { cls: "arthur-section" });
+		this.queueHeadEl = this.buildSectionHead("queue");
+		queueSection.append(this.queueHeadEl);
+		this.queueBodyEl = queueSection.createEl("div", { cls: "arthur-section-body" });
+		this.queueHeadEl.setAttribute("aria-controls", "arthur-section-queue");
+		this.queueBodyEl.setAttribute("id", "arthur-section-queue");
+		this.queueEl = this.queueBodyEl.createEl("div", { cls: "arthur-queue" });
 		for (const p of ports) {
 			this.queueEl.append(this.buildGenGroup(p));
 		}
 		// Queue tail: per-GPU-set queue toggles (repainted per tick; shown only
-		// while ai-toolkit answers) and the empty-queue note.
+		// while the ai-toolkit queue endpoint answers), the inline degraded
+		// state for a failed ai-toolkit collector (never a fake empty state)
+		// and the empty-queue note (shown only when every source answered).
 		this.aiQueueToggleEl = this.queueEl.createEl("div", { cls: "arthur-aiqueue" });
 		this.aiQueueToggleEl.hide();
+		this.aiStateEl = this.queueEl.createEl("div", { cls: "arthur-aiqueue-state" });
+		this.aiStateEl.hide();
 		this.queueEmptyEl = el("p", {
 			cls: "arthur-note",
 			text: "no jobs — every queue is clear",
@@ -898,6 +944,70 @@ export class ArthurDashboardView extends ItemView {
 		// Port list the groups+WS are now built for.
 		this.activePorts = ports;
 		this.skeletonBuilt = true;
+		// Body elements now exist — paint each section's persisted collapse state.
+		this.syncSectionCollapse("instances");
+		this.syncSectionCollapse("queue");
+	}
+
+	/**
+	 * One collapsible section head: a centered title line ('Instances' or
+	 * 'Queue') with a rotating chevron. Clicking (or Enter/Space while
+	 * focused) toggles that section's body; the state persists per section
+	 * in the plugin settings. Returns the head element.
+	 */
+	private buildSectionHead(section: "instances" | "queue"): HTMLElement {
+		const head = el("div", {
+			cls: "arthur-section-head",
+			attrs: {
+				"data-section": section,
+				role: "button",
+				tabindex: "0",
+				"aria-expanded": "true",
+				title: `Toggle the ${section === "instances" ? "instance grid" : "job queue"} section`,
+			},
+		});
+		head.append(
+			el("span", {
+				cls: "arthur-section-title",
+				text: section === "instances" ? "Instances" : "Queue",
+			}),
+			el("span", { cls: "arthur-section-chevron", attrs: { "aria-hidden": "true" } }),
+		);
+		head.addEventListener("click", () => this.toggleSection(section));
+		head.addEventListener("keydown", (e: KeyboardEvent) => {
+			if (e.key === "Enter" || e.key === " ") {
+				e.preventDefault();
+				this.toggleSection(section);
+			}
+		});
+		return head;
+	}
+
+	/** Click-to-toggle one section: flip the persisted setting, save, repaint. */
+	private toggleSection(section: "instances" | "queue"): void {
+		const s = this.plugin.settings;
+		if (section === "instances") s.instancesCollapsed = !s.instancesCollapsed;
+		else s.queueCollapsed = !s.queueCollapsed;
+		void this.plugin.saveSettings(); // persist through loadData/saveData
+		this.syncSectionCollapse(section);
+	}
+
+	/** Paint one section's collapse state (body hidden + collapsed head). */
+	private syncSectionCollapse(section: "instances" | "queue"): void {
+		const collapsed =
+			section === "instances"
+				? this.plugin.settings.instancesCollapsed === true
+				: this.plugin.settings.queueCollapsed === true;
+		const body = section === "instances" ? this.gridBodyEl : this.queueBodyEl;
+		const head = section === "instances" ? this.gridHeadEl : this.queueHeadEl;
+		if (collapsed) {
+			body.hide();
+			head.addClass("arthur-section-head--collapsed");
+		} else {
+			body.show();
+			head.removeClass("arthur-section-head--collapsed");
+		}
+		head.setAttribute("aria-expanded", String(!collapsed));
 	}
 
 	/**
@@ -1060,8 +1170,10 @@ export class ArthurDashboardView extends ItemView {
 			const d = this.comfyDetail[i];
 			if (d?.online === false) errors.push(`ComfyUI ${hostPort(p.port)} — ${d.error ?? "not responding"}`);
 		});
-		if (this.aiDetail.reachable === false && this.aiDetail.error) {
-			errors.push(`ai-toolkit ${hostPort(clients?.profile.aiToolkitPort ?? 0)} — ${this.aiDetail.error}`);
+		if (this.aiDetail.reachable === false && this.aiDetail.jobsError) {
+			errors.push(`ai-toolkit ${hostPort(clients?.profile.aiToolkitPort ?? 0)} — jobs: ${this.aiDetail.jobsError}`);
+		} else if (this.aiDetail.queuesOk === false && this.aiDetail.queueError) {
+			errors.push(`ai-toolkit ${hostPort(clients?.profile.aiToolkitPort ?? 0)} — queues: ${this.aiDetail.queueError}`);
 		}
 		// /api/gpus collector failure only matters while the agent answers at all
 		// (grid columns fall back to derived placements otherwise).
@@ -1093,6 +1205,7 @@ export class ArthurDashboardView extends ItemView {
 	/** Sync the instances section: the grid while the agent answers, the
 	 *  unmanaged-row fallback when it doesn't (grid hidden entirely). */
 	private renderInstances(): void {
+		this.syncSectionCollapse("instances");
 		this.gridRows.clear();
 		const ad = this.agentDetail;
 		if (ad.statusOk === true && ad.status) {
@@ -1564,6 +1677,7 @@ export class ArthurDashboardView extends ItemView {
 	 * (their action rows depend on the job status).
 	 */
 	private renderQueue(): void {
+		this.syncSectionCollapse("queue");
 		const q = this.queueEl;
 		const host = this.plugin.clients?.profile.host ?? "";
 		const entries: QueueEntry[] = [];
@@ -1615,7 +1729,9 @@ export class ArthurDashboardView extends ItemView {
 
 		// ai-toolkit training cards — running (rank 0, duration-sorted),
 		// queued/stopping (rank 1, queue position first), recent stopped/error
-		// (rank 2, newest updated_at first, capped).
+		// (rank 2, newest updated_at first, capped). Gated on the JOBS
+		// collector alone — a broken /api/queue only costs the per-GPU-set
+		// queue toggles, never the job cards.
 		if (this.aiDetail.reachable === true) {
 			// Drop caches/state for jobs that no longer exist (deleted or job
 			// list rebuilt) before the per-tick card rebuild.
@@ -1634,7 +1750,9 @@ export class ArthurDashboardView extends ItemView {
 				} else if (job.status === "queued" || job.status === "stopping") {
 					entries.push({
 						rank: 1,
-						sort: job.queue_position ?? 0,
+						// Next queue position first (the tick sort is descending,
+						// so invert the position).
+						sort: -(job.queue_position ?? 0),
 						seq: 100 + queuedSeq++,
 						nodes: [this.jobQueueCard(job)],
 					});
@@ -1657,6 +1775,10 @@ export class ArthurDashboardView extends ItemView {
 					nodes: [this.jobQueueCard(job)],
 				});
 			}
+		}
+		// Per-GPU-set queue toggles render whenever /api/queue answered — even
+		// when /api/jobs failed (the two collectors are independent).
+		if (this.aiDetail.queuesOk === true) {
 			this.renderTrainingQueueToggles();
 		} else {
 			this.aiQueueToggleEl.hide();
@@ -1674,9 +1796,33 @@ export class ArthurDashboardView extends ItemView {
 		for (const panel of this.panels.values()) {
 			if (!headEmitted.has(panel.port)) panel.head.hide();
 		}
-		if (entries.length === 0) this.queueEmptyEl.show();
+		// Inline degraded state for a failed ai-toolkit collector — never
+		// pretend an unreachable source is an empty queue.
+		const hostQ = this.plugin.clients?.profile.host ?? "";
+		const aiPort = this.plugin.clients?.profile.aiToolkitPort ?? 0;
+		const failedParts: string[] = [];
+		if (this.aiDetail.reachable === false && this.aiDetail.jobsError) {
+			failedParts.push(`training jobs unavailable — ${this.aiDetail.jobsError}`);
+		}
+		if (this.aiDetail.queuesOk === false && this.aiDetail.queueError) {
+			failedParts.push(`queue toggles unavailable — ${this.aiDetail.queueError}`);
+		}
+		if (hostQ && failedParts.length > 0) {
+			this.aiStateEl.setText(`ai-toolkit ${failedParts.join(" · ")}`);
+			this.aiStateEl.setAttribute(
+				"title",
+				errTooltip(hostQ ? `${hostQ}:${aiPort}` : "(not configured)", this.aiDetail.jobsError ?? this.aiDetail.queueError),
+			);
+			this.aiStateEl.show();
+		} else {
+			this.aiStateEl.hide();
+		}
+		// The 'no jobs' note only when every source answered: a failed source
+		// renders its inline error state above instead of pretending empty.
+		const bothAnswered = this.aiDetail.reachable === true && this.aiDetail.queuesOk === true;
+		if (entries.length === 0 && bothAnswered) this.queueEmptyEl.show();
 		else this.queueEmptyEl.hide();
-		this.queueEl.append(this.aiQueueToggleEl, this.queueEmptyEl);
+		this.queueEl.append(this.aiQueueToggleEl, this.aiStateEl, this.queueEmptyEl);
 	}
 
 	private renderProgress(panel: GenPanel): void {

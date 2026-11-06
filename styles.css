@@ -178,6 +178,71 @@
 	cursor: default;
 }
 
+/* -------------------------------------------------- collapsible section titles */
+
+.arthur-section {
+	display: flex;
+	flex-direction: column;
+	gap: 0.5em;
+	min-width: 0;
+}
+
+/* centered, click-to-toggle title line ('Instances' / 'Queue' + chevron); the
+   body below collapses to just this line when the section is collapsed */
+.arthur-section-head {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 0.45em;
+	align-self: center;
+	padding: 0.1em 0.9em;
+	border-radius: var(--radius-s);
+	cursor: pointer;
+	user-select: none;
+}
+
+.arthur-section-head:hover,
+.arthur-section-head:focus-visible {
+	background: var(--background-secondary);
+	outline: none;
+}
+
+.arthur-section-title {
+	font-weight: var(--font-semibold);
+	font-size: var(--font-ui-medium);
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--text-muted);
+	transition: color 0.15s ease;
+}
+
+.arthur-section-head:hover .arthur-section-title {
+	color: var(--text-normal);
+}
+
+/* small downward-pointing chevron; rotates to horizontal when collapsed */
+.arthur-section-chevron {
+	width: 0;
+	height: 0;
+	border-left: 0.3em solid transparent;
+	border-right: 0.3em solid transparent;
+	border-top: 0.42em solid var(--text-faint);
+	transform-origin: 50% 22%;
+	transition: transform 0.15s ease;
+}
+
+.arthur-section-head--collapsed .arthur-section-chevron {
+	transform: rotate(-90deg);
+}
+
+.arthur-section-head--collapsed .arthur-section-title {
+	color: var(--text-faint);
+}
+
+.arthur-section-head--collapsed:hover .arthur-section-title {
+	color: var(--text-normal);
+}
+
 /* unmanaged-row fallback heading (agent unreachable) */
 .arthur-inst-group {
 	display: flex;
@@ -419,6 +484,16 @@
 	flex-direction: column;
 	gap: 0.3em;
 	padding: 0.15em 0.25em;
+}
+
+/* inline degraded state for a failed ai-toolkit collector (jobs/queues) at
+   the queue tail — shown instead of a fake 'every queue is clear' note */
+.arthur-aiqueue-state {
+	font-size: var(--font-ui-small);
+	font-style: italic;
+	color: var(--text-warning);
+	opacity: 0.85;
+	cursor: default;
 }
 
 /* scroll target of the grid's 'view in queue' links */

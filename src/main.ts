@@ -43,6 +43,10 @@ export interface ArthurSettings {
 	maxChartKeys: number;
 	/** One-line console.debug breadcrumb per poll tick (default OFF). */
 	debugLogging: boolean;
+	/** Instances section collapsed (dashboard title toggle; default expanded). */
+	instancesCollapsed: boolean;
+	/** Job-queue section collapsed (dashboard title toggle; default expanded). */
+	queueCollapsed: boolean;
 }
 
 /** Clients built from the active profile — rebuilt when settings change. */
@@ -75,6 +79,8 @@ const DEFAULT_SETTINGS: ArthurSettings = {
 	previewCount: 4,
 	maxChartKeys: 4,
 	debugLogging: false,
+	instancesCollapsed: false,
+	queueCollapsed: false,
 };
 
 /** Parse a bounded positive int; invalid/missing → fallback. */
@@ -573,6 +579,8 @@ export default class ArthurPlugin extends Plugin {
 			previewCount: clampInt(data?.previewCount, DEFAULT_SETTINGS.previewCount, 1, 12),
 			maxChartKeys: clampInt(data?.maxChartKeys, DEFAULT_SETTINGS.maxChartKeys, 1, 8),
 			debugLogging: data?.debugLogging === true,
+			instancesCollapsed: data?.instancesCollapsed === true,
+			queueCollapsed: data?.queueCollapsed === true,
 		};
 	}
 
