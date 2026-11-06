@@ -88,7 +88,16 @@ export function normalizeHost(raw: string): string {
 }
 
 /**
- * Tiny DOM helper — creates an element, applies classes/attributes/text and
+ * Short GPU display name — vendor/brand prefixes stripped (shared by the
+ * dashboard grid + service-bar GPU dropdown).
+ */
+export function gpuShortName(name: string): string {
+	return String(name ?? "")
+		.replace(/^NVIDIA\s+(GeForce\s+|Tesla\s+|Quadro\s+|Radeon\s+)/i, "")
+		.trim() || "GPU";
+}
+
+/** Tiny DOM helper — creates an element, applies classes/attributes/text and
  * appends children (strings become text nodes). Keeps UI code terse without
  * pulling in any framework.
  */

@@ -48,6 +48,10 @@ export interface ArthurSettings {
 	instancesCollapsed: boolean;
 	/** Job-queue section collapsed (dashboard title toggle; default expanded). */
 	queueCollapsed: boolean;
+	/** Per-service GPU selection for service-button spawns — Record<serviceId,
+	 *  number[]> of checked GPU indexes (empty/missing = default: single GPU,
+	 *  no pinned index → agent's modulo rotation). */
+	spawnGpuSel: Record<string, number[]>;
 }
 
 /** Clients built from the active profile — rebuilt when settings change. */
@@ -82,12 +86,29 @@ const DEFAULT_SETTINGS: ArthurSettings = {
 	debugLogging: false,
 	instancesCollapsed: false,
 	queueCollapsed: false,
+	spawnGpuSel: {},
 };
 
 /** Parse a bounded positive int; invalid/missing → fallback. */
 function clampInt(raw: unknown, fallback: number, min: number, max: number): number {
 	const n = typeof raw === "number" ? raw : parseInt(String(raw ?? ""), 10);
 	return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : fallback;
+}
+
+/** Sanitize the per-service spawn-GPU selection map: only finite non-negative
+ *  integer lists survive (deduped, sorted); malformed entries drop to absent. */
+function sanitizeGpuSel(raw: unknown): Record<string, number[]> {
+	const out: Record<string, number[]> = {};
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+	for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+		if (!Array.isArray(value)) continue;
+		const list = value
+			.filter((n): n is number => typeof n === "number" && Number.isInteger(n) && n >= 0)
+			.filter((n, i, arr) => arr.indexOf(n) === i)
+			.sort((a, b) => a - b);
+		if (list.length > 0) out[key] = list;
+	}
+	return out;
 }
 
 const LIGHT_INTERVAL_MS = 12_000;
@@ -582,6 +603,7 @@ export default class ArthurPlugin extends Plugin {
 			debugLogging: data?.debugLogging === true,
 			instancesCollapsed: data?.instancesCollapsed === true,
 			queueCollapsed: data?.queueCollapsed === true,
+			spawnGpuSel: sanitizeGpuSel(data?.spawnGpuSel),
 		};
 	}
 

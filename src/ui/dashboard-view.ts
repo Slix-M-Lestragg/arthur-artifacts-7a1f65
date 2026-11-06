@@ -80,13 +80,25 @@
  * legitimately appear and disappear (spawn/stop/run end) — everything else
  * is cached per port.
  *
+ * OPTIMISTIC SPAWN STATE (v0.7.2): service-bar start/spawn clicks insert an
+ * optimistic pending row (pulsing 'spawning…' placeholder) into the grid
+ * immediately — the UI no longer waits silently for the next poll to prove
+ * the click landed. The pending row is replaced by the real instance as soon
+ * as /api/status reports it (matched by the response's instance id/port);
+ * if nothing matching appears within 45s the row flips to an error state
+ * ('spawn did not come up — check server') and auto-dismisses at the next
+ * successful poll. Instances the plugin itself started/spawned within that
+ * 45s window render 'spawning…' while they report up:false (ComfyUI boot
+ * grace) instead of the alarmist 'down' state.
+ *
  * Instance discovery (agent API v0.5.0): /api/status lists services with
  * computed instances; the queue groups + WS sockets attach to the
  * comfyui service's instance ports in agent order. The group set is rebuilt
  * only when that ordered port list changes (or the profile host changed).
  *
- * The view never mutates state optimistically: everything rendered comes
- * from the last poll fetch or the last WS event.
+ * The view never mutates state optimistically — everything rendered comes
+ * from the last poll fetch or the last WS event — with ONE exception (the
+ * v0.7.2 optimistic spawn rows described above).
  *
  * WS lifecycle decision (per PLAN 2.1): one WsConnection per comfy port is
  * opened when the dashboard opens (not at plugin load — idle reconnect loops
@@ -112,10 +124,12 @@ import {
 	fmtBytes,
 	fmtDuration,
 	fmtGigCompact,
+	gpuShortName,
 	truncate,
 } from "../util";
 import { ArthurApiError, isTimeoutError } from "../api/transport";
 import { ServiceBar } from "./service-bar";
+import type { GpuMenuData } from "./service-bar";
 import { confirmModal, describeError, run, toastErr, toastOk } from "./actions";
 import { openUiTooltip, openWebUrl } from "./webviewer";
 
@@ -133,6 +147,14 @@ const FALLBACK_GPU_COLUMNS = 2;
 /** How long the grid's 'view in queue' target keeps the flash highlight. */
 const FLASH_MS = 1500;
 
+/** Optimistic spawn-state window (ms): a pending row times out (→ error
+ *  state) after 45s without an /api/status match, and instances the plugin
+ *  itself started/spawned render 'spawning…' (boot grace) for the same 45s
+ *  while they still report up:false. */
+const SPAWN_TIMEOUT_MS = 45_000;
+/** pluginStarts prune floor (margin past the grace window). */
+const SPAWN_START_PRUNE_MS = SPAWN_TIMEOUT_MS + 45_000;
+
 /** One GPU column of the instance grid. */
 interface GridCol {
 	index: number;
@@ -144,13 +166,18 @@ interface GridCol {
 	tempC: number | null;
 }
 
-/** One sorted row of the instance grid (instance or training job). */
+/**
+ * One sorted row of the instance grid (instance or training job). State adds
+ * two optimistic values: 'spawning' (a plugin-started instance during boot,
+ * or a service-bar click's pending placeholder) and 'failed' (a pending row
+ * whose 45s match timeout elapsed).
+ */
 interface GridRowSpec {
 	key: string;
 	kind: "instance" | "training";
 	title: string;
 	gpus: number[];
-	state: "running" | "idle" | "down";
+	state: "running" | "idle" | "down" | "spawning" | "failed";
 	badge: string;
 	meta: string;
 	/** Run duration in seconds (running rows; sort input + display). */
@@ -306,6 +333,31 @@ interface QueueEntry {
 	nodes: HTMLElement[];
 }
 
+/**
+ * One optimistic spawn pending (service-bar start/spawn click): a pulsing
+ * 'spawning…' grid placeholder that resolves into the REAL instance row as
+ * soon as /api/status reports a matching instance, or times out (error row)
+ * after SPAWN_TIMEOUT_MS. Never mutated server-side, never persisted.
+ */
+interface SpawnPending {
+	/** Stable key (map key; suffixed into the row's data-row-key). */
+	k: string;
+	svcId: string;
+	/** 'start' → the service's default instance; 'spawn' → a new instance. */
+	mode: "start" | "spawn";
+	title: string;
+	/** GPUs known/pre-selected at click time (spawn mode; may be empty). */
+	gpus: number[];
+	/** Match targets for poll resolution (id from the request response when
+	 *  it carried the instance, otherwise the service's default id/port). */
+	expectId: string | null;
+	expectPort: number | null;
+	createdAt: number;
+	/** Flipped on the tick that first observed the 45s timeout; the NEXT
+	 *  successful poll auto-dismisses the error row. */
+	failed: boolean;
+}
+
 /** Never-throw wrapper for best-effort probes — keeps the error for diagnostics. */
 async function tryCall<T>(fn: () => Promise<T>): Promise<{ value: T | null; error: unknown }> {
 	try {
@@ -313,13 +365,6 @@ async function tryCall<T>(fn: () => Promise<T>): Promise<{ value: T | null; erro
 	} catch (err) {
 		return { value: null, error: err };
 	}
-}
-
-/** Short GPU display name — vendor/brand prefixes stripped. */
-function gpuShortName(name: string): string {
-	return String(name ?? "")
-		.replace(/^NVIDIA\s+(GeForce\s+|Tesla\s+|Quadro\s+|Radeon\s+)/i, "")
-		.trim() || "GPU";
 }
 
 /** Synthetic (stats-less) column for placements derived without /api/gpus. */
@@ -531,6 +576,16 @@ export class ArthurDashboardView extends ItemView {
 	 *  from a poll must paint panels already-open, never re-run the animation). */
 	private readonly expandAnimationPending = new Set<string>();
 
+	// optimistic spawn state (service-bar clicks; view-local, never persisted)
+	/** Pending 'spawning…' rows keyed by their stable pending key. */
+	private readonly spawnPendings = new Map<string, SpawnPending>();
+	/** Monotonic seq for placeholder ids (spawning-<svc>-<n>). */
+	private spawnSeq = 0;
+	/** Instances the plugin itself started/spawned (id / `port:N` keys → epoch
+	 *  ms) — within the 45s window an up:false report renders 'spawning…' not
+	 *  'down' (ComfyUI boot grace). */
+	private readonly pluginStarts = new Map<string, number>();
+
 	// training accordion state (job id → state; cleared on close/unload/job delete)
 	private readonly jobUi = new Map<string, JobPanelUi>();
 	private readonly jobLoss = new Map<string, JobLossCache>();
@@ -627,6 +682,8 @@ export class ArthurDashboardView extends ItemView {
 		this.clearRunTracking();
 		this.expandedInstances.clear();
 		this.expandAnimationPending.clear();
+		this.spawnPendings.clear();
+		this.pluginStarts.clear();
 		this.buildSkeleton(this.desiredPorts());
 		this.openWss();
 		this.plugin.dashboardView = this;
@@ -664,6 +721,8 @@ export class ArthurDashboardView extends ItemView {
 		this.clearRunTracking();
 		this.expandedInstances.clear();
 		this.expandAnimationPending.clear();
+		this.spawnPendings.clear();
+		this.pluginStarts.clear();
 		if (this.plugin.dashboardView === this) this.plugin.dashboardView = null;
 		this.contentEl.empty();
 	}
@@ -773,6 +832,7 @@ export class ArthurDashboardView extends ItemView {
 				queueError: "not configured",
 			};
 			this.gpuDetail = { list: [], error: null };
+			this.spawnPendings.clear();
 			this.lastTick = null;
 			// The "not configured" placeholder is a settled state — no watch pending.
 			this.sectionWatches.clear();
@@ -818,6 +878,9 @@ export class ArthurDashboardView extends ItemView {
 		// Health/status settled — with data (ok) or a captured error; both are
 		// renderable states, so the agent section can never sit "loading" here.
 		this.watchSettle("agent");
+		// Optimistic spawn pendings: resolve against the fresh status (or time
+		// out into the error row) BEFORE the grid renders.
+		this.tickSpawnPendings();
 		const agentError = this.agentDetail.error;
 
 		// Live GPU stats (detail cycle refresh for the grid columns + header
@@ -983,6 +1046,11 @@ export class ArthurDashboardView extends ItemView {
 			onStart: (svc) => void this.serviceStartAction(svc),
 			onSpawn: (svc) => void this.serviceSpawnAction(svc),
 			onKill: (svc) => this.serviceKillAction(svc),
+			// Hover GPU dropdown (multi-instance services): live GPU stats +
+			// occupants, with the selection persisted per service in settings.
+			gpuMenuData: (svcId) => this.svcGpuMenuData(svcId),
+			gpuSelection: (svcId) => this.gpuSelectionFor(svcId),
+			setGpuSelection: (svcId, gpus) => this.setGpuSelection(svcId, gpus),
 		});
 
 		// ONE slim error banner under the service bar — dead services + last
@@ -1388,13 +1456,17 @@ export class ArthurDashboardView extends ItemView {
 			const effective = duration ?? (running ? (inst.uptime ?? null) : null);
 			this.gridRowDurations.set(key, effective);
 			const panel = this.panels.get(inst.port);
+			// Boot grace: an instance the plugin itself started/spawned within the
+			// last 45s reports up:false while ComfyUI boots — render 'spawning…'
+			// (muted pulsing row) instead of the alarmist 'down'.
+			const booting = !inst.up && this.pluginBootGrace(inst) !== null;
 			rows.push({
 				key: `inst:${inst.id}`,
 				kind: "instance",
 				title: inst.name ?? inst.id,
 				gpus: gpuList,
-				state: !inst.up ? "down" : running ? "running" : "idle",
-				badge: !inst.up ? "down" : running ? "running" : "idle",
+				state: !inst.up ? (booting ? "spawning" : "down") : running ? "running" : "idle",
+				badge: !inst.up ? (booting ? "spawning…" : "down") : running ? "running" : "idle",
 				meta: `:${inst.port} · GPU ${gpuList.join(",")}`,
 				durationSec: effective,
 				prompt: running
@@ -1467,6 +1539,40 @@ export class ArthurDashboardView extends ItemView {
 			}
 			return a.title.localeCompare(b.title);
 		});
+
+		// Optimistic spawn pendings (service-bar clicks) — always trailing rows:
+		// pulsing 'spawning…' placeholders, or the 45s-timeout error row.
+		const nowMs = Date.now();
+		for (const p of this.spawnPendings.values()) {
+			const failed = p.failed || nowMs - p.createdAt > SPAWN_TIMEOUT_MS;
+			rows.push({
+				key: `pending:${p.k}`,
+				kind: "instance",
+				title: p.title,
+				gpus: p.gpus,
+				state: failed ? "failed" : "spawning",
+				badge: failed ? "spawn error" : "spawning…",
+				meta: failed
+					? "spawn did not come up — check server"
+					: p.expectPort != null
+						? `:${p.expectPort}${p.gpus.length ? ` · GPU ${p.gpus.join(",")}` : ""}`
+						: p.gpus.length
+							? `GPU ${p.gpus.join(",")}`
+							: "new instance",
+				durationSec: null,
+				prompt: null,
+				statsText: null,
+				statsPct: null,
+				anchor: "",
+				// Pendings are placeholders — no queue link, no lifecycle buttons,
+				// no expansion, no stats block.
+				linkable: false,
+				svcId: p.svcId,
+				instId: null,
+				isDefault: false,
+				port: null,
+			});
+		}
 		return rows;
 	}
 
@@ -1560,7 +1666,7 @@ export class ArthurDashboardView extends ItemView {
 		const dotCls =
 			spec.state === "running"
 				? "arthur-dot arthur-dot--green"
-				: spec.state === "down"
+				: spec.state === "down" || spec.state === "failed"
 					? "arthur-dot arthur-dot--red"
 					: "arthur-dot arthur-dot--gray";
 		// Web-UI link (up comfy instance cards): small ↗ icon next to the badge —
@@ -1597,7 +1703,8 @@ export class ArthurDashboardView extends ItemView {
 			&& this.expandedInstances.has(spec.instId);
 
 		// Lifecycle buttons (instance rows only) — up rows: Start/Stop/Restart;
-		// down rows: Start + Remove (forget the stopped instance from the agent).
+		// down rows: Start + Remove (forget the stopped instance from the agent);
+		// still-booting 'spawning…' rows: Start only — nothing is running yet.
 		// EXPANDED cards drop the inline buttons — the lifecycle set lives inside
 		// the detail panel instead, so the collapsed head stays clean.
 		if (spec.kind === "instance" && spec.svcId && spec.instId && !expanded) {
@@ -1923,7 +2030,7 @@ export class ArthurDashboardView extends ItemView {
 		btnStart.addClass("arthur-btn--tiny");
 		btnStart.addEventListener("click", () => op("start"));
 		const buttons: HTMLButtonElement[] = [btnStart];
-		if (spec.state !== "down") {
+		if (spec.state !== "down" && spec.state !== "spawning") {
 			const btnStop = newBtn("Stop");
 			btnStop.addClass("arthur-btn--tiny");
 			btnStop.addEventListener("click", () =>
@@ -2646,30 +2753,208 @@ export class ArthurDashboardView extends ItemView {
 
 	// ------------------------------------------------------------------
 	// service-level controls (service bar) + instance lifecycle (rows)
-	// — all funnel through run()/toast + pollNow(): never optimistic UI
+	// — start/spawn carry the ONLY optimistic surface (pending rows +
+	// boot-grace rendering); everything else funnels through run()/toast
+	// + pollNow().
 	// ------------------------------------------------------------------
 
-	/** Inactive service clicked — start the default instance. */
-	private async serviceStartAction(svc: AgentService): Promise<void> {
-		const name = svc.name ?? svc.id;
-		await run(this.pollers(), `start ${name}`, () =>
-			this.plugin.clients!.agent.serviceStart(svc.id),
-		);
+	/** The plugin started/spawned an instance — record the boot-grace stamp
+	 *  (id + port keys) so the up:false report during ComfyUI boot renders
+	 *  'spawning…' instead of 'down'. */
+	private recordPluginStart(inst: { id: string; port: number } | null | undefined): void {
+		if (!inst) return;
+		const now = Date.now();
+		if (inst.id) this.pluginStarts.set(`id:${inst.id}`, now);
+		if (inst.port) this.pluginStarts.set(`port:${inst.port}`, now);
 	}
 
-	/** Active service clicked — spawn a new instance. */
+	/** The plugin's own recent start/spawn stamp for one instance, or null. */
+	private pluginBootGrace(inst: AgentInstance): number | null {
+		const now = Date.now();
+		let best: number | null = null;
+		for (const k of [`id:${inst.id}`, inst.port != null ? `port:${inst.port}` : null]) {
+			if (!k) continue;
+			const ts = this.pluginStarts.get(k);
+			if (ts != null && now - ts <= SPAWN_TIMEOUT_MS && (best === null || ts > best)) {
+				best = ts;
+			}
+		}
+		return best;
+	}
+
+	/**
+	 * Insert an optimistic 'spawning…' grid row for a service-bar click —
+	 * SYNCHRONOUSLY (called before the request round-trip), then repaint the
+	 * grid so the click feedback is immediate. start mode inserts the service's
+	 * default instance placeholder; spawn mode a 'new instance' placeholder
+	 * (id spawning-<svc>-<seq>) carrying the dropdown's GPU selection.
+	 */
+	private beginSpawnPending(svc: AgentService, mode: "start" | "spawn", gpusIn: number[]): SpawnPending {
+		const now = Date.now();
+		const defaultInst = svc.instances[0] ?? null;
+		const p: SpawnPending =
+			mode === "start"
+				? {
+					k: `${svc.id}:start`,
+					svcId: svc.id,
+					mode,
+					title: defaultInst?.name ?? defaultInst?.id ?? svc.id,
+					gpus: [],
+					expectId: defaultInst?.id ?? `${svc.id}-0`,
+					expectPort: svc.default_port || defaultInst?.port || null,
+					createdAt: now,
+					failed: false,
+				}
+				: {
+					k: `spawning-${svc.id}-${++this.spawnSeq}`,
+					svcId: svc.id,
+					mode,
+					title: "new instance",
+					gpus: [...gpusIn].sort((a, b) => a - b),
+					expectId: null,
+					expectPort: null,
+					createdAt: now,
+					failed: false,
+				};
+		this.spawnPendings.set(p.k, p);
+		// The plugin caused this start — the default-port instance earns its
+		// boot grace even before the request response names the real id (spawn
+		// mode learns the port from the response, so nothing is stamped yet).
+		if (mode === "start" && svc.default_port) {
+			this.pluginStarts.set(`port:${svc.default_port}`, now);
+		}
+		this.renderInstances();
+		return p;
+	}
+
+	/**
+	 * Per-poll resolution of the optimistic spawn pendings: an /api/status
+	 * instance matching the pending's expected id (from the request response)
+	 * or expected port replaces it; after 45s without a match the pending
+	 * flips to the error state and the NEXT successful poll auto-dismisses it.
+	 * Also prunes stale boot-grace stamps.
+	 */
+	private tickSpawnPendings(): void {
+		const now = Date.now();
+		for (const [k, ts] of this.pluginStarts) {
+			if (now - ts > SPAWN_START_PRUNE_MS) this.pluginStarts.delete(k);
+		}
+		const status = this.agentDetail.status;
+		const ok = this.agentDetail.statusOk === true && status !== null;
+		for (const p of [...this.spawnPendings.values()]) {
+			if (ok) {
+				const svc = status!.services.find((s) => s.id === p.svcId);
+				const matched = svc?.instances.find(
+					(i) =>
+						(p.expectId != null && i.id === p.expectId) ||
+						(p.expectPort != null && i.port === p.expectPort),
+				);
+				if (matched) {
+					this.spawnPendings.delete(p.k);
+					this.recordPluginStart(matched);
+					continue;
+				}
+			}
+			if (!p.failed && now - p.createdAt > SPAWN_TIMEOUT_MS) p.failed = true;
+			else if (p.failed && ok) this.spawnPendings.delete(p.k); // auto-dismiss next successful poll
+		}
+	}
+
+	/** Per-service GPU dropdown data (multi-instance services only; null → the
+	 *  dropdown stays closed — single-instance services, agent unreachable). */
+	private svcGpuMenuData(svcId: string): GpuMenuData | null {
+		const status = this.agentDetail.status;
+		if (this.agentDetail.statusOk !== true || !status) return null;
+		const svc = status.services.find((s) => s.id === svcId);
+		if (!svc || !svc.multi_instance) return null;
+		const occupants = new Map<number, string[]>();
+		for (const inst of svc.instances) {
+			for (const g of inst.gpus?.length ? inst.gpus : inst.gpu != null ? [inst.gpu] : []) {
+				const list = occupants.get(g) ?? [];
+				if (!list.includes(inst.id)) list.push(inst.id);
+				occupants.set(g, list);
+			}
+		}
+		return {
+			gpus: this.gpuDetail.list.map((g) => ({
+				index: g.index,
+				name: g.name,
+				usedMb: g.mem_used_mb,
+				totalMb: g.mem_total_mb,
+				util: g.util_percent,
+			})),
+			occupants,
+		};
+	}
+
+	/** The persisted spawn GPU selection of a service (default: none). */
+	private gpuSelectionFor(svcId: string): number[] {
+		const sel = this.plugin.settings.spawnGpuSel?.[svcId];
+		return Array.isArray(sel) ? sel.filter((n) => Number.isInteger(n) && n >= 0) : [];
+	}
+
+	/** Persist a spawn GPU selection (empty set → back to the default). */
+	private setGpuSelection(svcId: string, gpus: number[]): void {
+		const settings = this.plugin.settings;
+		settings.spawnGpuSel ??= {};
+		const sorted = [...new Set(gpus.filter((n) => Number.isInteger(n) && n >= 0))].sort((a, b) => a - b);
+		if (sorted.length > 0) settings.spawnGpuSel[svcId] = sorted;
+		else delete settings.spawnGpuSel[svcId];
+		void this.plugin.saveSettings();
+	}
+
+	/** Inactive service clicked — start the default instance, with an
+	 *  optimistic 'spawning…' row until /api/status proves it landed. */
+	private async serviceStartAction(svc: AgentService): Promise<void> {
+		const agent = this.plugin.clients?.agent;
+		if (!agent) return;
+		const name = svc.name ?? svc.id;
+		const pending = this.beginSpawnPending(svc, "start", []);
+		try {
+			const res = await agent.serviceStart(svc.id);
+			// The response (when it carries the instance) sharpens the match
+			// targets and stamps the boot grace.
+			if (res.instance) {
+				if (res.instance.id) pending.expectId = res.instance.id;
+				if (res.instance.port) pending.expectPort = res.instance.port;
+				this.recordPluginStart(res.instance);
+			}
+			toastOk(`start ${name} — done`);
+		} catch (err) {
+			this.spawnPendings.delete(pending.k);
+			toastErr(`start ${name} — ${describeError(err)}`);
+		} finally {
+			this.renderInstances();
+			for (const p of this.pollers()) p.pollNow();
+		}
+	}
+
+	/** Active service clicked — spawn a new instance with the dropdown's GPU
+	 *  selection (empty selection = no body → agent modulo rotation), with an
+	 *  optimistic 'spawning…' row until /api/status lists the new instance. */
 	private async serviceSpawnAction(svc: AgentService): Promise<void> {
 		const agent = this.plugin.clients?.agent;
 		if (!agent) return;
 		const name = svc.name ?? svc.id;
+		const sel = [...this.gpuSelectionFor(svc.id)].sort((a, b) => a - b);
+		const selected = sel.length > 0 ? sel : undefined;
+		const pending = this.beginSpawnPending(svc, "spawn", sel);
 		try {
-			const res = await agent.serviceSpawn(svc.id);
-			toastOk(`Spawned ${name} instance on port ${res.instance?.port ?? "?"}`);
+			const res = await agent.serviceSpawn(svc.id, selected);
+			if (res.instance) {
+				if (res.instance.id) pending.expectId = res.instance.id;
+				if (res.instance.port) pending.expectPort = res.instance.port;
+				this.recordPluginStart(res.instance);
+			}
+			toastOk(
+				`Spawned ${name} instance on port ${res.instance?.port ?? "?"}`
+					+ (selected ? ` · GPU ${selected.join(", ")}` : ""),
+			);
 		} catch (err) {
-			// 409 single-instance service / max instances reached — surface the
-			// agent's verbatim message; never crash on it.
+			this.spawnPendings.delete(pending.k);
 			toastErr(`spawn ${name} — ${describeError(err)}`);
 		} finally {
+			this.renderInstances();
 			for (const p of this.pollers()) p.pollNow();
 		}
 	}

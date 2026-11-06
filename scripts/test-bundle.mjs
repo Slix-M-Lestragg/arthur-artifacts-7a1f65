@@ -706,7 +706,7 @@ try {
 
 	const jsonBody = (status, body) => ({ status, body });
 	const agentStatusBody = {
-		version: "0.5.4",
+		version: "0.6.0",
 		host_uptime: 123456.7,
 		services: [
 			{
@@ -730,7 +730,7 @@ try {
 	// Default handler: agent handshake + status answer; everything else offline.
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.4" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.6.0" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/comfyui/start")) {
 			return jsonBody(200, { action: "start", result: "started", service: agentStatusBody.services[0] });
@@ -795,7 +795,7 @@ try {
 	StubNotice.reset();
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.4" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.6.0" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/comfyui/instances")) {
 			return jsonBody(201, {
@@ -815,7 +815,7 @@ try {
 	StubNotice.reset();
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.4" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.6.0" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/aitoolkit/instances")) {
 			return jsonBody(409, { error: "single-instance service" });
@@ -838,7 +838,7 @@ try {
 	calls9 = [];
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.4" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.6.0" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/stop")) {
 			return opts.url.includes("force=1")
@@ -940,7 +940,7 @@ try {
 	];
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.4" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.6.0" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/instances/") && opts.url.endsWith("/start")) {
 			return jsonBody(200, { action: "start", result: "started", instance: { id: "comfy-2", up: true, port: 8190 } });
@@ -999,7 +999,7 @@ try {
 	calls9 = [];
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.4" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.6.0" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/instances/") && opts.url.endsWith("/forget")) {
 			return jsonBody(409, { error: "instance is running" });
@@ -1027,7 +1027,7 @@ try {
 		.filter((i) => i.id !== "comfy-2");
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.5.4" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.6.0" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/instances/") && opts.url.endsWith("/forget")) {
 			return jsonBody(200, { action: "forget", result: "forgotten", id: "comfy-2" });
@@ -1125,7 +1125,7 @@ try {
 	const json14 = (status, body) => ({ status, body });
 	const calls14 = [];
 	const gridStatusBody = {
-		version: "0.5.4",
+		version: "0.6.0",
 		host_uptime: 123456.7,
 		services: [
 			{
@@ -1159,7 +1159,7 @@ try {
 	const comfyStats = { system: {}, devices: [{ name: "cuda", type: "cuda", vram_total: 12 * 1024 * 1024, vram_free: 4 * 1024 * 1024 }] };
 	httpResponder = (opts) => {
 		calls14.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return json14(200, { ok: true, version: "0.5.4" });
+		if (opts.url.endsWith("/health")) return json14(200, { ok: true, version: "0.6.0" });
 		if (opts.url.endsWith("/api/status")) return json14(200, gridStatusBody);
 		if (opts.url.endsWith("/api/gpus")) return json14(200, gpusBody);
 		if (opts.url.endsWith("/api/jobs")) return json14(200, aiJobsBody);
@@ -1530,7 +1530,7 @@ try {
 	const json16 = (status, body) => ({ status, body });
 	// Agent status where NO comfy instance is alive (empty instance list).
 	const emptyStatus16 = {
-		version: "0.5.4",
+		version: "0.6.0",
 		host_uptime: 1,
 		services: [
 			{ id: "comfyui", name: "ComfyUI", active: true, multi_instance: true, max_instances: 4, default_port: 8188, unit_template: "comfy@{i}", instances: [] },
@@ -1597,7 +1597,7 @@ try {
 	// (b) agent UP but zero comfy instances + /api/queue broken (500):
 	// job cards must NOT disappear — only the queue toggles are lost
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.5.4" });
+		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.6.0" });
 		if (opts.url.endsWith("/api/status")) return json16(200, emptyStatus16);
 		if (opts.url.endsWith("/api/jobs")) return json16(200, aiJobs16);
 		if (opts.url.endsWith("/api/queue")) return json16(500, { error: "queue endpoint broken" });
@@ -1622,7 +1622,7 @@ try {
 	// (c) /api/jobs broken (500) with zero everything: NO cards + inline error
 	// state — never a fake 'no jobs' note
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.5.4" });
+		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.6.0" });
 		if (opts.url.endsWith("/api/status")) return json16(200, emptyStatus16);
 		if (opts.url.endsWith("/api/jobs")) return json16(500, { error: "jobs endpoint broken" });
 		if (opts.url.endsWith("/api/queue")) return json16(200, { queues: [] });
@@ -1645,7 +1645,7 @@ try {
 
 	// (d) every source answers + zero jobs anywhere → the clear note shows
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.5.4" });
+		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.6.0" });
 		if (opts.url.endsWith("/api/status")) return json16(200, emptyStatus16);
 		if (opts.url.endsWith("/api/jobs")) return json16(200, { jobs: [] });
 		if (opts.url.endsWith("/api/queue")) return json16(200, { queues: [] });
@@ -1681,7 +1681,7 @@ try {
 
 	const json17 = (status, body) => ({ status, body });
 	const status17 = {
-		version: "0.5.4",
+		version: "0.6.0",
 		host_uptime: 1,
 		services: [
 			{
@@ -1911,12 +1911,12 @@ try {
 	// (e) AGENT_VERSION 0.5.4 accepted, mismatch banner logic intact
 	await view17.refreshData();
 	assert(view17.bannerEl._shown !== true, "agent v0.5.4 accepted — no version-mismatch line, banner hidden");
-	status17.version = "0.6.0";
+	status17.version = "0.5.4";
 	await view17.refreshData();
 	assert(view17.bannerEl._shown === true
-		&& allText(view17.bannerEl).includes("agent version mismatch: server 0.6.0, expected 0.5.4"),
-		"older/newer server versions still trigger the mismatch banner (expected 0.5.4)");
-	status17.version = "0.5.4";
+		&& allText(view17.bannerEl).includes("agent version mismatch: server 0.5.4, expected 0.6.0"),
+		"older/newer server versions still trigger the mismatch banner (expected 0.6.0)");
+	status17.version = "0.6.0";
 
 	httpResponder = null;
 	StubNotice.reset();
@@ -1935,7 +1935,7 @@ try {
 		port, gpu, gpus: gpu != null ? [gpu] : [], up, uptime: up ? 100.0 : null,
 	});
 	const status18 = {
-		version: "0.5.4",
+		version: "0.6.0",
 		host_uptime: 1,
 		services: [
 			{
@@ -1951,7 +1951,7 @@ try {
 		],
 	};
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json18(200, { ok: true, version: "0.5.4" });
+		if (opts.url.endsWith("/health")) return json18(200, { ok: true, version: "0.6.0" });
 		if (opts.url.endsWith("/api/status")) return json18(200, status18);
 		if (opts.url.endsWith("/api/gpus")) return json18(200, { gpus: [
 			{ index: 0, name: "NVIDIA GeForce RTX 3060", mem_total_mb: 12288, mem_used_mb: 1000, util_percent: 0, temp_c: 35 },
@@ -2080,6 +2080,262 @@ try {
 	assert(conn19.currentState === "closed", "close() cancels the capped backoff timer");
 	globalThis.WebSocket = realWs19;
 
+	// ---- 20. optimistic spawning state + hover GPU dropdown on service buttons
+	console.log("== 20. optimistic spawning + GPU-select dropdown ==");
+	plugin.settings.profiles[0].comfyPorts = "8188,8189";
+	await plugin.saveSettings();
+	await sleep(700);
+	plugin.settings.spawnGpuSel = {}; // clean slate for the dropdown tests
+
+	const json20 = (status, body) => ({ status, body });
+	const gpuLine20 = (index, used, util) => ({
+		index, name: "NVIDIA GeForce RTX 3060", mem_total_mb: 12288,
+		mem_used_mb: used, util_percent: util, temp_c: 40,
+	});
+	const inst20 = (id, port, gpu, up) => ({
+		id, service: "comfyui", name: `ComfyUI #${id.slice(-1)}`,
+		port, gpu, gpus: gpu != null ? [gpu] : [], up, uptime: up ? 100.0 : null,
+	});
+	const status20 = {
+		version: "0.6.0",
+		host_uptime: 1,
+		services: [
+			{
+				id: "comfyui", name: "ComfyUI", active: true, multi_instance: true,
+				max_instances: 4, default_port: 8188, unit_template: "comfy@{i}",
+				instances: [inst20("comfy-0", 8188, 0, true)],
+			},
+			{
+				id: "aitoolkit", name: "AI Toolkit", active: true, multi_instance: false,
+				max_instances: 1, default_port: 8675, unit: "ai-toolkit.service",
+				instances: [{ id: "aitoolkit", service: "aitoolkit", name: "AI Toolkit", port: 8675, gpu: null, gpus: [], up: true, uptime: 10.0 }],
+			},
+		],
+	};
+	const gpus20 = { gpus: [gpuLine20(0, 9420, 36), gpuLine20(1, 1000, 4)], count: 2 };
+	const spawnCalls20 = [];
+	httpResponder = (opts) => {
+		if (opts.method === "POST" && opts.url.endsWith("/api/services/comfyui/instances")) {
+			spawnCalls20.push({ body: opts.body ?? null });
+			return json20(201, {
+				action: "spawn", result: "spawned",
+				instance: { id: "comfy-2", service: "comfyui", name: "ComfyUI #2", port: 8189, gpu: 1, gpus: [1], up: false, uptime: null, unit: "comfy@2" },
+			});
+		}
+		if (opts.method === "POST" && opts.url.endsWith("/api/services/comfyui/start")) {
+			return json20(200, { action: "start", result: "started", instance: { id: "comfy-0", service: "comfyui", port: 8188, up: false } });
+		}
+		if (opts.url.endsWith("/health")) return json20(200, { ok: true, version: "0.6.0" });
+		if (opts.url.endsWith("/api/status")) return json20(200, status20);
+		if (opts.url.endsWith("/api/gpus")) return json20(200, gpus20);
+		if (opts.url.endsWith("/api/jobs")) return json20(200, { jobs: [] });
+		if (opts.url.endsWith("/api/queue")) return json20(200, { queues: [] });
+		for (const port of [8188, 8189]) {
+			if (opts.url.startsWith(`http://10.0.0.9:${port}/`)) {
+				return opts.url.endsWith("/system_stats")
+					? json20(200, { system: {}, devices: [{ name: "cuda", type: "cuda", vram_total: 12 * 1024 * 1024, vram_free: 4 * 1024 * 1024 }] })
+					: json20(200, { queue_running: [], queue_pending: [] });
+			}
+		}
+		return null;
+	};
+	app.workspace.detachLeavesOfType("arthur-dashboard");
+	let view20;
+	ok = true;
+	try {
+		await plugin.activateView();
+		view20 = app.workspace.getLeavesOfType("arthur-dashboard")[0]?.view;
+		await view20.refreshData();
+	} catch (err) {
+		ok = false;
+		console.error(`    view20 attach threw: ${err?.stack ?? err}`);
+	}
+	assert(ok, "view20 attach + refresh did not throw");
+	const rows20 = () => view20.gridEl.children.filter((c) => c.hasClass?.("arthur-grid-row"));
+	const rowByKey20 = (key) => rows20().find((r) => r.attributes.get("data-row-key") === key) ?? null;
+	const pendRows20 = () => rows20().filter((r) => r.hasClass("arthur-grid-row--spawning") || r.hasClass("arthur-grid-row--failed"));
+	const clickSpawn20 = async () => {
+		StubNotice.reset();
+		view20.serviceBar.buttons.get("comfyui").btn.handlers.get("click")[0]?.();
+		await sleep(30);
+	};
+
+	// (a) service-start click inserts the optimistic 'spawning…' row
+	// SYNCHRONOUSLY (no await between click and read).
+	{
+		status20.services[0].active = false;
+		await view20.refreshData();
+		StubNotice.reset();
+		view20.serviceBar.buttons.get("comfyui").btn.handlers.get("click")[0]?.();
+		const pendNow = pendRows20()[0] ?? null;
+		assert(!!pendNow, "service-start click inserts the optimistic 'spawning…' row synchronously");
+		assert((pendNow?.attributes.get("data-row-key") ?? "").startsWith("pending:comfyui:start"),
+			"the start pending is keyed as the service's default-instance placeholder");
+		assert((pendNow?.textContent ?? "").includes("spawning…"), "the pending row carries the 'spawning…' badge");
+		assert((pendNow?.textContent ?? "").includes(":8188"), "the start pending row shows the default port");
+		await sleep(50);
+		assert(view20.spawnPendings.size === 0, "the start pending resolved once /api/status matched the default instance");
+		assert(StubNotice.shown.some((m) => m.includes("start ComfyUI — done")), "start click toasts the result");
+	}
+
+	// (c) boot grace: a recently plugin-started instance reporting up:false
+	// renders 'spawning…' — NOT 'down' (the perceived 'started as down' bug).
+	{
+		status20.services[0].active = true;
+		status20.services[0].instances = [inst20("comfy-0", 8188, 0, false)];
+		await view20.refreshData();
+		const rowC = rowByKey20("inst:comfy-0");
+		assert(!!rowC && rowC.hasClass("arthur-grid-row--spawning") && !rowC.hasClass("arthur-grid-row--down"),
+			"recently-started instance with up:false renders 'spawning…' (boot grace)");
+		assert((rowC?.textContent ?? "").includes("spawning…"), "boot-grace row carries the 'spawning…' badge");
+		// past the 45s grace window → back to the alarmist 'down' state
+		view20.pluginStarts.set("id:comfy-0", Date.now() - 46_000);
+		view20.pluginStarts.set("port:8188", Date.now() - 46_000);
+		await view20.refreshData();
+		const rowCold = rowByKey20("inst:comfy-0");
+		assert(!!rowCold && rowCold.hasClass("arthur-grid-row--down") && !rowCold.hasClass("arthur-grid-row--spawning"),
+			"older-than-45s down rows still render 'down'");
+		assert((rowCold?.textContent ?? "").includes("down"), "stale down row keeps the 'down' badge");
+	}
+
+	// (b) spawn click: optimistic row inserted immediately, replaced by the
+	// real instance row as soon as /api/status lists it.
+	{
+		await clickSpawn20();
+		const pendNow = pendRows20()[0] ?? null;
+		assert(!!pendNow, "spawn click inserts the optimistic row synchronously");
+		assert((pendNow?.attributes.get("data-row-key") ?? "").startsWith("pending:spawning-comfyui-"),
+			"spawn pending uses the spawning-<svc>-<seq> placeholder key");
+		assert((pendNow?.textContent ?? "").includes("new instance"), "spawn pending row shows 'new instance' (port unknown yet)");
+		// spawn pending carries no body with the default (empty) selection
+		assert(spawnCalls20[0] != null && spawnCalls20[0].body === null,
+			"default selection spawns with NO body (agent modulo rotation)");
+		assert(StubNotice.shown.some((m) => m.includes("Spawned ComfyUI instance on port 8189")),
+			"spawn success toasts the instance port (no GPU suffix on default)");
+		// status lists the new instance (still booting, up:false) → the pending
+		// row is replaced by the real instance row (boot grace 'spawning…').
+		status20.services[0].instances = [
+			inst20("comfy-0", 8188, 0, false),
+			{ id: "comfy-2", service: "comfyui", name: "ComfyUI #2", port: 8189, gpu: 1, gpus: [1], up: false, uptime: null, unit: "comfy@2" },
+		];
+		await view20.refreshData();
+		assert(view20.spawnPendings.size === 0, "the spawn pending resolved against /api/status");
+		const rowB = rowByKey20("inst:comfy-2");
+		assert(!!rowB && rowB.hasClass("arthur-grid-row--spawning") && !rowB.hasClass("arthur-grid-row--down"),
+			"the optimistic row was replaced by the real (booting) instance row");
+		status20.services[0].instances[1].up = true;
+		await view20.refreshData();
+		assert(rowByKey20("inst:comfy-2").hasClass("arthur-grid-row--idle"), "booted instance renders its normal row state");
+	}
+
+	// (d) 45s optimistic timeout → error state → auto-dismiss next poll.
+	{
+		status20.services[0].instances = [inst20("comfy-0", 8188, 0, false)]; // spawn's comfy-2 gone from status
+		await clickSpawn20();
+		assert(pendRows20().length === 1, "unmatched spawn keeps the pending row");
+		for (const p of view20.spawnPendings.values()) p.createdAt = Date.now() - 46_000; // fast-forward the 45s window
+		await view20.refreshData();
+		const failRow = pendRows20().find((r) => r.hasClass("arthur-grid-row--failed"));
+		assert(!!failRow, "no match within 45s flips the optimistic row to the error state");
+		assert((failRow?.textContent ?? "").includes("spawn did not come up — check server"),
+			"the error row carries the check-server guidance text");
+		await view20.refreshData();
+		assert(view20.spawnPendings.size === 0 && pendRows20().length === 0,
+			"the timeout error row auto-dismisses at the next successful poll");
+	}
+
+	// (e) hover GPU dropdown: opens on hover, lists GPUs with stats +
+	// occupants, drives the spawn body, persists per service in settings.
+	{
+		status20.services[0].instances = [inst20("comfy-0", 8188, 0, true)];
+		await view20.refreshData();
+		const sb20 = view20.serviceBar.buttons.get("comfyui");
+		assert(!!sb20?.wrap && sb20.wrap.hasClass("arthur-svc-wrap"), "service button sits in a hover wrapper");
+		sb20.wrap.handlers.get("mouseenter")[0]?.();
+		const menu20 = sb20.menu;
+		assert(!!menu20 && menu20.hasClass("arthur-svc-menu--open"), "hover opens the GPU dropdown");
+		const gpuRows20 = () => findByClass(menu20, "arthur-gpu-opt");
+		const modeText20 = gpuRows20().map((r) => r.textContent).join(" | ");
+		assert(modeText20.includes("Single GPU") && modeText20.includes("Multi-GPUs"),
+			"dropdown opens with the Single GPU / Multi-GPUs mode checkboxes");
+		const gpu0Row20 = gpuRows20().find((r) => (r.textContent ?? "").includes("GPU 0"));
+		assert(gpu0Row20 != null && gpu0Row20.textContent.includes("GPU 0 — RTX 3060 · 9.2G/12G · 36%"),
+			"GPU line lists the GPU with name + VRAM + utilization stats");
+		assert((gpu0Row20?.textContent ?? "").includes("(comfy-0)"), "GPU line carries the occupant suffix '(comfy-0)'");
+		// mouse-leave closes the menu
+		sb20.wrap.handlers.get("mouseleave")[0]?.();
+		assert(menu20.hasClass("arthur-svc-menu--open") === false, "mouse-leave closes the dropdown");
+
+		// single-GPU check → spawn body {"gpus":[1]}
+		sb20.wrap.handlers.get("mouseenter")[0]?.();
+		gpuRows20().find((r) => (r.textContent ?? "").includes("GPU 1")).handlers.get("click")[0]?.();
+		assert((plugin.settings.spawnGpuSel?.comfyui ?? []).join(",") === "1", "checking one GPU persists the selection in settings");
+		assert(plugin._data?.spawnGpuSel?.comfyui?.join(",") === "1", "selection persisted through saveData");
+		await plugin.loadSettings();
+		assert((plugin.settings.spawnGpuSel?.comfyui ?? []).join(",") === "1", "selection survives loadData (settings reload)");
+		assert(gpuRows20().filter((r) => /GPU \d —/.test(r.textContent ?? ""))
+			.filter((r) => findByClass(r, "arthur-gpu-check--checked").length > 0).length === 1,
+			"the checked GPU line shows its check mark (and only that one)");
+		StubNotice.reset();
+		spawnCalls20.length = 0;
+		view20.serviceBar.buttons.get("comfyui").btn.handlers.get("click")[0]?.();
+		await sleep(30);
+		{
+			const call = spawnCalls20[0];
+			assert(call != null && JSON.stringify(call.body === null ? {} : JSON.parse(call.body)) === '{"gpus":[1]}',
+				`single-GPU selection spawns with body {"gpus":[1]} (got ${JSON.stringify(call?.body)})`);
+			assert(StubNotice.shown.some((m) => m.includes("GPU 1")), "spawn toast reports the placed GPUs");
+		}
+
+		// a second check auto-switches to the multi-GPU mode
+		sb20.wrap.handlers.get("mouseenter")[0]?.();
+		gpuRows20().find((r) => (r.textContent ?? "").includes("GPU 0")).handlers.get("click")[0]?.();
+		assert((plugin.settings.spawnGpuSel?.comfyui ?? []).join(",") === "0,1", "two checked GPUs persist the multi-GPU set");
+		{
+			const multiRow = gpuRows20().find((r) => (r.textContent ?? "").includes("Multi-GPUs"));
+			assert(multiRow != null && multiRow.getAttribute("aria-checked") === "true",
+				"checking ≥2 GPUs switches the mode row to Multi-GPUs automatically");
+		}
+		await clickSpawn20();
+		{
+			const call = spawnCalls20[spawnCalls20.length - 1];
+			assert(call != null && JSON.stringify(JSON.parse(call.body)) === '{"gpus":[0,1]}',
+				`multi-GPU selection spawns with body {"gpus":[0,1]} (got ${JSON.stringify(call?.body)})`);
+		}
+
+		// unchecking all restores the default no-body spawn
+		sb20.wrap.handlers.get("mouseenter")[0]?.();
+		gpuRows20().find((r) => (r.textContent ?? "").includes("GPU 0")).handlers.get("click")[0]?.();
+		gpuRows20().find((r) => (r.textContent ?? "").includes("GPU 1")).handlers.get("click")[0]?.();
+		assert(plugin.settings.spawnGpuSel?.comfyui === undefined
+			&& plugin._data?.spawnGpuSel?.comfyui === undefined,
+			"unchecking all GPUs clears the persisted selection (back to default)");
+		{
+			const singleRow = gpuRows20().find((r) => (r.textContent ?? "").includes("Single GPU"));
+			assert(singleRow != null && singleRow.getAttribute("aria-checked") === "true",
+				"unchecking all returns the mode row to 'Single GPU' (default)");
+		}
+		await clickSpawn20();
+		{
+			const call = spawnCalls20[spawnCalls20.length - 1];
+			assert(call != null && call.body === null,
+				"unchecking restores the default no-body spawn");
+		}
+	}
+
+	// (f) single-instance services get NO dropdown.
+	{
+		const sbAi20 = view20.serviceBar.buttons.get("aitoolkit");
+		sbAi20.wrap.handlers.get("mouseenter")[0]?.();
+		assert(sbAi20?.menu == null, "single-instance service has NO GPU dropdown");
+		assert(view20.svcGpuMenuData("aitoolkit") === null, "the dropdown data gate rejects single-instance services");
+	}
+
+	view20.pluginStarts.clear();
+	httpResponder = null;
+	StubNotice.reset();
+	await app.workspace.detachLeavesOfType("arthur-dashboard");
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();
@@ -2095,4 +2351,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.5.4-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove / pure-job-list-queue / collapsible-section-titles / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.6.0-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove / pure-job-list-queue / collapsible-section-titles / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown all clean");

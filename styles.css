@@ -128,6 +128,87 @@
 	background: var(--background-modifier-error-hover);
 }
 
+/* hover wrapper: the relative anchor the GPU dropdown hangs off */
+.arthur-svc-wrap {
+	position: relative;
+	display: inline-flex;
+}
+
+/* compact GPU dropdown under a multi-instance service button: opens on hover
+   (JS mouseenter/mouseleave — robust in Obsidian's DOM), closed by default */
+.arthur-svc-menu {
+	position: absolute;
+	top: calc(100% + 6px);
+	left: 0;
+	z-index: 100;
+	min-width: 15em;
+	max-width: 24em;
+	display: none;
+	flex-direction: column;
+	gap: 1px;
+	padding: 0.35em;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m, 10px);
+	box-shadow: var(--shadow-s);
+}
+
+.arthur-svc-menu--open {
+	display: flex;
+}
+
+/* one dropdown row: custom check glyph + label */
+.arthur-gpu-opt {
+	display: flex;
+	align-items: center;
+	gap: 0.45em;
+	padding: 0.2em 0.4em;
+	border-radius: var(--radius-s);
+	cursor: pointer;
+	font-size: var(--font-ui-small);
+	white-space: nowrap;
+}
+
+.arthur-gpu-opt:hover {
+	background: var(--background-modifier-hover);
+}
+
+.arthur-gpu-check {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 0.95em;
+	height: 0.95em;
+	flex: none;
+	border: 1px solid var(--background-modifier-border-hover);
+	border-radius: 3px;
+	font-size: 0.85em;
+	color: transparent;
+}
+
+.arthur-gpu-check--checked {
+	background: var(--interactive-accent);
+	border-color: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
+.arthur-gpu-text {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	font-variant-numeric: tabular-nums;
+}
+
+.arthur-svc-menu-sep {
+	border-top: 1px solid var(--background-modifier-border);
+	margin: 0.25em 0;
+}
+
+.arthur-svc-menu-note {
+	font-size: var(--font-ui-smaller);
+	opacity: 0.8;
+	padding: 0.2em 0.4em;
+}
+
 /* ---------------------------------------------------------------- top bar */
 
 .arthur-dashboard {
@@ -797,4 +878,39 @@
 .arthur-badge--idle {
 	opacity: 0.75;
 	background: var(--background-modifier-border);
+}
+
+/* OPTIMISTIC SPAWN STATE: still-booting or pending instance rows — muted,
+   pulsing card + soft accent badge; timeout → dashed red error variant */
+.arthur-grid-row--spawning {
+	animation: arthur-spawn-pulse 1.6s ease-in-out infinite;
+}
+
+.arthur-grid-row--spawning .arthur-dot {
+	animation: arthur-spawn-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes arthur-spawn-pulse {
+	0%,
+	100% {
+		opacity: 0.8;
+	}
+	50% {
+		opacity: 0.45;
+	}
+}
+
+.arthur-badge--spawning {
+	color: var(--text-muted);
+	background: color-mix(in srgb, var(--interactive-accent) 14%, var(--background-modifier-border));
+}
+
+.arthur-grid-row--failed {
+	border-style: dashed;
+	border-color: color-mix(in srgb, var(--text-error) 60%, var(--background-modifier-border));
+}
+
+.arthur-badge--failed {
+	color: var(--text-on-accent);
+	background: color-mix(in srgb, var(--text-error) 70%, var(--background-modifier-border));
 }

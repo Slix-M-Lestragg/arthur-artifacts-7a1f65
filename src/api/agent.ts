@@ -117,8 +117,11 @@ export interface AgentActionResult {
 	service?: AgentService;
 }
 
-/** Agent version this plugin build was written against — mismatch → banner. */
-export const AGENT_VERSION = "0.5.4";
+/** Agent version this plugin build was written against — mismatch → banner.
+ *  0.6.0: POST /api/services/{svc}/instances accepts an optional JSON body
+ *  {"gpus": [n, …]} to pin the new instance to specific GPU(s) (no body = the
+ *  modulo rotation, as before). */
+export const AGENT_VERSION = "0.6.0";
 
 /** GET /health — unauthenticated {ok:true, version}; distinguishes "agent down" from "bad token". */
 export interface AgentHealth {
@@ -155,6 +158,7 @@ export class ArthurAgentClient {
 		path: string,
 		method: "GET" | "POST" = "GET",
 		params?: Record<string, string | number | undefined>,
+		body?: object,
 	): Promise<T> {
 		let resp;
 		try {
@@ -162,6 +166,7 @@ export class ArthurAgentClient {
 				url: this.url(path, params),
 				method,
 				headers: this.token ? { Authorization: `Bearer ${this.token}` } : {},
+				body,
 			});
 		} catch (err) {
 			// Transport-level failures never carry a URL of their own — tag the
@@ -231,11 +236,16 @@ export class ArthurAgentClient {
 	/**
 	 * POST /api/services/{svc}/instances — spawn a new instance (multi-instance
 	 * services only; single-instance/max-reached → 409).
+	 * Agent v0.6.0: `gpus` pins the new instance to specific GPU(s) as the JSON
+	 * body {"gpus": [n, …]} (invalid sets → 400). Omitted/empty → the agent's
+	 * modulo GPU rotation, as before.
 	 */
-	async serviceSpawn(svc: string): Promise<AgentSpawnResult> {
+	async serviceSpawn(svc: string, gpus?: number[]): Promise<AgentSpawnResult> {
 		return this.call<AgentSpawnResult>(
 			`/api/services/${encodeURIComponent(svc)}/instances`,
 			"POST",
+			undefined,
+			gpus && gpus.length > 0 ? { gpus } : undefined,
 		);
 	}
 
