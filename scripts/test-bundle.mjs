@@ -346,6 +346,7 @@ function assert(cond, label) {
 let calls9 = [];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const MENU_CLOSE_DELAY_MS = 300;
 
 /** Deep text dump of a stub element tree. */
 function allText(node) {
@@ -2262,9 +2263,13 @@ try {
 		assert(gpu0Row20 != null && gpu0Row20.textContent.includes("GPU 0 — RTX 3060 · 9.2G/12G · 36%"),
 			"GPU line lists the GPU with name + VRAM + utilization stats");
 		assert((gpu0Row20?.textContent ?? "").includes("(comfy-0)"), "GPU line carries the occupant suffix '(comfy-0)'");
-		// mouse-leave closes the menu
+		// mouse-leave does NOT close instantly anymore (hover intent): the
+		// dropdown survives the leave and closes only after the ~300ms delay.
 		sb20.wrap.handlers.get("mouseleave")[0]?.();
-		assert(menu20.hasClass("arthur-svc-menu--open") === false, "mouse-leave closes the dropdown");
+		assert(menu20.hasClass("arthur-svc-menu--open") === true,
+			"mouse-leave keeps the dropdown open (hover-intent delay, not instant)");
+		await sleep(MENU_CLOSE_DELAY_MS + 80);
+		assert(menu20.hasClass("arthur-svc-menu--open") === false, "mouse-leave closes the dropdown after the intent delay");
 
 		// single-GPU check → spawn body {"gpus":[1]}
 		sb20.wrap.handlers.get("mouseenter")[0]?.();
@@ -2331,6 +2336,88 @@ try {
 		assert(view20.svcGpuMenuData("aitoolkit") === null, "the dropdown data gate rejects single-instance services");
 	}
 
+	// (g) hover-intent persistence — the v0.8.0 device bug (the dropdown hid
+	// the moment the mouse left the button, so the checkboxes were unreachable):
+	// open/leave/enter-transit semantics + in-dropdown clicks + exclusivity +
+	// main-button click still spawning while the dropdown is open.
+	{
+		// a second multi-instance service for the exclusivity check
+		status20.services.splice(1, 0, {
+			id: "sdnext", name: "SD.Next", active: true, multi_instance: true,
+			max_instances: 2, default_port: 7860, unit_template: "sd@{i}",
+			instances: [{ id: "sd-0", service: "sdnext", name: "SD.Next #0", port: 7860, gpu: 0, gpus: [0], up: true, uptime: 5.0, unit: "sd@0" }],
+		});
+		const spawnB20 = [];
+		const prevResponder = httpResponder;
+		httpResponder = (opts) => {
+			if (opts.method === "POST" && opts.url.endsWith("/api/services/sdnext/instances")) {
+				spawnB20.push({ body: opts.body ?? null });
+				return json20(201, {
+					action: "spawn", result: "spawned",
+					instance: { id: "sd-1", service: "sdnext", name: "SD.Next #1", port: 7861, gpu: 1, gpus: [1], up: false, uptime: null, unit: "sd@1" },
+				});
+			}
+			return prevResponder(opts);
+		};
+		await view20.refreshData();
+		const sbA = view20.serviceBar.buttons.get("comfyui");
+		const sbB = view20.serviceBar.buttons.get("sdnext");
+		assert(!!sbA && !!sbB, "both multi-instance service buttons exist");
+
+		// (a) mouseenter of the button → dropdown open.
+		sbA.wrap.handlers.get("mouseenter")[0]?.();
+		assert(sbA.menu?.hasClass("arthur-svc-menu--open") === true, "(a) mouseenter opens the service A dropdown");
+
+		// (b) mouseleave of the button → still open immediately, closed only
+		// after the intent delay (~300ms).
+		sbA.wrap.handlers.get("mouseleave")[0]?.();
+		assert(sbA.menu.hasClass("arthur-svc-menu--open") === true, "(b) leaving the button does NOT close the dropdown instantly");
+		await sleep(MENU_CLOSE_DELAY_MS + 80);
+		assert(sbA.menu.hasClass("arthur-svc-menu--open") === false, "(b) the dropdown closes after the intent delay");
+
+		// (c) entering the dropdown DURING the delay cancels the close.
+		sbA.wrap.handlers.get("mouseenter")[0]?.();
+		assert(sbA.menu.hasClass("arthur-svc-menu--open"), "(c) re-entering the button reopens the dropdown");
+		sbA.wrap.handlers.get("mouseleave")[0]?.();
+		sbA.menu.handlers.get("mouseenter")[0]?.(); // transit into the dropdown within the delay
+		await sleep(MENU_CLOSE_DELAY_MS + 80);
+		assert(sbA.menu.hasClass("arthur-svc-menu--open") === true, "(c) entering the dropdown within the delay cancels the pending close");
+
+		// (d) leaving the dropdown → closes after the delay (not instantly).
+		sbA.menu.handlers.get("mouseleave")[0]?.();
+		assert(sbA.menu.hasClass("arthur-svc-menu--open") === true, "(d) leaving the dropdown does NOT close it instantly");
+		await sleep(MENU_CLOSE_DELAY_MS + 80);
+		assert(sbA.menu.hasClass("arthur-svc-menu--open") === false, "(d) leaving the dropdown closes it after the intent delay");
+
+		// (e) clicking a checkbox INSIDE the dropdown never closes it (and the
+		// selection still flips + persists).
+		sbA.wrap.handlers.get("mouseenter")[0]?.();
+		const gpuRowA = findByClass(sbA.menu, "arthur-gpu-opt").find((r) => (r.textContent ?? "").includes("GPU 1"));
+		gpuRowA.handlers.get("click")[0]?.();
+		assert(sbA.menu.hasClass("arthur-svc-menu--open") === true, "(e) clicking a checkbox inside keeps the dropdown open");
+		assert((plugin.settings.spawnGpuSel?.comfyui ?? []).join(",") === "1", "(e) the checkbox click still flips the persisted selection");
+		// restore the default selection so later suites see a clean state
+		findByClass(sbA.menu, "arthur-gpu-opt").find((r) => (r.textContent ?? "").includes("GPU 1")).handlers.get("click")[0]?.();
+		assert(plugin.settings.spawnGpuSel?.comfyui === undefined, "(e) selection restored to default");
+
+		// (f) opening service B's dropdown closes service A's IMMEDIATELY
+		// (no delay) — at most one dropdown open at a time.
+		assert(sbA.menu.hasClass("arthur-svc-menu--open"), "(f) A's dropdown is open before the exclusivity check");
+		sbB.wrap.handlers.get("mouseenter")[0]?.();
+		assert(sbA.menu.hasClass("arthur-svc-menu--open") === false, "(f) opening B's dropdown closes A's immediately (no delay)");
+		assert(sbB.menu?.hasClass("arthur-svc-menu--open") === true, "(f) service B's dropdown is open");
+
+		// (g) clicking the main button still fires the spawn while the
+		// dropdown is open (the dropdown is purely hover).
+		const spawnCallsBefore = spawnB20.length;
+		sbB.btn.handlers.get("click")[0]?.();
+		await sleep(30);
+		assert(spawnB20.length === spawnCallsBefore + 1, "(g) main-button click still fires the spawn while the dropdown is open");
+		assert(sbB.menu.hasClass("arthur-svc-menu--open") === true, "(g) the dropdown stays open across the main-button spawn click");
+
+		httpResponder = prevResponder;
+	}
+
 	view20.pluginStarts.clear();
 	httpResponder = null;
 	StubNotice.reset();
@@ -2351,4 +2438,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.6.0-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove / pure-job-list-queue / collapsible-section-titles / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.6.0-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove / pure-job-list-queue / collapsible-section-titles / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent all clean");

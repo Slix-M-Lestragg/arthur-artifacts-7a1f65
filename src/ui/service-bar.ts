@@ -62,6 +62,8 @@ export interface GpuMenuData {
 	occupants: Map<number, string[]>;
 }
 
+export const MENU_CLOSE_DELAY_MS = 300;
+
 /** Service-level actions owned by the wiring layer (dashboard view). */
 export interface ServiceBarCallbacks {
 	/** Inactive service clicked → start the default instance. */
@@ -99,12 +101,20 @@ export interface ServiceButton {
 	/** Hover GPU dropdown (created lazily on first open; null for
 	 *  single-instance services — they never get a dropdown). */
 	menu: HTMLElement | null;
+	/** Pending hover-intent close timer id (null when none pending). */
+	closeTimer: number | null;
 }
 
 export class ServiceBar {
 	readonly el: HTMLElement;
 	/** Cached buttons by service id — classList toggles, no rebuilds. */
 	readonly buttons = new Map<string, ServiceButton>();
+
+	/** Id of the service whose dropdown is currently open — only ONE service's
+	 *  dropdown may be open at a time (opening another closes this one). */
+	private openId: string | null = null;
+	/** Document-level close listeners (Escape / click-outside) attached? */
+	private docCloseAttached = false;
 
 	private readonly callbacks: ServiceBarCallbacks;
 	/** Children currently attached, in displayed order. */
@@ -138,6 +148,7 @@ export class ServiceBar {
 		}
 		for (const [id, entry] of [...this.buttons]) {
 			if (!wanted.some((s) => s.id === id)) {
+				this.closeMenuNow(entry); // drop any pending close timer
 				entry.wrap.remove();
 				this.buttons.delete(id);
 				this.order.splice(this.order.indexOf(id), 1);
@@ -227,6 +238,7 @@ export class ServiceBar {
 			name,
 			kill,
 			menu: null,
+			closeTimer: null,
 		};
 		btn.addEventListener("click", () => {
 			if (entry.disabled) return;
@@ -239,13 +251,27 @@ export class ServiceBar {
 			if (entry.active) this.callbacks.onKill(entry.svc);
 		});
 		// Hover GPU dropdown (multi-instance services only; the data callback
-		// answering null keeps it closed). JS mouseenter/mouseleave — the most
+		// answering null keeps it closed). Hover-intent protocol: mouseenter of
+		// the wrap opens (and cancels any pending close); mouseleave schedules
+		// a ~300ms-delayed close that entering the wrap OR the dropdown cancels.
+		// The dropdown is a DOM child of the wrap and a CSS bridge zone
+		// (::before on .arthur-svc-menu) tiles the button→menu gap, so the
+		// pointer can travel onto the checkboxes without ever counting as a
+		// leave. Clicking the button still performs its start/spawn action —
+		// the dropdown is purely hover. JS mouseenter/mouseleave — the most
 		// robust host signal inside Obsidian's DOM (no :has() dependency).
-		wrap.addEventListener("mouseenter", () => this.openMenu(entry));
-		wrap.addEventListener("mouseleave", () => this.closeMenu(entry));
+		wrap.addEventListener("mouseenter", () => this.enterHover(entry));
+		wrap.addEventListener("mouseleave", () => this.scheduleClose(entry));
 		this.buttons.set(svc.id, entry);
 		this.order.push(svc.id);
 		this.el.append(wrap);
+	}
+
+	/** Wrap mouseenter: cancel any pending close, then (re)open the dropdown
+	 *  for this service (opening a sibling first closes it, no delay). */
+	private enterHover(entry: ServiceButton): void {
+		this.cancelScheduledClose(entry);
+		this.openMenu(entry);
 	}
 
 	/** Open the hover GPU dropdown under the service button (multi-instance
@@ -255,19 +281,96 @@ export class ServiceBar {
 		if (!entry.svc.multi_instance) return;
 		const data = this.callbacks.gpuMenuData?.(entry.svc.id) ?? null;
 		if (!data) return;
+		this.cancelScheduledClose(entry);
+		// Hover-intent invariant: at most ONE dropdown open at a time — opening
+		// this one closes a sibling's immediately (no delay).
+		if (this.openId != null && this.openId !== entry.svc.id) {
+			const other = this.buttons.get(this.openId);
+			if (other) this.closeMenuNow(other);
+		}
 		if (!entry.menu) {
 			entry.menu = document.createElement("span");
 			entry.menu.className = "arthur-svc-menu";
 			entry.menu.setAttribute("role", "menu");
+			// Hovering INSIDE the dropdown must never close it: the dropdown is
+			// a DOM child of the wrap (hover events on it keep the wrap in its
+			// ancestry) and it carries its own enter/leave to (de)schedule the
+			// close timer when the pointer crosses into it from outside the
+			// wrap (through the CSS bridge zone or past the button's edge).
+			entry.menu.addEventListener("mouseenter", () => this.cancelScheduledClose(entry));
+			entry.menu.addEventListener("mouseleave", () => this.scheduleClose(entry));
 			entry.wrap.append(entry.menu);
 		}
 		this.buildMenuContent(entry, data);
 		entry.menu.addClass("arthur-svc-menu--open");
+		this.openId = entry.svc.id;
+		this.attachDocClose();
 	}
 
-	/** Hide the dropdown on mouse-leave (content is rebuilt on next hover). */
-	private closeMenu(entry: ServiceButton): void {
+	/** Mouseleave of the wrap OR the dropdown: schedule the close after the
+	 *  hover-intent delay (entering either element before it fires cancels). */
+	private scheduleClose(entry: ServiceButton): void {
+		if (!entry.menu?.hasClass("arthur-svc-menu--open")) return;
+		this.cancelScheduledClose(entry);
+		entry.closeTimer = window.setTimeout(() => {
+			entry.closeTimer = null;
+			this.closeMenuNow(entry);
+		}, MENU_CLOSE_DELAY_MS);
+	}
+
+	/** Entering the button or the dropdown while a close is pending cancels it. */
+	private cancelScheduledClose(entry: ServiceButton): void {
+		if (entry.closeTimer != null) {
+			window.clearTimeout(entry.closeTimer);
+			entry.closeTimer = null;
+		}
+	}
+
+	/** Close immediately (content is rebuilt on next hover). */
+	private closeMenuNow(entry: ServiceButton): void {
+		this.cancelScheduledClose(entry);
 		entry.menu?.removeClass("arthur-svc-menu--open");
+		if (this.openId === entry.svc.id) this.openId = null;
+	}
+
+	/** Close every open dropdown immediately (click-outside / Escape path). */
+	closeAllMenus(): void {
+		for (const entry of this.buttons.values()) {
+			if (entry.menu?.hasClass("arthur-svc-menu--open")) this.closeMenuNow(entry);
+		}
+		this.openId = null;
+	}
+
+	/** Escape / click-outside closing — registered lazily once per bar, and
+	 *  guarded: the smoke-test DOM shim has no document.addEventListener, so
+	 *  these would be a no-op there but work on the real Obsidian host. */
+	private attachDocClose(): void {
+		if (this.docCloseAttached || typeof document?.addEventListener !== "function") return;
+		this.docCloseAttached = true;
+		document.addEventListener("keydown", (e) => {
+			if ((e as { key?: string })?.key === "Escape") this.closeAllMenus();
+		});
+		document.addEventListener("pointerdown", (e) => {
+			const target = (e as { target?: unknown })?.target;
+			if (target == null) return;
+			for (const entry of this.buttons.values()) {
+				if (entry.menu?.hasClass("arthur-svc-menu--open") && !this.contains(entry.wrap, target)) {
+					this.closeMenuNow(entry);
+				}
+			}
+		});
+	}
+
+	/** Ancestor containment that also works under the smoke-test DOM shim
+	 *  (parents are modeled as `_parent` instead of parentNode). */
+	private contains(node: HTMLElement, target: unknown): boolean {
+		let cur: unknown = target;
+		while (cur != null) {
+			if (cur === node) return true;
+			const n = cur as { parentNode?: unknown; _parent?: unknown };
+			cur = n.parentNode ?? n._parent ?? null;
+		}
+		return false;
 	}
 
 	/** One dropdown row: custom check glyph + label (clickable). */

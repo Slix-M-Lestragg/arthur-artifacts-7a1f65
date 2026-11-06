@@ -135,7 +135,11 @@
 }
 
 /* compact GPU dropdown under a multi-instance service button: opens on hover
-   (JS mouseenter/mouseleave — robust in Obsidian's DOM), closed by default */
+   (JS mouseenter/mouseleave + hover-intent close delay — robust in Obsidian's
+   DOM), closed by default; ::before is the invisible BRIDGE zone tiling the
+   6px button→menu gap so the pointer can travel from the button onto the
+   checkboxes without ever crossing dead space (part of the menu element,
+   so hovering it keeps the wrap's hover alive and cancels the close timer) */
 .arthur-svc-menu {
 	position: absolute;
 	top: calc(100% + 6px);
@@ -151,6 +155,15 @@
 	border: 1px solid var(--background-modifier-border);
 	border-radius: var(--radius-m, 10px);
 	box-shadow: var(--shadow-s);
+}
+
+.arthur-svc-menu::before {
+	content: "";
+	position: absolute;
+	top: -6px;
+	left: 0;
+	right: 0;
+	height: 6px;
 }
 
 .arthur-svc-menu--open {
