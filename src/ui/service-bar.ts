@@ -6,11 +6,12 @@
  *                        buttons, tooltip "agent unreachable (<error>)"
  *   service inactive   → grey (desaturated) button
  *                        click → start the default instance → toast + re-poll
- *   service active     → accent-colored button
- *                        click → spawn a new instance (success: "Spawned
+ *   service active     → accent-colored button (sliced: right ~10% end is a full-
+ *                        height red stop-all slice)
+ *                        main-area click → spawn a new instance (success: "Spawned
  *                        <name> instance on port X"; 409 single-instance /
  *                        max reached: toast the agent's error, no crash)
- *                        right ~8% red kill zone → confirm "Stop all <name>
+ *                        red slice click → confirm "Stop all <name>
  *                        instances?" → stop ALL instances; 409 busy → second
  *                        modal offering force → stop(force=true)
  *
@@ -50,15 +51,21 @@ export interface ServiceBarCallbacks {
 	onKill(svc: AgentService): void;
 }
 
-/** One cached service button (main pill + its red kill zone). */
+/**
+ * One cached service button, sliced: a main part (icon + name) and a full-height
+ * red slice at the pill's right end (the stop-all kill zone).
+ */
 export interface ServiceButton {
 	svc: AgentService;
 	/** Latest rendered service-level state. */
 	active: boolean;
 	disabled: boolean;
 	btn: HTMLButtonElement;
+	/** Sliced left part: icon + name (start/spawn click target). */
+	main: HTMLElement;
 	icon: HTMLElement;
 	name: HTMLElement;
+	/** Red right-end slice (stop-all click target). */
 	kill: HTMLElement;
 }
 
@@ -142,8 +149,10 @@ export class ServiceBar {
 						: `${svc.name ?? svc.id} — offline; click to start`,
 			);
 			this.applyIcon(entry);
-			// Kill zone exists only on active buttons.
-			entry.kill.style.display = active ? "" : "none";
+			// The red slice stays visible in every state — offline/unreachable
+			// pills grey + desaturate it via the button's grayscale filter, so
+			// the sliced shape survives (muted, non-interactive there).
+			entry.kill.style.display = "";
 			entry.kill.setAttribute("aria-label", `Stop all ${svc.name ?? svc.id} instances`);
 			entry.kill.setAttribute("title", `Stop all ${svc.name ?? svc.id} instances`);
 		}
@@ -154,6 +163,10 @@ export class ServiceBar {
 		icon.className = "arthur-svc-icon";
 		const name = document.createElement("span");
 		name.className = "arthur-svc-name";
+		// Sliced pill: left part (icon + name), right part (red stop-all slice).
+		const main = document.createElement("span");
+		main.className = "arthur-svc-main";
+		main.append(icon, name);
 		const kill = document.createElement("span");
 		kill.className = "arthur-svc-kill";
 		kill.setAttribute("role", "button");
@@ -161,13 +174,14 @@ export class ServiceBar {
 
 		const btn = document.createElement("button");
 		btn.className = "arthur-svc-btn";
-		btn.append(icon, name, kill);
+		btn.append(main, kill);
 
 		const entry: ServiceButton = {
 			svc,
 			active: false,
 			disabled: true,
 			btn,
+			main,
 			icon,
 			name,
 			kill,

@@ -29,12 +29,13 @@
 	flex-wrap: wrap;
 }
 
-/* pill/capsule service button: grey when inactive, accent when active */
+/* sliced capsule service button: grey when inactive, accent when active; the
+   pill's right end (~10%) is a full-height red slice (stop-all kill zone) that
+   visually cuts the button into a main part and a small red part */
 .arthur-svc-btn {
 	display: inline-flex;
-	align-items: center;
-	gap: 0.45em;
-	padding: 0.25em 0.65em;
+	align-items: stretch;
+	padding: 0;
 	border-radius: 999px;
 	border: 1px solid var(--background-modifier-border);
 	background: var(--background-secondary);
@@ -43,6 +44,7 @@
 	font-size: var(--font-ui-small);
 	max-width: 260px;
 	box-shadow: none;
+	overflow: hidden;
 }
 
 .arthur-svc-btn:not(.arthur-svc-btn--disabled):hover {
@@ -50,8 +52,18 @@
 	box-shadow: 0 0 0 1px var(--background-modifier-border-focus) inset;
 }
 
-.arthur-svc-icon,
-.arthur-svc-kill {
+/* left part of the slice: icon + name (keeps the pill's left radius) */
+.arthur-svc-main {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.45em;
+	padding: 0.25em 0.65em;
+	border-radius: 999px 0 0 999px;
+	min-width: 0;
+	overflow: hidden;
+}
+
+.arthur-svc-icon {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
@@ -89,21 +101,26 @@
 	color: var(--text-on-accent);
 }
 
-/* dedicated red kill zone on the right edge of active buttons */
+/* red slice: full-height right end of the pill, no inset or inner square —
+   the background spans the whole slice; own right radius matches the pill */
 .arthur-svc-kill {
-	width: 8%;
-	min-width: 1.5em;
-	padding-left: 0.35em;
-	margin-inline-start: 0.15em;
-	border-left: 1px solid var(--background-modifier-border);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex: none;
+	align-self: stretch;
+	width: 10%;
+	min-width: 1.75em;
 	background: var(--background-modifier-error);
+	border-left: 1px solid color-mix(in srgb, var(--background-modifier-error) 70%, black);
+	border-radius: 0 999px 999px 0;
 	cursor: pointer;
 }
 
 .arthur-svc-kill svg {
-	width: 0.85em;
-	height: 0.85em;
-	/* white icon on the red zone */
+	width: 1em;
+	height: 1em;
+	/* white icon on the red slice */
 	color: var(--text-on-accent);
 }
 
