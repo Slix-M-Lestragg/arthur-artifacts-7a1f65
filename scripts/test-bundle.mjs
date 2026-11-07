@@ -3452,6 +3452,32 @@ try {
 	assert(pane24.allLines.length === 200, `the ring buffer caps at 200 lines (got ${pane24.allLines.length})`);
 	assert(pane24.allLines[0].includes("cap-test line 5") && pane24.allLines[199].includes("cap-test line 204"),
 		"the OLDEST lines are evicted past the cap");
+	// fold: N identical consecutive events → ONE line with a '×N' counter
+	pane24.clear();
+	for (let i = 0; i < 12; i++)
+		pane24.append("request error GET http://10.0.0.9:8675/api/jobs — net::ERR_CONNECTION_REFUSED");
+	assert(pane24.allLines.length === 1,
+		`12 identical consecutive events fold to ONE line (got ${pane24.allLines.length})`);
+	assert(/^\[\d{2}:\d{2}:\d{2}\] request error GET .*net::ERR_CONNECTION_REFUSED ×12$/.test(pane24.allLines[0]) === true,
+		`the folded line carries a '×12' counter (got ${pane24.allLines[0]})`);
+	// interleaved distinct messages never fold
+	pane24.clear();
+	pane24.append("alpha one");
+	pane24.append("beta two");
+	pane24.append("alpha one");
+	assert(pane24.allLines.length === 3, `interleaved (A,B,A) lines do NOT fold (got ${pane24.allLines.length})`);
+	assert(pane24.allLines.every((l) => !l.includes("×")), "non-repeated lines render WITHOUT a '×N' counter");
+	// counter resets on message change: A×3 → B → A×2
+	pane24.clear();
+	for (let i = 0; i < 3; i++) pane24.append("alpha one");
+	pane24.append("beta two");
+	for (let i = 0; i < 2; i++) pane24.append("alpha one");
+	assert(pane24.allLines.length === 3, `runs fold per message run (got ${pane24.allLines.length})`);
+	assert(/^\[\d{2}:\d{2}:\d{2}\] alpha one ×3$/.test(pane24.allLines[0]), "the first run folds to '×3'");
+	assert(pane24.allLines[1].includes("beta two") && !pane24.allLines[1].includes("×"),
+		"the distinct message renders without a counter");
+	assert(/^\[\d{2}:\d{2}:\d{2}\] alpha one ×2$/.test(pane24.allLines[2]),
+		"the re-started run folds to '×2' (counter resets on message change)");
 	// poller debug breadcrumbs mirror into the pane when the toggle is ON
 	pane24.clear();
 	plugin.settings.debugLogging = true;

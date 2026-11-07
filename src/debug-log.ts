@@ -18,8 +18,23 @@
 /** Ring-buffer cap: keep the newest 200 lines. */
 export const DEBUG_LOG_CAP = 200;
 
-/** One appended line: "[HH:MM:SS] <text>" (single-line normalized). */
+/** One rendered line: "[HH:MM:SS] <text>" or "[HH:MM:SS] <text> ×N". */
 export type DebugLine = string;
+
+/** One buffered entry — an event plus its fold state. */
+interface DebugEntry {
+	/** Event text (single-line normalized), sans timestamp/counter. */
+	text: string;
+	/** Clock stamp of the MOST RECENT occurrence (updated on fold). */
+	stamp: string;
+	/** Consecutive identical repeats folded into this entry (1 = un-repeated). */
+	count: number;
+}
+
+/** Render one entry: stamp + text, with a '×N' suffix once repeats fold in. */
+function renderEntry(e: DebugEntry): DebugLine {
+	return e.count > 1 ? `${e.stamp} ${e.text} ×${e.count}` : `${e.stamp} ${e.text}`;
+}
 
 /** The live sink: the open pane's append (or null while the view is closed). */
 type DebugSink = (line: string) => void;
@@ -34,6 +49,12 @@ export function setDebugSink(next: DebugSink | null): void {
 /**
  * Append one event line to the open pane (no-op while the view is closed /
  * no sink installed). Newlines are collapsed — one event = one line.
+ *
+ * Consecutive identical events FOLD into the last buffer line (a '×N'
+ * counter suffix, the stamp refreshed to the latest occurrence) instead of
+ * appending a duplicate — e.g. a transport error repeating on every detail
+ * cycle renders once as '… — net::ERR_CONNECTION_REFUSED ×12'. A new (or
+ * changed) message appends normally and the counter resets.
  */
 export function debugLine(text: string): void {
 	if (!sink) return;
@@ -59,11 +80,13 @@ export interface DebugPaneOpts {
 /**
  * The pane model + renderer. The view keeps ONE instance across reopen
  * (settings survive), resets the BUFFER on each open, and renders into its
- * own collapsible sub-container (bottom of the dashboard view).
+ * own collapsible sub-container (bottom of the dashboard view). Consecutive
+ * identical events fold into one line with a '×N' repeat counter (see
+ * append()) so per-tick transport error floods stay one readable line.
  */
 export class DebugLogPane {
-	/** Newest-last ring buffer of "[HH:MM:SS] <event>" lines. */
-	private readonly lines: DebugLine[] = [];
+	/** Newest-last ring buffer of entries (each may carry folded repeats). */
+	private readonly entries: DebugEntry[] = [];
 	private readonly opts: DebugPaneOpts;
 	/** Rendered state (set by render(); cleared by detach). */
 	private rootEl: HTMLElement | null = null;
@@ -74,26 +97,37 @@ export class DebugLogPane {
 		this.opts = opts;
 	}
 
-	/** Read access for smoke tests / debugging. */
+	/** Read access for smoke tests / debugging (rendered strings). */
 	get allLines(): readonly DebugLine[] {
-		return this.lines;
+		return this.entries.map(renderEntry);
 	}
 
 	/**
 	 * Append one timestamped line; drops the OLDEST line past the cap. Paints
 	 * the log area in place when the pane is rendered + expanded.
+	 *
+	 * Folding: if the newest entry has the exact same normalized text, bump its
+	 * counter + refresh its stamp instead of appending a duplicate; the buffer
+	 * then grows only when the message changes. Count reset = message change.
 	 */
 	append(text: string): void {
 		const oneLine = String(text ?? "").replace(/\s*\n+\s*/g, " · ").trim();
 		if (!oneLine) return;
-		this.lines.push(`[${debugClock(Date.now())}] ${oneLine}`);
-		while (this.lines.length > DEBUG_LOG_CAP) this.lines.shift();
+		const stamp = `[${debugClock(Date.now())}]`;
+		const last = this.entries[this.entries.length - 1];
+		if (last && last.text === oneLine) {
+			last.count += 1;
+			last.stamp = stamp;
+		} else {
+			this.entries.push({ text: oneLine, stamp, count: 1 });
+			while (this.entries.length > DEBUG_LOG_CAP) this.entries.shift();
+		}
 		this.paintLines();
 	}
 
 	/** Drop the whole buffer (pane 'Clear' button / view reopen + close). */
 	clear(): void {
-		this.lines.length = 0;
+		this.entries.length = 0;
 		this.paintLines();
 	}
 
@@ -169,12 +203,12 @@ export class DebugLogPane {
 	/** Paint the log area + count badge in place (no-op while detached). */
 	private paintLines(): void {
 		if (this.countEl) {
-			this.countEl.setText(this.lines.length > 0 ? `${this.lines.length}/${DEBUG_LOG_CAP}` : "");
+			this.countEl.setText(this.entries.length > 0 ? `${this.entries.length}/${DEBUG_LOG_CAP}` : "");
 		}
 		if (!this.logEl) return;
 		this.logEl.empty();
-		for (const line of this.lines) {
-			this.logEl.append(el("div", { cls: "arthur-debug-line", text: line }));
+		for (const entry of this.entries) {
+			this.logEl.append(el("div", { cls: "arthur-debug-line", text: renderEntry(entry) }));
 		}
 		// Newest lines in view while open.
 		this.logEl.scrollTop = this.logEl.scrollHeight;
@@ -182,19 +216,19 @@ export class DebugLogPane {
 
 	/** Copy the buffer to the clipboard (toast feedback; guarded fallback). */
 	copy(): void {
-		const text = this.lines.join("\n");
+		const text = this.allLines.join("\n");
 		const clip = (globalThis as { navigator?: { clipboard?: { writeText?: (t: string) => Promise<void> } } })
 			.navigator?.clipboard;
 		if (clip?.writeText) {
 			clip.writeText(text).then(
 				() => this.opts.toast?.("debug log copied to the clipboard"),
-				() => this.opts.toast?.(`debug log — clipboard unavailable (${this.lines.length} lines)`),
+				() => this.opts.toast?.(`debug log — clipboard unavailable (${this.entries.length} lines)`),
 			);
 			return;
 		}
 		// No clipboard API (older renderer / test env): the text is selectable
 		// in the monospace area — tell the user what they can grab instead.
-		this.opts.toast?.(`debug log — clipboard unavailable (${this.lines.length} lines)`);
+		this.opts.toast?.(`debug log — clipboard unavailable (${this.entries.length} lines)`);
 	}
 }
 
