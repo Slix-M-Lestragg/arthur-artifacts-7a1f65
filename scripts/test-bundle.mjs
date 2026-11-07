@@ -760,7 +760,7 @@ try {
 	const sb = view9?.serviceBar;
 	const sbComfy = sb?.buttons.get("comfyui");
 	const sbAi = sb?.buttons.get("aitoolkit");
-	assert(!!sb && sb.buttons.size === 2, "service bar renders one button per agent service");
+	assert(!!sb && sb.buttons.size === 3, "service bar renders one button per agent service + the pi pseudo-service");
 	assert(sbComfy?.btn.hasClass("arthur-svc-btn--active") === true, "active service button gets the accent/active state");
 	assert(sbAi?.btn.hasClass("arthur-svc-btn--active") === true, "second active service button gets the active state");
 	assert((sbComfy?.icon.innerHTML ?? "").includes('viewBox="0 0 520 520"'), "comfyui button embeds the official ComfyUI mark");
@@ -2981,6 +2981,256 @@ try {
 	StubNotice.reset();
 	await app.workspace.detachLeavesOfType("arthur-dashboard");
 
+	// ---- 23. pi service button + device/session/directory flow (v0.8.0) ------
+	console.log("== 23. pi service button + device dropdown + directory picker ==");
+	{
+		const json23 = (status, body) => ({ status, body });
+		const iso23 = (msAgo) => new Date(Date.now() - msAgo).toISOString();
+		const devEntries23 = [
+			{ id: "dev-main", hostname: "mainbox", online: true, self: true, ssh: "slix@main", sessionsActive: 1, sessionsTotal: 2 },
+			{ id: "mac.home", hostname: "mac.home", online: false, self: false, ssh: "benjaminmatthys@mac.home", sessionsActive: 0, sessionsTotal: 0 },
+			{ id: "ulysse", hostname: "ulysse", online: true, self: false, ssh: "ulysse", sessionsActive: 0, sessionsTotal: 1 },
+		];
+		const piStatusBody23 = {
+			generatedAt: iso23(0),
+			devices: [
+				{
+					device: "dev-main", hostname: "mainbox", stale: false,
+					sessions: [
+						{ id: "sess-abc12345XYZ", path: "/home/slix/.pi/sess-a.jsonl", cwd: "/home/slix/deep/repo", name: "", active: true, startedAt: iso23(60_000), lastActivity: iso23(5_000) },
+						{ id: "named-1", path: "/home/slix/.pi/named.jsonl", cwd: "/home/slix/proj", name: "night build", active: false, startedAt: iso23(7200_000), lastActivity: iso23(120_000) },
+					],
+					subagents: [],
+					activeSessions: 1, sessionsCount: 2,
+				},
+			],
+		};
+		const dirsTable23 = {
+			"/home": { dirs: ["srv"], parent: "/" },
+			"/home/slix": { dirs: ["deep", "proj", "Downloads"], parent: "/" },
+			"/home/slix/deep": { dirs: ["repo"], parent: "/home/slix" },
+			"/home/slix/proj": { dirs: ["night"], parent: "/home/slix" },
+		};
+		const calls23 = [];
+		const spawnBodies23 = [];
+		const piResponder23 = (opts) => {
+			calls23.push({ url: opts.url, method: opts.method ?? "GET", body: opts.body });
+			if (opts.url.endsWith("/health")) return json23(200, { ok: true, version: "0.8.0" });
+			if (opts.url.endsWith("/api/status")) return json23(200, {
+				version: "0.8.0", host_uptime: 1,
+				services: [
+					{ id: "comfyui", name: "ComfyUI", active: false, multi_instance: true, max_instances: 4, default_port: 8188, unit_template: "comfy@{i}", instances: [] },
+				],
+			});
+			if (opts.url.endsWith("/api/gpus")) return json23(200, { gpus: [], count: 0 });
+			if (opts.url.endsWith("/api/jobs")) return json23(200, { jobs: [] });
+			if (opts.url.endsWith("/api/queue")) return json23(200, { queues: [] });
+			if (opts.url.endsWith("/api/pi/status")) return json23(200, piStatusBody23);
+			if (opts.url.endsWith("/api/pi/devices")) return json23(200, { devices: devEntries23 });
+			const dirsMatch23 = opts.url.match(/\/api\/pi\/devices\/([^/]+)\/dirs\?path=([^&]+)/);
+			if (dirsMatch23) {
+				const path23 = decodeURIComponent(dirsMatch23[2]);
+				const table23 = dirsTable23[path23] ?? { dirs: [], parent: null };
+				return json23(200, { device: decodeURIComponent(dirsMatch23[1]), path: path23, ...table23 });
+			}
+			if (opts.url.endsWith("/api/pi/sessions") && (opts.method ?? "GET") === "POST") {
+				const parsed23 = typeof opts.body === "string" ? JSON.parse(opts.body) : (opts.body ?? {});
+				spawnBodies23.push(parsed23);
+				if (parsed23.cwd === "/home/slix/deep") {
+					return json23(201, { device: parsed23.device, cwd: parsed23.cwd, spawned: "tmux", window: "0", hint: "tmux attach -t pi-main" });
+				}
+				return { status: 400, body: { error: "no tmux server on device" } };
+			}
+			return null;
+		};
+		const restore23 = () => {
+			httpResponder = piResponder23;
+		};
+
+		restore23();
+		app.workspace.detachLeavesOfType("arthur-dashboard");
+		let view23;
+		ok = true;
+		try {
+			await plugin.activateView();
+			view23 = app.workspace.getLeavesOfType("arthur-dashboard")[0]?.view;
+			await view23.refreshData();
+		} catch (err) {
+			ok = false;
+			console.error(`    view23 attach threw: ${err?.stack ?? err}`);
+		}
+		assert(ok, "view23 attach + refresh did not throw");
+		const sb23 = view23.serviceBar;
+		const piBtn23 = sb23.buttons.get("pi");
+
+		// (a) the pi pseudo-service button (always present, colored by feed, no kill slice)
+		assert(!!piBtn23 && piBtn23.pseudo === true, "(a) pi pseudo-service button present after the agent services");
+		assert(findByClass(piBtn23.btn, "arthur-svc-kill").length === 0, "(a) pi pill has NO red kill slice (no stop-all semantics)");
+		assert(piBtn23.btn.hasClass("arthur-svc-btn--active") === true, "(a) pi pill ACCENT while sessionsActive > 0");
+		assert((findByClass(piBtn23.btn, "arthur-svc-icon")[0]?.attributes.get("data-icon") ?? "") === "terminal",
+			"(a) pi pill uses the registry lucide 'terminal' icon");
+		devEntries23[0].sessionsActive = 0;
+		await view23.refreshData();
+		assert(piBtn23.btn.hasClass("arthur-svc-btn--offline") === true && piBtn23.btn.hasClass("arthur-svc-btn--active") === false,
+			"(a) pi pill grey (offline style) when no device has active sessions");
+		assert(piBtn23.btn.hasClass("arthur-svc-btn--disabled") === false, "(a) pi pill NOT disabled while the pi feed answers");
+		devEntries23[0].sessionsActive = 1;
+
+		// (a-bis) pi feed unreachable entirely → disabled-with-tooltip, never hidden
+		httpResponder = null;
+		await view23.refreshData();
+		assert(piBtn23.btn.hasClass("arthur-svc-btn--disabled") === true, "(a) pi feed unreachable → disabled grey pill");
+		assert((piBtn23.btn.getAttribute("aria-label") ?? "").includes("pi unavailable"),
+			"(a) disabled pi pill carries the 'pi unavailable' tooltip");
+		piBtn23.wrap.handlers.get("mouseenter")[0]?.();
+		assert(piBtn23.menu == null || piBtn23.menu.hasClass("arthur-svc-menu--open") === false,
+			"(a) no device dropdown while the pi feed is unreachable");
+		sb23.closeAllMenus();
+		restore23();
+		await view23.refreshData();
+
+		// (b) hover → the DEVICE dropdown (offline rows greyed + red dot + tooltip)
+		piBtn23.wrap.handlers.get("mouseenter")[0]?.();
+		const menu23 = piBtn23.menu;
+		assert(!!menu23 && menu23.hasClass("arthur-svc-menu--open"), "(b) hovering the pi pill opens the device dropdown");
+		const devRows23 = findByClass(menu23, "arthur-pi-dev-row");
+		assert(devRows23.length === 3, `(b) one row per device (got ${devRows23.length})`);
+		const macRow23 = devRows23.find((r) => r.getAttribute("data-pi-device") === "mac.home");
+		assert(macRow23.hasClass("arthur-pi-dev-row--offline") === true, "(b) offline device renders the greyed offline state");
+		assert(findByClass(macRow23, "arthur-dot--red").length === 1, "(b) offline device row carries the red feed dot");
+		assert((macRow23.getAttribute("data-tooltip") ?? "") === "offline — no feed in 5min",
+			"(b) offline device tooltip reads 'offline — no feed in 5min' verbatim");
+		assert((macRow23.handlers.get("click") ?? []).length === 0, "(b) offline device row is NOT clickable");
+		const mainRow23 = devRows23.find((r) => r.getAttribute("data-pi-device") === "dev-main");
+		assert(!!mainRow23 && allText(mainRow23).includes("mainbox"), "(b) online row carries the (dimmed) hostname suffix");
+		const ulysseRow23 = devRows23.find((r) => r.getAttribute("data-pi-device") === "ulysse");
+		assert(!!ulysseRow23 && !ulysseRow23.hasClass("arthur-pi-dev-row--offline"), "(b) ulysse row is online (normal state)");
+
+		// (c) hovering an ONLINE device row → second menu to the right:
+		//     'New…' on top, then the device's sessions with cwd meta lines
+		mainRow23.handlers.get("mouseenter")[0]?.();
+		const sub23 = piBtn23.subMenu;
+		assert(!!sub23 && sub23.hasClass("arthur-pi-submenu--open"), "(c) hovering an online device opens its second-level menu");
+		const items23 = findByClass(sub23, "arthur-pi-sub-item");
+		const newBtn23 = findByClass(sub23, "arthur-pi-new")[0];
+		assert(!!newBtn23 && allText(newBtn23).includes("New…"), "(c) second menu first item reads 'New…'");
+		assert(items23[0] === newBtn23, "(c) 'New…' sits on TOP of the session list");
+		const sessRows23 = findByClass(sub23, "arthur-pi-sess");
+		assert(sessRows23.length === 2, `(c) both of the device's sessions listed (got ${sessRows23.length})`);
+		const unlabeled23 = sessRows23.find((r) => allText(r).includes("session sess-abc"));
+		assert(!!unlabeled23, "(c) unnamed session labelled 'session <8-char-id>'");
+		assert(allText(unlabeled23).includes("/home/slix/deep/repo"), "(c) second line carries the cwd path (+ duration) with the active dot");
+		assert(findByClass(unlabeled23, "arthur-dot--green").length === 1, "(c) the active session carries a green dot");
+		const namedRow23 = sessRows23.find((r) => allText(r).includes("night build"));
+		assert(!!namedRow23, "(c) named session uses its friendly name as the label");
+
+		// (d) session click → observational handoff notice + menus closed
+		StubNotice.reset();
+		unlabeled23.handlers.get("click")[0]?.();
+		assert(StubNotice.shown.some((m) => m.includes("Session session sess-abc selected on dev-main (view handoff to obsidian-pi plugin — coming later)")),
+			"(d) session click notices the observational handoff verbatim");
+		assert(piBtn23.menu == null || piBtn23.menu.hasClass("arthur-svc-menu--open") === false,
+			"(d) the device dropdown closes after a session click");
+
+		// (e-prefill) button CLICK → the New-session flow directly; lastUsed prefill
+		plugin.settings.lastUsedPiDevice = "";
+		await sleep(30);
+		StubModal.reset();
+		piBtn23.btn.handlers.get("click")[0]?.();
+		await sleep(30);
+		const modal23a = StubModal.opened[StubModal.opened.length - 1];
+		assert(!!modal23a && modal23a.titleEl.textContent === "dev-main — choose working directory",
+			"(e) pi-button click opens the picker pinned to the first online device (no last-used yet)");
+		assert(calls23.some((c) => c.url.includes("/api/pi/devices/dev-main/dirs") && c.url.includes("path=%2Fhome%2Fslix")),
+			"(e) the self device's picker opens on /home/slix");
+		findButton(modal23a.contentEl, "Cancel").handlers.get("click")[0]?.();
+		plugin.settings.lastUsedPiDevice = "ulysse";
+		piBtn23.btn.handlers.get("click")[0]?.();
+		await sleep(30);
+		const modal23b = StubModal.opened[StubModal.opened.length - 1];
+		assert(!!modal23b && modal23b.titleEl.textContent === "ulysse — choose working directory",
+			"(e) the last-used device prefills the picker on click");
+		assert(calls23.some((c) => c.url.includes("/api/pi/devices/ulysse/dirs") && c.url.includes("path=%2Fhome")),
+			"(e) bare-host ssh mapping ('ulysse') infers the /home root");
+		findButton(modal23b.contentEl, "Cancel").handlers.get("click")[0]?.();
+		plugin.settings.lastUsedPiDevice = "dev-main";
+
+		// (e) 'New…' click → the picker modal: descend / '..' / filter / Enter
+		piBtn23.wrap.handlers.get("mouseenter")[0]?.();
+		const mainRow23b = findByClass(piBtn23.menu, "arthur-pi-dev-row").find((r) => r.getAttribute("data-pi-device") === "dev-main");
+		mainRow23b.handlers.get("mouseenter")[0]?.();
+		StubModal.reset();
+		findByClass(piBtn23.subMenu, "arthur-pi-new")[0].handlers.get("click")[0]?.();
+		await sleep(30);
+		const modal23 = StubModal.opened[StubModal.opened.length - 1];
+		assert(!!modal23 && modal23.titleEl.textContent === "dev-main — choose working directory", "(e) 'New…' opens the device picker modal");
+		let dirRows23 = findByClass(modal23.contentEl, "arthur-pi-dirrow");
+		assert(dirRows23.length === 4, `(e) listing shows '..' + the root's 3 subdirs (got ${dirRows23.length})`);
+		assert(dirRows23[0].hasClass("arthur-pi-dirrow--up") === true && dirRows23[0].textContent === "..", "(e) '..' parent row pinned first");
+		// descend into 'deep'
+		dirRows23.find((r) => r.textContent === "deep").handlers.get("click")[0]?.();
+		await sleep(30);
+		assert(calls23.some((c) => c.url.includes("path=%2Fhome%2Fslix%2Fdeep")), "(e) clicking a subdir fetches its listing (descend)");
+		// '..' walks back to the response's parent
+		findByClass(modal23.contentEl, "arthur-pi-dirrow--up")[0].handlers.get("click")[0]?.();
+		await sleep(30);
+		assert(calls23.some((c) => c.url.endsWith("path=%2Fhome%2Fslix")), "(e) '..' steps to the listing's parent path");
+		// contains filter (case-insensitive)
+		const input23 = findByTag(modal23.contentEl, "INPUT")[0];
+		input23.value = "PROJ";
+		input23.handlers.get("input")[0]?.();
+		await sleep(30);
+		dirRows23 = findByClass(modal23.contentEl, "arthur-pi-dirrow");
+		assert(dirRows23.some((r) => r.textContent === "proj") && !dirRows23.some((r) => r.textContent === "Downloads"),
+			"(e) contains filter (case-insensitive) narrows the listing to 'proj'");
+		// Enter descends into the first filtered row
+		input23.handlers.get("keydown")[0]?.({ key: "Enter", preventDefault() {} });
+		await sleep(30);
+		assert(calls23.some((c) => c.url.includes("path=%2Fhome%2Fslix%2Fproj")), "(e) Enter descends into the first filtered row");
+		// back up to /home/slix, then subpath: 'deep/rep' resolves into /home/slix/deep and filters by the tail
+		findByClass(modal23.contentEl, "arthur-pi-dirrow--up")[0].handlers.get("click")[0]?.();
+		await sleep(30);
+		input23.value = "deep/rep";
+		input23.handlers.get("input")[0]?.();
+		await sleep(60);
+		assert(calls23.some((c) => c.url.includes("path=%2Fhome%2Fslix%2Fdeep")), "(e) a '/'-query resolves the subpath of the current dir");
+		dirRows23 = findByClass(modal23.contentEl, "arthur-pi-dirrow");
+		assert(dirRows23.some((r) => r.textContent === "repo") && dirRows23.length === 2, "(e) the resolved dir's rows filter by the trailing segment ('repo' ~ 'rep')");
+
+		// (e + f) confirm → POST {device, cwd} → success notice + persistence
+		StubNotice.reset();
+		spawnBodies23.length = 0;
+		findButton(modal23.contentEl, "Use this directory").handlers.get("click")[0]?.();
+		await sleep(30);
+		assert(spawnBodies23.length === 1 && spawnBodies23[0].device === "dev-main" && spawnBodies23[0].cwd === "/home/slix/deep",
+			"(e) confirm POSTs {device, cwd} of the resolved directory to /api/pi/sessions");
+		assert(StubNotice.shown.some((m) => m.includes("pi session created on dev-main in /home/slix/deep via tmux (tmux attach -t pi-main)")),
+			"(e) success notice reads 'pi session created on <device> in <cwd> via <spawned> (<hint>)' verbatim");
+		assert(modal23._closed === true, "(e) the picker closes on spawn success");
+		assert(plugin.settings.lastUsedPiDevice === "dev-main", "(f) lastUsedPiDevice persisted in settings");
+		assert(plugin._data?.lastUsedPiDevice === "dev-main", "(f) lastUsedPiDevice persisted to data.json via saveSettings");
+
+		// (e-fail) spawn failure → error notice with the agent's message; modal stays open
+		StubModal.reset();
+		StubNotice.reset();
+		view23.piOpenNewSession(null); // lastUsed = dev-main (online) → reopens the same picker
+		await sleep(30);
+		const modal23f = StubModal.opened[StubModal.opened.length - 1];
+		assert(!!modal23f, "(e) the picker reopens for the last-used device");
+		const useBtn23 = findButton(modal23f.contentEl, "Use this directory");
+		useBtn23.handlers.get("click")[0]?.();
+		await sleep(30);
+		assert(StubNotice.shown.some((m) => m.includes("pi session not created on dev-main — no tmux server on device")),
+			"(e) failure notice carries the agent's error message");
+		assert(modal23f._closed !== true, "(e) the picker stays open on spawn failure");
+		assert(findButton(modal23f.contentEl, "Use this directory").disabled === false, "(e) 'Use this directory' re-enables after the failure");
+		findButton(modal23f.contentEl, "Cancel").handlers.get("click")[0]?.();
+	}
+
+	httpResponder = null;
+	StubNotice.reset();
+	await app.workspace.detachLeavesOfType("arthur-dashboard");
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();
@@ -2996,4 +3246,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.7.0-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.7.0-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker all clean");

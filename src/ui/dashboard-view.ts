@@ -119,7 +119,7 @@
  * case component teardown skips onClose. On WS (re)open the view re-polls to
  * resync queue/progress state.
  */
-import { ItemView, WorkspaceLeaf } from "obsidian";
+import { ItemView, Notice, WorkspaceLeaf } from "obsidian";
 
 import type ArthurPlugin from "../main";
 import { AGENT_VERSION } from "../api/agent";
@@ -142,7 +142,9 @@ import {
 } from "../util";
 import { ArthurApiError, isTimeoutError } from "../api/transport";
 import { ServiceBar } from "./service-bar";
-import type { GpuMenuData, GpuOccupant } from "./service-bar";
+import type { GpuMenuData, GpuOccupant, PiDeviceEntry, PiMenuData } from "./service-bar";
+import { piDeviceRoot, PiPickerModal, piMenuSessionLabel } from "./pi-picker";
+import type { AgentPiDeviceEntry } from "../api/agent";
 import { confirmModal, describeError, run, toastErr, toastOk } from "./actions";
 import { openUiTooltip, openWebUrl } from "./webviewer";
 
@@ -556,6 +558,14 @@ export class ArthurDashboardView extends ItemView {
 		status: null,
 		error: null,
 	};
+	/** Last GET /api/pi/devices result (agent v0.8.0; null-equivalent =
+	 *  empty list + error). Complements the piStatus snapshot: identities +
+	 *  online/self/ssh + session COUNTS; the session lists still come from
+	 *  /api/pi/status (device-keyed). */
+	private piDevicesDetail: { list: AgentPiDeviceEntry[]; error: string | null } = {
+		list: [],
+		error: null,
+	};
 	/** True while the training collector sits degraded (watchdog); cleared on
 	 *  each settled tick — feeds the error banner. */
 	private trainingStuck = false;
@@ -881,6 +891,7 @@ export class ArthurDashboardView extends ItemView {
 				queueError: "not configured",
 			};
 			this.piDetail = { status: null, error: null };
+			this.piDevicesDetail = { list: [], error: null };
 			this.gpuDetail = { list: [], error: null };
 			this.spawnPendings.clear();
 			this.lastTick = null;
@@ -947,6 +958,18 @@ export class ArthurDashboardView extends ItemView {
 				piFetchError = piRes.error;
 				this.piDetail = { status: null, error: describeError(piRes.error) };
 			}
+		}
+
+		// pi DEVICE list (agent v0.8.0) — identities + online/self/ssh mapping
+		// + session counts for the service-bar pi button/dropdown. Degradable:
+		// an older agent (v0.7.0) answers 404 → the pi button falls back to
+		// piStatus-derived devices (no ssh/self info, stale→offline heuristic).
+		this.piDevicesDetail = { list: [], error: null };
+		if (healthOk) {
+			const devRes = await tryCall(() => clients.agent.piDevices());
+			this.piDevicesDetail = devRes.value !== null
+				? { list: devRes.value.devices ?? [], error: null }
+				: { list: [], error: describeError(devRes.error) };
 		}
 
 		// Live GPU stats (detail cycle refresh for the grid columns + header
@@ -1120,6 +1143,14 @@ export class ArthurDashboardView extends ItemView {
 			gpuMenuData: (svcId) => this.svcGpuMenuData(svcId),
 			gpuSelection: (svcId) => this.gpuSelectionFor(svcId),
 			setGpuSelection: (svcId, gpus) => this.setGpuSelection(svcId, gpus),
+			// Pi PSEUDO-service: device dropdown + New-session picker flow. Pi is
+			// NOT agent-lifecycle-managed — no start/spawn/stop-all (no kill
+			// slice); the button click opens the picker directly, pinned to the
+			// last-used (persisted) or the only-online device.
+			piMenuData: () => this.piBarState(),
+			onPiClick: () => this.piOpenNewSession(null),
+			onPiNewSession: (deviceId) => this.piNewSessionFor(deviceId),
+			onPiSessionClick: (deviceId, sess) => this.piSessionNotice(deviceId, sess),
 		});
 
 		// ONE slim error banner under the service bar — dead services + last
@@ -1399,7 +1430,154 @@ export class ArthurDashboardView extends ItemView {
 			agentOk: this.agentDetail.statusOk === true,
 			error: this.agentDetail.error,
 			services: this.agentDetail.status?.services ?? [],
+			pi: this.piBarState(),
 		});
+	}
+
+	/**
+	 * Pi pseudo-service state for the service bar: the merged device view the
+	 * dropdown + button drive off. reachable = /api/pi/status answered this
+	 * tick (false → the pi button renders disabled-with-tooltip — never
+	 * hidden). Devices come from GET /api/pi/devices when the agent is
+	 * v0.8.0+, merged with the per-device session lists of the /api/pi/status
+	 * snapshot; on an older agent (no /api/pi/devices) the rows are
+	 * SYNTHESIZED from piStatus alone (online = !stale, no ssh/self info).
+	 */
+	private piBarState(): PiMenuData {
+		if (this.agentDetail.statusOk !== true) {
+			return { reachable: false, error: this.agentDetail.error ?? "offline", devices: [] };
+		}
+		const st = this.piDetail.status;
+		if (!st) {
+			return {
+				reachable: false,
+				error: this.piDetail.error ?? "pi status unreachable",
+				devices: [],
+			};
+		}
+		const sessionsOf = new Map<string, AgentPiSession[]>();
+		for (const d of st.devices ?? []) sessionsOf.set(d.device, d.sessions ?? []);
+		const countIdle = (d: { sessions?: AgentPiSession[] }): { active: number; total: number } => {
+			const list = d.sessions ?? [];
+			return { active: list.filter((s) => s.active).length, total: list.length };
+		};
+		const entries = this.piDevicesDetail.list;
+		let devices: PiDeviceEntry[];
+		if (entries.length > 0) {
+			devices = entries.map((e) => {
+				const sess = sessionsOf.get(e.id) ?? [];
+				const counted = countIdle({ sessions: sess });
+				return {
+					id: e.id,
+					hostname: e.hostname ?? null,
+					online: e.online === true,
+					self: e.self === true,
+					ssh: e.ssh ?? null,
+					sessionsActive:
+						typeof e.sessionsActive === "number" ? e.sessionsActive : counted.active,
+					sessionsTotal:
+						typeof e.sessionsTotal === "number" ? e.sessionsTotal : counted.total,
+					sessions: sess,
+				};
+			});
+		} else {
+			// Older agent (v0.7.0): synthesize device rows from the piStatus
+			// snapshot only — freshness heuristic 'stale → offline', no ssh/self.
+			devices = (st.devices ?? []).map((d) => ({
+				id: d.device,
+				hostname: d.hostname ?? null,
+				online: d.stale !== true,
+				self: false,
+				ssh: null,
+				sessionsActive:
+					typeof d.activeSessions === "number" ? d.activeSessions : countIdle(d).active,
+				sessionsTotal:
+					typeof d.sessionsCount === "number" ? d.sessionsCount : countIdle(d).total,
+				sessions: d.sessions ?? [],
+			}));
+		}
+		return { reachable: true, error: null, devices };
+	}
+
+	// ------------------------------------------------------------ pi flow ----
+
+	/** Pi button click → open the New-session flow pinned to the last-used
+	 *  (and online) device, else the only online device, else the first
+	 *  online one; no online device → muted error toast, no modal. */
+	private piOpenNewSession(pinnedId: string | null): void {
+		const state = this.piBarState();
+		if (!state.reachable) return; // the button is disabled anyway
+		const online = state.devices.filter((d) => d.online);
+		let dev = pinnedId ? online.find((d) => d.id === pinnedId) ?? null : null;
+		if (!dev) {
+			const last = (this.plugin.settings.lastUsedPiDevice ?? "").trim();
+			if (last) dev = online.find((d) => d.id === last) ?? null;
+		}
+		if (!dev && online.length === 1) dev = online[0];
+		if (!dev && online.length > 1) dev = online[0]; // deterministic: agent order
+		if (!dev) {
+			toastErr("pi — no online device to spawn a session on");
+			return;
+		}
+		this.piOpenPicker(dev);
+	}
+
+	/** The directory-picker modal for one device (root path from the ssh
+	 *  mapping: self → /home/slix; mac.home → /Users/<user>; else /home/<user>
+	 *  or /home — see piDeviceRoot). */
+	private piOpenPicker(dev: PiDeviceEntry): void {
+		const agent = this.plugin.clients?.agent;
+		if (!agent) return;
+		const device = { id: dev.id, hostname: dev.hostname, self: dev.self, ssh: dev.ssh };
+		new PiPickerModal(this.app, {
+			device,
+			initialPath: piDeviceRoot(device),
+			fetchDirs: (deviceId, path) => agent.piDirs(deviceId, path),
+			onUse: async (_deviceId, cwd) => {
+				await this.piSpawnSession(dev.id, cwd);
+			},
+		}).open();
+	}
+
+	/** The 'New…' submenu entry on a device row → the same picker. */
+	private piNewSessionFor(deviceId: string): void {
+		const dev = this.piBarState().devices.find((d) => d.id === deviceId);
+		if (!dev || !dev.online) return;
+		this.piOpenPicker(dev);
+	}
+
+	/** Observational session selection (no action exists yet — the view
+	 *  handoff to the obsidian-pi plugin comes later). */
+	private piSessionNotice(deviceId: string, sess: AgentPiSession): void {
+		new Notice(
+			`Session ${piMenuSessionLabel(sess)} selected on ${deviceId} (view handoff to obsidian-pi plugin — coming later)`,
+			3500,
+		);
+	}
+
+	/** POST /api/pi/sessions {device, cwd} via the picker's confirm: success
+	 *  → notice + lastUsedPiDevice persistence + re-poll; failure → error
+	 *  notice with the agent's message + rethrow (the picker re-enables). */
+	private async piSpawnSession(deviceId: string, cwd: string): Promise<void> {
+		const agent = this.plugin.clients?.agent;
+		if (!agent) {
+			toastErr("pi session not created — agent client unavailable");
+			throw new Error("agent client unavailable");
+		}
+		try {
+			const res = await agent.piSpawn(deviceId, cwd);
+			new Notice(
+				`pi session created on ${deviceId} in ${cwd} via ${res.spawned}`
+					+ (res.hint ? ` (${res.hint})` : ""),
+				5000,
+			);
+			this.plugin.settings.lastUsedPiDevice = deviceId;
+			void this.plugin.saveSettings();
+			for (const p of this.pollers()) p.pollNow();
+		} catch (err) {
+			toastErr(`pi session not created on ${deviceId} — ${describeError(err)}`);
+			throw err;
+		}
 	}
 
 	/** Sync the pi block from the last pi snapshot (observational, no actions;

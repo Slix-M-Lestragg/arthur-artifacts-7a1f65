@@ -8,6 +8,17 @@
  *                        click → start the default instance → toast + re-poll
  *   service active     → accent-colored button (sliced: right ~10% end is a full-
  *                        height red stop-all slice)
+ *   pi (PSEUDO-service) → appended AFTER the agent services; pi is NOT
+ *                        agent-lifecycle-managed (no start/spawn/stop-all —
+ *                        no red kill slice): ACCENT when any device reports
+ *                        sessionsActive > 0, grey otherwise; hover → the
+ *                        pi DEVICE dropdown (one row per device, offline rows
+ *                        greyed + red dot), hovering an ONLINE row → a second
+ *                        menu to the RIGHT of the row ('New…' + the device's
+ *                        live sessions); click → the directory-picker modal
+ *                        (new pi session) pinned to the last-used / only-
+ *                        online device; /api/pi/status unreachable entirely →
+ *                        disabled-with-tooltip (never hidden)
  *                        hover (every registered service) → compact GPU
  *                        dropdown; multi-instance: 'Single GPU'/'Multi-GPUs'
  *                        segmented mode toggle (accent-highlighted, no
@@ -34,9 +45,25 @@
  */
 import { setIcon, setTooltip } from "obsidian";
 
-import type { AgentService } from "../api/agent";
-import { injectIcon } from "../icons";
-import { fmtGigCompact, gpuShortName } from "../util";
+import type { AgentPiSession, AgentService } from "../api/agent";
+import { injectIcon, injectServiceIcon } from "../icons";
+import { fmtGigCompact, fmtDuration, gpuShortName } from "../util";
+import { piMenuSessionLabel } from "./pi-picker";
+
+/** Parse an ISO-ish timestamp into epoch ms (0 when absent/unparseable). */
+function tsMs(raw?: string | null): number {
+	if (!raw) return 0;
+	const t = Date.parse(raw);
+	return Number.isFinite(t) ? t : 0;
+}
+
+/** Tiny element builder (string text lands as an escaped text node). */
+function el(tag: string, opts: { cls?: string; text?: string } = {}): HTMLElement {
+	const node = document.createElement(tag);
+	if (opts.cls) node.className = opts.cls;
+	if (opts.text !== undefined) node.textContent = opts.text;
+	return node;
+}
 /**
  * Fallback service list for when the agent is unreachable (ids the currently
  * deployed agent registry knows; buttons render disabled).
@@ -46,6 +73,19 @@ const FALLBACK_SERVICES: Array<{ id: string; name: string }> = [
 	{ id: "aitoolkit", name: "AI Toolkit" },
 ];
 
+/** The pi PSEUDO-service: never part of the agent's /api/status registry (pi
+ *  is not agent-lifecycle-managed) — always appended AFTER the real services.
+ *  `active` is repainted per tick from the pi feed (any sessionsActive > 0). */
+const PI_PSEUDO_SERVICE: AgentService = {
+	id: "pi",
+	name: "pi",
+	active: false,
+	multi_instance: false,
+	max_instances: 1,
+	default_port: 0,
+	instances: [],
+};
+
 /** Render input gathered from the latest agent poll. */
 export interface ServiceBarState {
 	/** /api/status answered? anything but true → disabled fallback buttons. */
@@ -54,6 +94,36 @@ export interface ServiceBarState {
 	error: string | null;
 	/** Services in the order the agent returned them. */
 	services: AgentService[];
+	/** Pi feed snapshot for the pseudo-service button (null → pi disabled). */
+	pi?: PiMenuData | null;
+}
+
+/** One pi device row of the pi DEVICE dropdown: the /api/pi/devices entry
+ *  merged with the device's session list from the /api/pi/status snapshot. */
+export interface PiDeviceEntry {
+	id: string;
+	hostname: string | null;
+	/** Recent feed heard from? false → greyed + red dot ('offline — no feed
+	 *  in 5min' tooltip), not clickable. */
+	online: boolean;
+	/** True for the machine the agent runs on (picker root = /home/slix). */
+	self: boolean;
+	/** Config ssh mapping ('user@host' or bare host) — picker root inference. */
+	ssh: string | null;
+	sessionsActive: number;
+	sessionsTotal: number;
+	/** Live sessions of the device (from /api/pi/status, device-keyed). */
+	sessions: AgentPiSession[];
+}
+
+/** Pi hover data (the dashboard's merged devices + piStatus snapshot);
+ *  reachable:false → the pi button renders disabled-with-tooltip. */
+export interface PiMenuData {
+	/** /api/pi/status answered? false → pi button disabled (never hidden). */
+	reachable: boolean;
+	/** Last pi collector error (tooltip material when unreachable). */
+	error: string | null;
+	devices: PiDeviceEntry[];
 }
 
 /** One machine occupant of a GPU (a live detail line for the tooltip). */
@@ -95,6 +165,17 @@ export interface ServiceBarCallbacks {
 	gpuSelection?(svcId: string): number[];
 	/** Persist a changed spawn GPU selection. */
 	setGpuSelection?(svcId: string, gpus: number[]): void;
+	/** Hover pi-device data (merged /api/pi/devices + /api/pi/status);
+	 *  null / reachable:false → the pi device dropdown stays closed and the
+	 *  pi button reads disabled. */
+	piMenuData?(): PiMenuData | null;
+	/** Pi button click → open the New-session flow (picker modal) pinned to
+	 *  the last-used / only-online device. */
+	onPiClick?(): void;
+	/** 'New…' clicked on a device row → directory-picker modal for that device. */
+	onPiNewSession?(deviceId: string): void;
+	/** An existing session row clicked (observational handoff notice). */
+	onPiSessionClick?(deviceId: string, sess: AgentPiSession): void;
 }
 
 /**
@@ -103,6 +184,9 @@ export interface ServiceBarCallbacks {
  */
 export interface ServiceButton {
 	svc: AgentService;
+	/** True for pseudo-services (pi): NOT agent-lifecycle-managed — no kill
+	 *  slice, click opens the pi new-session flow instead of start/spawn. */
+	pseudo: boolean;
 	/** Latest rendered service-level state. */
 	active: boolean;
 	disabled: boolean;
@@ -113,12 +197,19 @@ export interface ServiceButton {
 	main: HTMLElement;
 	icon: HTMLElement;
 	name: HTMLElement;
-	/** Red right-end slice (stop-all click target). */
-	kill: HTMLElement;
-	/** Hover GPU dropdown (created lazily on first open; null until opened). */
+	/** Red right-end slice (stop-all click target); null on pseudo-services. */
+	kill: HTMLElement | null;
+	/** Hover dropdown (created lazily on first open; null until opened). */
 	menu: HTMLElement | null;
 	/** Pending hover-intent close timer id (null when none pending). */
 	closeTimer: number | null;
+	/** Pi only: the shared SECOND-LEVEL menu (device sessions), currently
+	 *  attached to `subRow`; null when never opened / detached. */
+	subMenu: HTMLElement | null;
+	/** The device row the subMenu is attached to (null after close). */
+	subRow: HTMLElement | null;
+	/** Pending submenu close timer id (null when none pending). */
+	subTimer: number | null;
 }
 
 export class ServiceBar {
@@ -144,23 +235,29 @@ export class ServiceBar {
 
 	/**
 	 * Sync the button set + state with fresh poll data. Membership changes
-	 * create/remove only the affected buttons; order follows the agent.
+	 * create/remove only the affected buttons; order follows the agent, with
+	 * the pi PSEUDO-service always appended LAST (pi is not managed by the
+	 * agent's service registry — it exists even when /api/status fails).
 	 */
 	render(state: ServiceBarState): void {
 		const reachable = state.agentOk === true;
-		const wanted = reachable ? state.services : FALLBACK_SERVICES.map((s) => ({
+		const wanted: AgentService[] = (reachable ? state.services : FALLBACK_SERVICES.map((s) => ({
 			id: s.id,
 			name: s.name,
 			active: false,
 			multi_instance: false,
 			max_instances: 1,
 			default_port: 0,
-			instances: [],
-		}));
+			instances: [] as AgentService["instances"],
+		}))).slice();
+		// The pi pseudo-service button is ALWAYS wanted (spec: never hidden —
+		// only disabled-with-tooltip while the pi feed is entirely unreachable).
+		wanted.push(PI_PSEUDO_SERVICE);
+		const pi = state.pi ?? null;
 
 		// Membership.
 		for (const svc of wanted) {
-			if (!this.buttons.has(svc.id)) this.createButton(svc);
+			if (!this.buttons.has(svc.id)) this.createButton(svc, svc.id === "pi");
 		}
 		for (const [id, entry] of [...this.buttons]) {
 			if (!wanted.some((s) => s.id === id)) {
@@ -190,6 +287,11 @@ export class ServiceBar {
 		for (const svc of wanted) {
 			const entry = this.buttons.get(svc.id);
 			if (!entry) continue;
+			// Pseudo-services (pi) own their state machine entirely.
+			if (entry.pseudo) {
+				this.renderPiButton(entry, pi);
+				continue;
+			}
 			const active = reachable && svc.active;
 			entry.svc = svc;
 			entry.active = active;
@@ -211,29 +313,76 @@ export class ServiceBar {
 			// The red slice stays visible in every state — offline/unreachable
 			// pills grey + desaturate it via the button's grayscale filter, so
 			// the sliced shape survives (muted, non-interactive there).
-			entry.kill.style.display = "";
-			entry.kill.setAttribute("aria-label", `Stop all ${svc.name ?? svc.id} instances`);
-			entry.kill.setAttribute("title", `Stop all ${svc.name ?? svc.id} instances`);
+			if (entry.kill) {
+				entry.kill.style.display = "";
+				entry.kill.setAttribute("aria-label", `Stop all ${svc.name ?? svc.id} instances`);
+				entry.kill.setAttribute("title", `Stop all ${svc.name ?? svc.id} instances`);
+			}
+			// Pseudo-services keep NO slice at all (no stop-all semantics): the
+			// pi pill renders without the red end piece in every state.
+			if (entry.pseudo && entry.kill) entry.kill.style.display = "none";
 		}
 	}
 
-	private createButton(svc: AgentService): void {
+	/** The pi pseudo-service button: disabled-with-tooltip while the pi feed
+	 *  is unreachable entirely, ACCENT when any device has sessionsActive > 0,
+	 *  grey otherwise — and NEVER a kill slice (no stop-all semantics). */
+	private renderPiButton(entry: ServiceButton, pi: PiMenuData | null): void {
+		const reachable = pi?.reachable === true;
+		const activeCount = reachable
+			? (pi?.devices ?? []).reduce((n, d) => n + (typeof d.sessionsActive === "number" ? d.sessionsActive : 0), 0)
+			: 0;
+		const active = reachable && activeCount > 0;
+		entry.svc = { ...PI_PSEUDO_SERVICE, active };
+		entry.active = active;
+		entry.disabled = !reachable;
+		entry.btn.disabled = !reachable;
+		entry.btn.className =
+			"arthur-svc-btn arthur-svc-btn--pseudo"
+			+ (reachable ? (active ? " arthur-svc-btn--active" : " arthur-svc-btn--offline") : " arthur-svc-btn--disabled");
+		entry.name.setText("pi");
+		const online = (pi?.devices ?? []).filter((d) => d.online === true).length;
+		entry.btn.setAttribute(
+			"aria-label",
+			!reachable
+				? `pi unavailable (${pi?.error ?? "pi status unreachable"})`
+				: active
+					? `pi — ${activeCount} active session${activeCount === 1 ? "" : "s"}; click to start a new pi session`
+					: `pi — no active pi sessions; click to open the new-session flow`,
+			);
+		this.applyIcon(entry);
+		if (entry.kill) {
+			// No red kill slice for pseudo-services — hidden in every state.
+			entry.kill.style.display = "none";
+			entry.kill.removeAttribute("aria-label");
+			entry.kill.removeAttribute("title");
+			void online;
+		}
+	}
+
+	private createButton(svc: AgentService, pseudo = false): void {
 		const icon = document.createElement("span");
 		icon.className = "arthur-svc-icon";
 		const name = document.createElement("span");
 		name.className = "arthur-svc-name";
 		// Sliced pill: left part (icon + name), right part (red stop-all slice).
+		// Pseudo-services (pi) render WITHOUT the slice — no lifecycle actions.
 		const main = document.createElement("span");
 		main.className = "arthur-svc-main";
 		main.append(icon, name);
-		const kill = document.createElement("span");
-		kill.className = "arthur-svc-kill";
-		kill.setAttribute("role", "button");
-		setIcon(kill, "trash-2");
-
+		let kill: HTMLElement | null = null;
 		const btn = document.createElement("button");
-		btn.className = "arthur-svc-btn";
-		btn.append(main, kill);
+		if (pseudo) {
+			btn.className = "arthur-svc-btn arthur-svc-btn--pseudo";
+			btn.append(main);
+		} else {
+			kill = document.createElement("span");
+			kill.className = "arthur-svc-kill";
+			kill.setAttribute("role", "button");
+			setIcon(kill, "trash-2");
+			btn.className = "arthur-svc-btn";
+			btn.append(main, kill);
+		}
 
 		// Hover wrapper: the position:relative anchor the GPU dropdown hangs
 		// off (the dropdown must NOT live inside the <button>). Multi-instance
@@ -245,6 +394,7 @@ export class ServiceBar {
 
 		const entry: ServiceButton = {
 			svc,
+			pseudo,
 			active: false,
 			disabled: true,
 			wrap,
@@ -255,17 +405,26 @@ export class ServiceBar {
 			kill,
 			menu: null,
 			closeTimer: null,
+			subMenu: null,
+			subRow: null,
+			subTimer: null,
 		};
 		btn.addEventListener("click", () => {
 			if (entry.disabled) return;
+			if (entry.pseudo) {
+				this.callbacks.onPiClick?.();
+				return;
+			}
 			if (entry.active) this.callbacks.onSpawn(entry.svc);
 			else this.callbacks.onStart(entry.svc);
 		});
-		kill.addEventListener("click", (e) => {
-			// The kill zone is its own click target — never a spawn.
-			e.stopPropagation();
-			if (entry.active) this.callbacks.onKill(entry.svc);
-		});
+		if (kill) {
+			kill.addEventListener("click", (e) => {
+				// The kill zone is its own click target — never a spawn.
+				e.stopPropagation();
+				if (entry.active) this.callbacks.onKill(entry.svc);
+			});
+		}
 		// Hover GPU dropdown (every registered service; the data callback
 		// answering null keeps it closed — e.g. agent unreachable).
 		// Hover-intent protocol: mouseenter of the wrap opens (and cancels any
@@ -291,12 +450,17 @@ export class ServiceBar {
 		this.openMenu(entry);
 	}
 
-	/** Open the hover GPU dropdown under the service button (any registered
-	 *  service with available menu data; content is rebuilt fresh on every
-	 *  open so the GPU stats/occupants are current). */
+	/** Open the hover dropdown under the service button (registered services
+	 *  with available GPU menu data, or the pi device dropdown on the
+	 *  pseudo-service; content is rebuilt fresh on every open so the data is
+	 *  current). */
 	private openMenu(entry: ServiceButton): void {
-		const data = this.callbacks.gpuMenuData?.(entry.svc.id) ?? null;
+		const data = entry.pseudo
+			? (this.callbacks.piMenuData?.() ?? null)
+			: (this.callbacks.gpuMenuData?.(entry.svc.id) ?? null);
 		if (!data) return;
+		// Pseudo-services additionally require a reachable pi feed.
+		if (entry.pseudo && (data as PiMenuData).reachable !== true) return;
 		this.cancelScheduledClose(entry);
 		// Hover-intent invariant: at most ONE dropdown open at a time — opening
 		// this one closes a sibling's immediately (no delay).
@@ -317,7 +481,8 @@ export class ServiceBar {
 			entry.menu.addEventListener("mouseleave", () => this.scheduleClose(entry));
 			entry.wrap.append(entry.menu);
 		}
-		this.buildMenuContent(entry, data);
+		if (entry.pseudo) this.buildPiMenuContent(entry, data as PiMenuData);
+		else this.buildMenuContent(entry, data as GpuMenuData);
 		entry.menu.addClass("arthur-svc-menu--open");
 		this.openId = entry.svc.id;
 		this.attachDocClose();
@@ -345,6 +510,7 @@ export class ServiceBar {
 	/** Close immediately (content is rebuilt on next hover). */
 	private closeMenuNow(entry: ServiceButton): void {
 		this.cancelScheduledClose(entry);
+		this.closePiSub(entry);
 		entry.menu?.removeClass("arthur-svc-menu--open");
 		if (this.openId === entry.svc.id) this.openId = null;
 	}
@@ -547,10 +713,164 @@ export class ServiceBar {
 		}
 	}
 
-	/** Inject the service's official inline-SVG mark (cached per id). */
+	/** Inject the service's official inline-SVG mark (cached per id);
+	 *  pseudo-services render their REGISTRY row icon instead (pi → the lucide
+	 *  'terminal' glyph — no official logo exists). */
 	private applyIcon(entry: ServiceButton): void {
 		if (this.icons.get(entry.svc.id) === entry.svc.id) return;
 		this.icons.set(entry.svc.id, entry.svc.id);
-		injectIcon(entry.icon, entry.svc.id);
+		if (entry.pseudo) injectServiceIcon(entry.icon, entry.svc.id);
+		else injectIcon(entry.icon, entry.svc.id);
+	}
+
+	// --------------------------------------------------------------- pi ----
+
+	/** Close (detach) the pi second-level submenu and drop its close timer. */
+	private closePiSub(entry: ServiceButton): void {
+		if (entry.subTimer != null) {
+			window.clearTimeout(entry.subTimer);
+			entry.subTimer = null;
+		}
+		entry.subMenu?.removeClass("arthur-pi-submenu--open");
+		entry.subRow = null;
+	}
+
+	/** Submenu leaving: schedule the close after the same hover-intent delay
+	 *  (re-entering the row OR the submenu before it fires cancels). */
+	private cancelPiSubClose(entry: ServiceButton): void {
+		if (entry.subTimer != null) {
+			window.clearTimeout(entry.subTimer);
+			entry.subTimer = null;
+		}
+	}
+
+	private schedulePiSubClose(entry: ServiceButton): void {
+		if (!entry.subMenu?.hasClass("arthur-pi-submenu--open")) return;
+		if (entry.subTimer != null) window.clearTimeout(entry.subTimer);
+		entry.subTimer = window.setTimeout(() => {
+			entry.subTimer = null;
+			this.closePiSub(entry);
+		}, MENU_CLOSE_DELAY_MS);
+	}
+
+	/** (Re)build the pi DEVICE dropdown: one row per /api/pi device — name
+	 *  (id) + dimmed hostname suffix; ONLINE rows are hoverable (they open
+	 *  the device's second-level sessions menu to the right), OFFLINE rows
+	 *  render greyed + red-dot + 'offline — no feed in 5min' tooltip and are
+	 *  NOT clickable. */
+	private buildPiMenuContent(entry: ServiceButton, data: PiMenuData): void {
+		const menu = entry.menu;
+		if (!menu) return;
+		this.closePiSub(entry); // a rebuild must drop any attached submenu
+		entry.subMenu = null;
+		menu.empty();
+		const devices = data.devices ?? [];
+		if (devices.length === 0) {
+			const note = document.createElement("span");
+			note.className = "arthur-svc-menu-note";
+			note.textContent = "no pi devices reported";
+			menu.append(note);
+			return;
+		}
+		for (const dev of devices) {
+			menu.append(this.piDeviceRow(entry, dev));
+		}
+	}
+
+	/** One device row of the pi dropdown (+ its hover submenu wiring). */
+	private piDeviceRow(entry: ServiceButton, dev: PiDeviceEntry): HTMLElement {
+		const online = dev.online === true;
+		const row = document.createElement("div");
+		row.className = "arthur-pi-dev-row" + (online ? "" : " arthur-pi-dev-row--offline");
+		if (online) row.setAttribute("role", "menuitem");
+		row.setAttribute("data-pi-device", dev.id);
+		const name = document.createElement("span");
+		name.className = "arthur-pi-dev-name";
+		name.textContent = dev.id;
+		row.append(name);
+		if (dev.hostname && dev.hostname !== dev.id) {
+			row.append(el("span", { cls: "arthur-pi-dev-host", text: dev.hostname }));
+		}
+		if (!online) {
+			row.append(el("span", { cls: "arthur-dot arthur-dot--red arthur-pi-dev-offline-dot" }));
+			setTooltip(row, "offline — no feed in 5min");
+		} else {
+			const host = dev.hostname ?? dev.id;
+			setTooltip(
+				row,
+				`${host} — ${dev.sessionsActive} active · ${dev.sessionsTotal} session${dev.sessionsTotal === 1 ? "" : "s"}`,
+			);
+			// Online rows open the SECOND-level menu on hover (same hover-
+			// intent protocol; the submenu is a DOM child of the row, so moving
+			// onto it never counts as leaving the row).
+			row.addEventListener("mouseenter", () => this.openPiSub(entry, row, dev));
+			row.addEventListener("mouseleave", () => this.schedulePiSubClose(entry));
+		}
+		return row;
+	}
+
+	/** Open (or reparent + rebuild) the device's second-level menu to the
+	 *  RIGHT of its row, top-aligned with the row: 'New…' first, then the
+	 *  device's live sessions (label = name or 'session <8-char-id>', second
+	 *  line = cwd · duration · active dot). */
+	private openPiSub(entry: ServiceButton, row: HTMLElement, dev: PiDeviceEntry): void {
+		this.cancelPiSubClose(entry);
+		this.closePiSub(entry);
+		if (!entry.subMenu) {
+			entry.subMenu = document.createElement("span");
+			entry.subMenu.className = "arthur-pi-submenu";
+			entry.subMenu.setAttribute("role", "menu");
+			entry.subMenu.addEventListener("mouseenter", () => this.cancelPiSubClose(entry));
+			entry.subMenu.addEventListener("mouseleave", () => this.schedulePiSubClose(entry));
+		}
+		this.buildPiSubContent(dev);
+		row.append(entry.subMenu);
+		entry.subRow = row;
+		entry.subMenu.addClass("arthur-pi-submenu--open");
+	}
+
+	/** (Re)fill the second-level menu for one device. */
+	private buildPiSubContent(dev: PiDeviceEntry): void {
+		const sub = this.buttons.get("pi")?.subMenu;
+		if (!sub) return;
+		sub.empty();
+		// 'New…' — the directory-picker entry point for this device.
+		const newBtn = document.createElement("div");
+		newBtn.className = "arthur-pi-sub-item arthur-pi-new";
+		const plus = document.createElement("span");
+		plus.className = "arthur-pi-new-icon";
+		setIcon(plus, "plus");
+		newBtn.append(plus, el("span", { cls: "arthur-pi-new-text", text: "New…" }));
+		newBtn.addEventListener("click", () => {
+			this.callbacks.onPiNewSession?.(dev.id);
+			this.closeAllMenus();
+		});
+		sub.append(newBtn);
+		// Existing sessions of the device (from the piStatus snapshot):
+		// label = friendly name or 'session <8-char-id>'; meta line = cwd ·
+		// duration. Click is OBSERVATIONAL (view-handoff notice only).
+		const now = Date.now();
+		for (const sess of dev.sessions ?? []) {
+			const item = el("div", {
+				cls: `arthur-pi-sub-item arthur-pi-sess ${sess.active ? "arthur-pi-sess--active" : "arthur-pi-sess--idle"}`,
+			});
+			item.append(el("span", { cls: "arthur-pi-sess-name", text: piMenuSessionLabel(sess) }));
+			// Meta line (second row line): cwd path · duration · active dot.
+			const meta = el("span", { cls: "arthur-pi-sess-meta" });
+			const startMs = tsMs(sess.startedAt);
+			const refMs = sess.active ? startMs || tsMs(sess.lastActivity) : tsMs(sess.lastActivity);
+			const dur = refMs > 0 && now > refMs ? fmtDuration((now - refMs) / 1000) : null;
+			meta.append(el("span", { cls: `arthur-dot ${sess.active ? "arthur-dot--green" : "arthur-dot--gray"}` }));
+			meta.append(document.createTextNode([sess.cwd ?? "", dur].filter((s): s is string => Boolean(s)).join(" · ")));
+			item.append(meta);
+			item.addEventListener("click", () => {
+				this.callbacks.onPiSessionClick?.(dev.id, sess);
+				this.closeAllMenus();
+			});
+			sub.append(item);
+		}
+		if ((dev.sessions ?? []).length === 0) {
+			sub.append(el("span", { cls: "arthur-svc-menu-note", text: "no sessions on this device" }));
+		}
 	}
 }

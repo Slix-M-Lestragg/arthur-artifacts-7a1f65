@@ -23,6 +23,11 @@ export { normalizeHost };
 export { WsConnection, WsState } from "./connection";
 export { injectIcon, injectServiceIcon, serviceLabel, SERVICE_META } from "./icons";
 export { isWebViewerEnabled, openWebUrl, openUiTooltip, WEBVIEWER_VIEW_TYPE } from "./ui/webviewer";
+// Pi service-button flow surface (smoke-tests assert the picker helpers and
+// the modal class directly against the compiled main.js export surface). Not
+// used at runtime beyond the dashboard view's own imports.
+export { PiPickerModal, piDeviceRoot, piMenuSessionLabel } from "./ui/pi-picker";
+export type { PiPickerDevice, PiPickerOpts } from "./ui/pi-picker";
 
 /** One server profile — host + which ports the services live on + tokens. */
 export interface ServerProfile {
@@ -57,6 +62,9 @@ export interface ArthurSettings {
 	 *  number[]> of checked GPU indexes (empty/missing = default: single GPU,
 	 *  no pinned index → agent's modulo rotation). */
 	spawnGpuSel: Record<string, number[]>;
+	/** Last pi device a session was spawned on (service-bar pi button prefill;
+	 *  empty = no device used yet → the only/first online device is used). */
+	lastUsedPiDevice: string;
 }
 
 /** Clients built from the active profile — rebuilt when settings change. */
@@ -93,6 +101,7 @@ const DEFAULT_SETTINGS: ArthurSettings = {
 	queueCollapsed: false,
 	gpuCollapsed: {},
 	spawnGpuSel: {},
+	lastUsedPiDevice: "",
 };
 
 /** Parse a bounded positive int; invalid/missing → fallback. */
@@ -641,6 +650,8 @@ export default class ArthurPlugin extends Plugin {
 			queueCollapsed: data?.queueCollapsed === true,
 			gpuCollapsed: sanitizeGpuCollapsed(data?.gpuCollapsed),
 			spawnGpuSel: sanitizeGpuSel(data?.spawnGpuSel),
+			lastUsedPiDevice:
+				typeof data?.lastUsedPiDevice === "string" ? data.lastUsedPiDevice.trim() : "",
 		};
 	}
 

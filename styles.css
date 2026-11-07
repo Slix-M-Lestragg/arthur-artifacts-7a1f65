@@ -1344,3 +1344,261 @@
 .arthur-pi-child--canceled {
 	opacity: 0.6;
 }
+
+/* ------------------------------------------------- pi service button ----- */
+
+/* pseudo-service (pi) pill: NO red kill slice — the left part carries both
+   rounded ends so the shape reads as a complete (not sliced) capsule */
+.arthur-svc-btn--pseudo {
+	cursor: pointer;
+}
+
+.arthur-svc-btn--pseudo .arthur-svc-main {
+	border-radius: 999px;
+	padding-right: 0.85em;
+}
+
+/* pi DEVICE dropdown rows (second flavor of the v0.8.x hover dropdown) */
+.arthur-pi-dev-row {
+	position: relative;
+	display: flex;
+	align-items: center;
+	gap: 0.45em;
+	padding: 0.25em 0.45em;
+	border-radius: var(--radius-s);
+	font-size: var(--font-ui-small);
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.arthur-pi-dev-row:hover {
+	background: var(--background-modifier-hover);
+}
+
+.arthur-pi-dev-name {
+	font-weight: var(--font-medium);
+}
+
+/* hostname suffix dimmed after the device id */
+.arthur-pi-dev-host {
+	opacity: 0.6;
+	font-size: var(--font-ui-smaller);
+}
+
+/* offline device: greyed, not clickable, red feed-status dot */
+.arthur-pi-dev-row--offline {
+	cursor: default;
+	opacity: 0.55;
+	filter: grayscale(1);
+}
+
+.arthur-pi-dev-offline-dot {
+	flex: none;
+}
+
+/* second-level device menu: vertical, opens to the RIGHT of the hovered
+   device row, top-aligned with it; a DOM child of the row so hovering it
+   never counts as leaving the row (hover-intent protocol, like the dropdown
+   itself). ::before is the invisible bridge zone tiling the row→menu gap. */
+.arthur-pi-submenu {
+	display: none;
+	position: absolute;
+	top: 0;
+	left: calc(100% + 6px);
+	z-index: 101;
+	min-width: 14em;
+	max-width: 26em;
+	flex-direction: column;
+	gap: 1px;
+	padding: 0.35em;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m, 10px);
+	box-shadow: var(--shadow-s);
+}
+
+.arthur-pi-submenu::before {
+	content: "";
+	position: absolute;
+	top: 0;
+	left: -7px;
+	height: 100%;
+	width: 7px;
+}
+
+.arthur-pi-submenu--open {
+	display: flex;
+}
+
+.arthur-pi-sub-item {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 0.1em;
+	padding: 0.25em 0.45em;
+	border-radius: var(--radius-s);
+	font-size: var(--font-ui-small);
+	white-space: nowrap;
+	cursor: pointer;
+	max-width: 26em;
+	overflow: hidden;
+}
+
+.arthur-pi-sub-item:hover {
+	background: var(--background-modifier-hover);
+}
+
+/* 'New…' row: PLUS icon + label on one line (accent-tinted on hover) */
+.arthur-pi-new {
+	flex-direction: row;
+	align-items: center;
+	gap: 0.45em;
+	color: var(--interactive-accent);
+}
+
+.arthur-pi-new:hover {
+	background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+}
+
+.arthur-pi-new-icon {
+	display: inline-flex;
+	flex: none;
+}
+
+.arthur-pi-new-icon svg {
+	width: 0.9em;
+	height: 0.9em;
+}
+
+/* session rows: name line + compact meta line (cwd · duration · dot) */
+.arthur-pi-sess-name {
+	font-weight: var(--font-medium);
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.arthur-pi-sess-meta {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.35em;
+	font-size: var(--font-ui-smaller);
+	opacity: 0.7;
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.arthur-pi-sess-meta .arthur-dot {
+	flex: none;
+}
+
+.arthur-pi-sess--idle {
+	opacity: 0.7;
+}
+
+/* ---------------------------------------------- pi directory picker ------ */
+
+.arthur-pi-picker .arthur-pi-dirfilter {
+	width: 100%;
+	margin-bottom: 0.6em;
+}
+
+.arthur-pi-crumbs {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 2px;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	margin-bottom: 0.5em;
+	min-width: 0;
+}
+
+.arthur-pi-crumb {
+	border-radius: var(--radius-s);
+	padding: 0 0.25em;
+	cursor: pointer;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.arthur-pi-crumb:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+/* the current (last) segment is not a link */
+.arthur-pi-crumb--here {
+	cursor: default;
+	color: var(--text-normal);
+	font-weight: var(--font-medium);
+}
+
+.arthur-pi-crumb--here:hover {
+	background: transparent;
+}
+
+.arthur-pi-crumb-sep {
+	opacity: 0.5;
+}
+
+.arthur-pi-dirlist {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	max-height: 260px;
+	overflow-y: auto;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	padding: 0.3em;
+	background: var(--background-primary);
+}
+
+.arthur-pi-dirrow {
+	display: flex;
+	align-items: center;
+	padding: 0.2em 0.45em;
+	border-radius: var(--radius-s);
+	font-size: var(--font-ui-small);
+	cursor: pointer;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.arthur-pi-dirrow:hover {
+	background: var(--background-modifier-hover);
+}
+
+/* '..' parent step: muted, pinned first */
+.arthur-pi-dirrow--up {
+	color: var(--text-muted);
+	font-weight: var(--font-medium);
+}
+
+.arthur-pi-dirnote {
+	font-size: var(--font-ui-smaller);
+	opacity: 0.7;
+	padding: 0.2em 0.45em;
+	font-style: italic;
+}
+
+.arthur-pi-dirnote--err {
+	color: var(--text-error);
+	opacity: 1;
+	font-style: normal;
+}
+
+/* 'Use this directory' — the accent confirm of the picker */
+.arthur-pi-use {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	border: none;
+}
+
+.arthur-pi-use:hover:not(:disabled) {
+	background: var(--interactive-accent-hover);
+	box-shadow: none;
+}

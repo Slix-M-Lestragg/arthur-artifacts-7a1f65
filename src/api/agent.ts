@@ -378,4 +378,84 @@ export class ArthurAgentClient {
 			lines != null ? { lines } : undefined,
 		);
 	}
+
+	// ------------------------------------------------ pi deploy surface ----
+	// agent v0.8.0 — the pi SERVICE (spawning) surface, complementing the
+	// observational /api/pi/status + tail reads above. Pi is NOT a managed
+	// agent-lifecycle service: no systemd units — spawning hands a device a
+	// tmux session (or rpc-pipe fallback) rooted at a chosen working dir.
+
+	/** GET /api/pi/devices — one entry per pi-sync device (session counts
+	 *  included; the per-device session LISTS still come from /api/pi/status). */
+	piDevices(): Promise<AgentPiDevicesResponse> {
+		return this.call<AgentPiDevicesResponse>("/api/pi/devices");
+	}
+
+	/** GET /api/pi/devices/{device}/dirs?path=<abs> — the subdirectory listing
+	 *  of one absolute path on the device (directory-picker backing store).
+	 *  `parent` is null at the listing's root (no '..' step available). */
+	piDirs(device: string, path: string): Promise<AgentPiDirsResponse> {
+		return this.call<AgentPiDirsResponse>(
+			`/api/pi/devices/${encodeURIComponent(device)}/dirs`,
+			"GET",
+			{ path },
+		);
+	}
+
+	/** POST /api/pi/sessions {device, cwd} — spawn a pi coding session rooted
+	 *  at `cwd` on the device (201: spawned 'tmux' | 'rpc-pipe'; error body
+	 *  carries {error} which surfaces as a typed ArthurApiError). */
+	piSpawn(device: string, cwd: string): Promise<AgentPiSpawnResult> {
+		return this.call<AgentPiSpawnResult>(
+			"/api/pi/sessions",
+			"POST",
+			undefined,
+			{ device, cwd },
+		);
+	}
+}
+
+// ------------------------------------------------- pi deploy surface types ----
+
+/** One pi-sync device of GET /api/pi/devices (agent v0.8.0). `self` marks the
+ *  machine the agent itself runs on; `ssh` is the config's ssh mapping
+ *  ("user@host" or bare host) used to infer the device's home root. */
+export interface AgentPiDeviceEntry {
+	id: string;
+	hostname?: string | null;
+	/** Recent feed heard from? false → offline (no feed in 5min). */
+	online: boolean;
+	/** True for the machine the agent runs on. */
+	self?: boolean;
+	/** The config ssh mapping, e.g. "benjaminmatthys@mac.home" or "ulysse". */
+	ssh?: string | null;
+	sessionsActive: number;
+	sessionsTotal: number;
+}
+
+/** GET /api/pi/devices response. */
+export interface AgentPiDevicesResponse {
+	devices: AgentPiDeviceEntry[];
+}
+
+/** GET /api/pi/devices/{device}/dirs?path=<abs> — one directory listing. */
+export interface AgentPiDirsResponse {
+	device: string;
+	/** The listed (absolute) path — echoed by the agent. */
+	path: string;
+	/** Subdirectory NAMES of `path` (files excluded). */
+	dirs: string[];
+	/** Absolute parent path, null when there is none (listing root). */
+	parent: string | null;
+}
+
+/** POST /api/pi/sessions — 201 result. `spawned` names the transport
+ *  ('tmux' or 'rpc-pipe'); `window` is the tmux window when applicable and
+ *  `hint` a free-form human pointer for the notice. */
+export interface AgentPiSpawnResult {
+	device: string;
+	cwd: string;
+	spawned: string;
+	window?: string | null;
+	hint?: string | null;
 }
