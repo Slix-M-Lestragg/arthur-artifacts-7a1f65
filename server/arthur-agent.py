@@ -61,6 +61,25 @@ registry:
   GET  /api/pi/sessions/{dev}/{id}/tail?lines=N → last N compacted entries of
                  the session's JSONL (path resolved from the device's status
                  file, sandboxed to /home/*/.pi/agent/sessions/)
+
+(v0.8.0, Bearer-gated) pi device registry + session spawning — the config
+(/etc/arthur-agent/config.json) gains a top-level "pi_devices" object
+mapping agent device ids (this host, the Mac, ulysse) to *self*/SSH
+identities plus path allowlists; live freshness is merged in from the
+pi-sync feed of v0.7.0:
+
+  GET  /api/pi/devices                        → the device registry {devices:
+                 [{id, hostname, online, self, ssh, sessionsActive,
+                 sessionsTotal}], generatedAt}
+  GET  /api/pi/devices/{dev}/dirs?path=<abs>  → subdirectory names, SUB-dirs
+                 only, sorted, hidden excluded; self → local fs listing,
+                 remote → BatchMode ssh + `cd <path> && ls -p | grep /`;
+                 absolute, no '..' segments, allowlist-prefixed paths only
+  POST /api/pi/sessions {device, cwd}         → START a pi session in cwd on
+                 that device (tmux preferred — TUI lives in a detached
+                 tmux session the user can attach to; rpc-pipe fallback —
+                 long-lived `pi --mode rpc` with stdin held open), 201 +
+                 audit log, 502 on spawn failure
 """
 
 import json
@@ -71,12 +90,15 @@ import subprocess
 import threading
 import time
 import urllib.request
+import pwd
+import shlex
+import shutil
 from collections import deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-AGENT_VERSION = "0.7.0"
+AGENT_VERSION = "0.8.0"
 
 CONFIG_PATH = os.environ.get("ARTHUR_AGENT_CONFIG", "/etc/arthur-agent/config.json")
 TOKEN_PATH = os.environ.get("ARTHUR_AGENT_TOKEN_FILE", "/etc/arthur-agent/token")
@@ -134,8 +156,27 @@ def load_config():
       },
       "num_gpus": 2,          # optional static fallback hint
       "bind": "0.0.0.0",      # optional; env ARTHUR_AGENT_BIND wins otherwise
-      "port": 8766            # optional; env ARTHUR_AGENT_PORT wins otherwise
+      "port": 8766,           # optional; env ARTHUR_AGENT_PORT wins otherwise
+      "pi_devices": {         # optional (v0.8.0); pi device registry
+        "Arthur": {"self": true, "user": "slix",
+                   "feed": "Arthur",
+                   "allow": ["/home/slix", "/mnt/work", "/mnt/vault"]},
+        "mac.home": {"ssh": "benjaminmatthys@100.93.241.75",
+                     "feed": "Voyager.local",
+                     "allow": ["/Users/benjaminmatthys"]},
+        "ulysse": {"ssh": "ulysse@100.75.249.5", "feed": "ulysse",
+                   "allow": ["/home", "/mnt", "/opt"]}
+      }
     }
+
+    Per device: `self` marks the agent's own host (local fs listing + a local
+    `user` account to drop into for the spawn, pi runs as that user); `ssh` is
+    the BatchMode ssh target `user@host` for remote devices (exactly one of
+    self/ssh — self devices may still carry an ssh field in the listing,
+    always null); `feed` is the *optional* pi-sync device name the device's
+    sessions/status freshness is read from (defaults to the config key); and
+    `allow` is the prefix allowlist both the dirs listing and the spawn cwd
+    must match (absolute paths, never a '..' segment).
     """
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         raw = json.load(f)
@@ -209,10 +250,66 @@ def load_config():
         registry[svc_id] = out
     return {
         "services": registry,
+        "pi_devices": _load_pi_devices(raw.get("pi_devices", {})),
         "num_gpus": int(raw.get("num_gpus", 1)),
         "bind": raw.get("bind", os.environ.get("ARTHUR_AGENT_BIND", "0.0.0.0")),
         "port": int(raw.get("port", os.environ.get("ARTHUR_AGENT_PORT", "8766"))),
     }
+
+
+# --------------------------------------------------------------------------
+# pi device registry config (v0.8.0)
+# --------------------------------------------------------------------------
+
+def _load_pi_devices(raw):
+    """Parse the optional top-level pi_devices object (v0.8.0): id → spec.
+    Only well-formed entries survive validation — anything malformed is a
+    fatal config error (the whole registry refuses to start), same policy as
+    the services registry. See load_config() for the schema."""
+    if not isinstance(raw, dict):
+        raise ValueError("'pi_devices' must be an object")
+    out = {}
+    for dev_id, spec in raw.items():
+        if not isinstance(dev_id, str) or not PI_NAME_RE.match(dev_id):
+            raise ValueError("pi device id %r must match [A-Za-z0-9._-]"
+                             % dev_id)
+        if not isinstance(spec, dict):
+            raise ValueError("pi_devices[%r] must be an object" % dev_id)
+        is_self = bool(spec.get("self", False))
+        if is_self not in (True, False):  # pragma: no cover — bool() above
+            raise ValueError("pi_devices[%r].self must be a boolean" % dev_id)
+        ssh = spec.get("ssh")
+        if ssh is not None and (not isinstance(ssh, str)
+                                or not SSH_TARGET_RE.match(ssh)):
+            raise ValueError("pi_devices[%r].ssh must be a 'user@host' token"
+                             % dev_id)
+        if not is_self and ssh is None:
+            raise ValueError("pi_devices[%r] (remote) needs an ssh user@host"
+                             % dev_id)
+        user = spec.get("user")
+        if user is not None and (not isinstance(user, str)
+                                 or not PI_LOGIN_RE.match(user)):
+            raise ValueError("pi_devices[%r].user must be a unix login name"
+                             % dev_id)
+        feed = spec.get("feed")
+        if feed is not None and (not isinstance(feed, str)
+                                 or not PI_NAME_RE.match(feed)):
+            raise ValueError("pi_devices[%r].feed must be a pi-sync device "
+                             "name" % dev_id)
+        allow = spec.get("allow")
+        if not isinstance(allow, list) or not allow or \
+                not all(isinstance(p, str) and p.startswith("/")
+                        and not p.endswith("/") and not p.strip("/") == ""
+                        and ".." not in p.split("/") and "\0" not in p
+                        for p in allow):
+            raise ValueError("pi_devices[%r].allow must be a non-empty list "
+                             "of absolute path prefixes" % dev_id)
+        if len(set(allow)) != len(allow):
+            raise ValueError("pi_devices[%r].allow entries must be unique"
+                             % dev_id)
+        out[dev_id] = {"self": is_self, "ssh": ssh, "user": user,
+                       "feed": feed, "allow": list(allow)}
+    return out
 
 
 def load_token():
@@ -982,6 +1079,15 @@ PI_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 # read — matched against the REALPATH of the status-recorded session path
 PI_SESSIONS_SNDBOX_RE = re.compile(r"^/home/[^/]+/\.pi/agent/sessions/")
 
+# v0.8.0: pi device registry / dir listing / session spawn
+SSH_BATCH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=6",
+                  "-o", "StrictHostKeyChecking=accept-new"]
+SSH_TIMEOUT = 20         # every remote ssh subprocess timeout (s)
+SSH_TARGET_RE = re.compile(r"^[A-Za-z0-9._@-]{1,253}$")  # user@host token only
+PI_LOGIN_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+PI_SPAWN_PREFIX = "pi-arthur-"      # tmux session name prefix
+PI_RPC_SHELL = "tail -f /dev/null | pi --mode rpc"  # long-lived RPC fallback
+
 
 def pi_repo():
     """Root of the pi-sync mirror repo. Default ~/.pi/agent/pi-sync/repo;
@@ -1161,6 +1267,269 @@ def pi_session_tail(device, session_id, n):
             lines.append(compact)
     return 200, {"device": device, "sessionId": session_id,
                  "count": len(lines), "lines": lines}
+
+
+# --------------------------------------------------------------------------
+# pi device registry, dir listing, session spawn (v0.8.0)
+# --------------------------------------------------------------------------
+
+def _pi_feed_path(spec, suffix):
+    """Path into the pi-sync repo for a device's feed name: suffix is either
+    "sessions.json" → status/<Dev>.sessions.json, or "json" →
+    devices/<Dev>.json."""
+    name = spec["feed"]
+    if suffix == "sessions.json":
+        return os.path.join(pi_repo(), "status", "%s.sessions.json" % name)
+    return os.path.join(pi_repo(), "devices", "%s.json" % name)
+
+
+def pi_device_online(spec):
+    """Freshness/liveness of one registry device: the pi-sync feed is fresh
+    (updatedAt within 5 min) OR it is the agent's own host and the feed file
+    simply exists (self devices with a stale-but-present feed stay online —
+    the host is the one the agent runs on)."""
+    path = _pi_feed_path(spec, "sessions.json")
+    feed_exists = os.path.isfile(path)
+    data = _pi_load_json(path)
+    if data:
+        updated = _pi_parse_ts(data.get("updatedAt"))
+        if updated and (datetime.now(timezone.utc) - updated).total_seconds() \
+                <= PI_STALE_SECS:
+            return True
+    return spec["self"] and feed_exists
+
+
+def pi_devices_registry():
+    """GET /api/pi/devices body: the config-declared registry merged with
+    live pi-sync-feed freshness. Config is the identity authority (id, self,
+    ssh, allowlist); sessions counts + hostname come from the feed when the
+    device has one (devices/<Device>.json hostname wins, mirroring v0.7.0's
+    hostname authority rule). Devices without a feed entry list as idle
+    (online False, 0 sessions) rather than erroring."""
+    out = []
+    for dev_id, spec in _config["pi_devices"].items():
+        data = _pi_load_json(_pi_feed_path(spec, "sessions.json"))
+        sessions_total = sessions_active = 0
+        hostname = None
+        if data:
+            entry = _pi_device_entry(spec["feed"], data)
+            hostname = entry["hostname"]
+            sessions_total = entry["sessionsCount"]
+            sessions_active = entry["activeSessions"]
+        # hostname authority: the device-info file's hostname wins when the
+        # entry exists and carries one (also covers devices without a
+        # sessions feed, e.g. ulysse).
+        dev_info = _pi_load_json(_pi_feed_path(spec, "json"))
+        if dev_info and isinstance(dev_info.get("hostname"), str) \
+                and dev_info["hostname"]:
+            hostname = dev_info["hostname"]
+        out.append({
+            "id": dev_id,
+            "hostname": hostname,
+            "online": pi_device_online(spec),
+            "self": spec["self"],
+            "ssh": spec["ssh"],
+            "sessionsActive": sessions_active,
+            "sessionsTotal": sessions_total,
+        })
+    return {"devices": out, "generatedAt": _now_iso()}
+
+
+def pi_path_check(raw, spec):
+    """(normalized_path, error) for a request-supplied path against a
+    device's allowlist: absolute, no '..' segments, starts with exactly one
+    of the config-declared prefixes. Slash-trailing input is normalized so
+    the response echoes a stable path."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None, "path is required"
+    path = raw.strip()
+    if len(path) > 1:
+        path = path.rstrip("/")
+    if not path.startswith("/"):
+        return None, "path %r is not absolute" % raw
+    if "\0" in path or ".." in path.split("/"):
+        return None, "path must not contain '..' segments"
+    for prefix in spec["allow"]:
+        if path == prefix or path.startswith(prefix + "/"):
+            return path, None
+    return None, ("path %r is outside %s's allowed prefixes (%s)"
+                  % (raw, "this device", ", ".join(spec["allow"])))
+
+
+def _pi_parent_in_allow(path, spec):
+    """The browsable parent of `path` (its filesystem dirname) when it — too —
+    is inside the device's allowlist, else None (a UI stepping up would not
+    be able to list it anyway)."""
+    if path == "/":
+        return None
+    parent = os.path.dirname(path) or "/"
+    for prefix in spec["allow"]:
+        if parent == prefix or parent.startswith(prefix + "/"):
+            return parent
+    return None
+
+
+def _pi_ssh_list_dirs(ssh_target, path):
+    """(dirs, error) — subdirectory names of <path> via ssh on a remote
+    device: `cd <path> && ls -p | grep /` (POSIX/BSD-safe; macOS has no GNU
+    ls/find depth flags we rely on). Only BatchMode ssh options are used —
+    nothing ever prompts."""
+    cmd = "cd %s && ls -p | grep /" % shlex.quote(path)
+    rc, out, err = run_cmd(["ssh"] + SSH_BATCH_OPTS + [ssh_target, cmd],
+                           timeout=SSH_TIMEOUT)
+    if rc != 0:
+        return None, "ssh listing failed: %s" % \
+            ((err or "exit %d" % rc)[:200])
+    dirs = set()
+    for line in out.splitlines():
+        name = line.rstrip("/")
+        if not name or name.startswith("."):
+            continue  # hidden dirs excluded (and `ls` skips dotfiles anyway)
+        dirs.add(name)
+    return sorted(dirs), None
+
+
+def pi_list_dirs(dev_id, spec, path):
+    """(dirs, error) for GET /api/pi/devices/{dev}/dirs. self → local fs
+    listing as the agent (root); remote → BatchMode ssh."""
+    if spec["self"]:
+        if not os.path.isdir(path):
+            return None, "%s does not exist on %s (or is not a directory)" \
+                % (path, dev_id)
+        try:
+            with os.scandir(path) as it:
+                names = [e.name for e in it
+                         if e.is_dir() and not e.name.startswith(".")]
+        except OSError as exc:
+            return None, "cannot list %s: %s" % (path, exc.strerror or exc)
+        return sorted(names), None
+    return _pi_ssh_list_dirs(spec["ssh"], path)
+
+
+def _pi_run_local(user, cmd, timeout=SSH_TIMEOUT):
+    """Run `cmd` through /bin/sh locally, optionally as the login `user`:
+    subprocess' user= drops uid/gid (no setuid binaries involved — the agent
+    is root), plus a login-ish env (HOME, PATH incl. ~/.local/bin) so the
+    user's own `pi`/`tmux` resolve and write where the user expects."""
+    kwargs = {}
+    if user:
+        try:
+            pw = pwd.getpwnam(user)
+        except KeyError:
+            return -1, "", "no such user %r" % user
+        home = pw.pw_dir
+        kwargs = {"user": user,
+                  "env": {"HOME": home, "USER": user, "LOGNAME": user,
+                          "SHELL": pw.pw_shell or "/bin/sh",
+                          "PATH": "%s/.local/bin:/usr/local/sbin:/usr/local/"
+                                  "bin:/usr/sbin:/usr/bin:/sbin:/bin" % home,
+                          "LANG": "C.UTF-8", "TERM": "xterm-256color"}}
+    try:
+        proc = subprocess.run(["/bin/sh", "-c", cmd], capture_output=True,
+                              text=True, timeout=timeout, **kwargs)
+        return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+    except subprocess.TimeoutExpired:
+        return -1, "", "timeout after %ss" % timeout
+    except (OSError, ValueError) as exc:
+        return -1, "", str(exc)
+
+
+def _pi_local_spawn(spec, name, inner):
+    """(spawned, error) — local (self-device) spawn: tmux new-session when
+    tmux is available in the target user's environment, else the long-lived
+    rpc-pipe fallback. Returns the spawn kind on success."""
+    user = spec["user"]
+    if user:
+        rc, _out, _err = _pi_run_local(user, "command -v tmux", timeout=10)
+    else:
+        rc = 0 if shutil.which("tmux") else 1
+    if rc == 0:
+        rc2, _o2, err2 = _pi_run_local(
+            user, "tmux new-session -d -s %s %s" % (name, shlex.quote(inner)))
+        if rc2 == 0 and user:
+            hrc, _oh, _he = _pi_run_local(
+                user, "tmux has-session -t %s" % shlex.quote(name), timeout=10)
+            if hrc != 0:
+                rc2, err2 = hrc, "tmux session %s did not appear" % name
+        if rc2 != 0:
+            return None, (err2 or "tmux exited %d" % rc2)
+        return "tmux", None
+    rc3, _o3, err3 = _pi_run_local(
+        user, "nohup sh -c %s >/dev/null 2>&1 &" % shlex.quote(PI_RPC_SHELL))
+    if rc3 != 0:
+        return None, (err3 or "rpc launcher exited %d" % rc3)
+    return "rpc-pipe", None
+
+
+def _pi_remote_spawn(spec, name, inner, use_tmux):
+    """(spawned, error) — remote spawn over ssh. tmux check: ssh
+    `command -v tmux`; the tmux TUI lives in a detached remote tmux session,
+    the fallback keeps a long-lived `pi --mode rpc` alive with stdin pinned
+    open by tail -f /dev/null."""
+    target = spec["ssh"]
+    rc, _out, _err = run_cmd(["ssh"] + SSH_BATCH_OPTS + [target,
+                                                         "command -v tmux"],
+                             timeout=SSH_TIMEOUT)
+    if use_tmux is None:
+        use_tmux = rc == 0
+    if use_tmux and rc != 0:
+        return None, "tmux not available on the remote host"
+    if use_tmux:
+        cmd = "tmux new-session -d -s %s %s" % (name, shlex.quote(inner))
+        kind = "tmux"
+    else:
+        cmd = "nohup sh -c %s >/dev/null 2>&1 &" % shlex.quote(PI_RPC_SHELL)
+        kind = "rpc-pipe"
+    rc2, _o2, err2 = run_cmd(["ssh"] + SSH_BATCH_OPTS + [target, cmd],
+                             timeout=SSH_TIMEOUT)
+    if rc2 != 0:
+        return None, (err2 or "ssh exited %d" % rc2)
+    return kind, None
+
+
+def pi_spawn_session(dev_id, spec, cwd, ip):
+    """(code, body) for POST /api/pi/sessions — START a pi session in `cwd`
+    on one device. Existence first, then tmux-preferred spawn, then audit +
+    201 (or 502 with an stderr preview)."""
+    if not pi_device_online(spec):
+        audit("pi", dev_id, "session-spawn", "refused-offline", ip)
+        return 503, {"error": "device offline"}
+    # existence on the target device (400, not 404: bad request input)
+    if spec["self"]:
+        exists = os.path.isdir(cwd)
+        miss = None
+    else:
+        rc, _out, miss = run_cmd(["ssh"] + SSH_BATCH_OPTS +
+                                 [spec["ssh"],
+                                  "test -d %s" % shlex.quote(cwd)],
+                                 timeout=SSH_TIMEOUT)
+        exists = rc == 0
+    if not exists:
+        detail = " (ssh: %s)" % miss[:150] if not spec["self"] and miss else ""
+        audit("pi", dev_id, "session-spawn", "refused-no-cwd", ip)
+        return 400, {"error": "cwd %s does not exist on %s%s"
+                              % (cwd, dev_id, detail)}
+    name = PI_SPAWN_PREFIX + \
+        time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    inner = "cd %s && pi" % shlex.quote(cwd)
+    if spec["self"]:
+        spawned, err = _pi_local_spawn(spec, name, inner)
+    else:
+        spawned, err = _pi_remote_spawn(spec, name, inner, None)
+    if err is not None:
+        audit("pi", dev_id, "session-spawn", "failed:%s" % err[:120]
+              .replace(":", ";"), ip)
+        return 502, {"error": "spawn failed on %s: %s" % (dev_id, err[:200])}
+    if spawned == "tmux":
+        hint = "attach with tmux attach -t %s" % name
+    else:
+        hint = ("long-lived 'pi --mode rpc' process (stdin held open by "
+                "tail -f /dev/null; tmux not available)")
+    audit("pi", dev_id, "session-spawn",
+          "spawned:%s:%s" % (spawned, name), ip)
+    return 201, {"device": dev_id, "cwd": cwd, "spawned": spawned,
+                 "window": name if spawned == "tmux" else None,
+                 "hint": hint}
 
 
 # --------------------------------------------------------------------------
@@ -1421,6 +1790,51 @@ class Handler(BaseHTTPRequestHandler):
             n = max(1, min(n, PI_TAIL_MAX))
             code, body = pi_session_tail(device, sid, n)
             return self.respond(code, body)
+
+        # ---- pi device registry / dirs / spawn (v0.8.0) -------------------
+        # the v0.8.0 registry config (pi_devices) is the device identity
+        # authority; spawns are mutations and land in the audit log — dirs
+        # listings stay read-only and unaudited, like the v0.7.0 views
+        if path == "/api/pi/devices" and verb == "GET":
+            return self.respond(200, pi_devices_registry())
+
+        m = re.match(r"^/api/pi/devices/([^/]+)/dirs$", path)
+        if m and verb == "GET":
+            dev_id = m.group(1)
+            spec = _config["pi_devices"].get(dev_id)
+            if spec is None:
+                return self.respond(404, {"error": "unknown device %r" % dev_id})
+            if not pi_device_online(spec):
+                return self.respond(503, {"error": "device offline"})
+            norm, msg = pi_path_check(query.get("path", [""])[0], spec)
+            if msg:
+                return self.respond(400, {"error": msg})
+            dirs, err = pi_list_dirs(dev_id, spec, norm)
+            if err:
+                return self.respond(502, {"error": err})
+            return self.respond(200, {"device": dev_id, "path": norm,
+                                      "dirs": dirs,
+                                      "parent": _pi_parent_in_allow(norm, spec)})
+
+        m = re.match(r"^/api/pi/sessions$", path)
+        if m and verb == "POST":
+            try:
+                body = self.read_json_body()
+            except ValueError as exc:
+                return self.respond(400, {"error": str(exc)})
+            if not isinstance(body, dict):
+                return self.respond(400, {"error": "request body must be a "
+                                                  "JSON object"})
+            dev_id = body.get("device")
+            spec = _config["pi_devices"].get(dev_id) \
+                if isinstance(dev_id, str) else None
+            if spec is None:
+                return self.respond(400, {"error": "unknown device %r" % dev_id})
+            norm, msg = pi_path_check(body.get("cwd"), spec)
+            if msg:
+                return self.respond(400, {"error": msg})
+            return self.respond(*pi_spawn_session(dev_id, spec, norm,
+                                                  self.client_ip()))
 
         self.respond(404, {"error": "not found"})
 

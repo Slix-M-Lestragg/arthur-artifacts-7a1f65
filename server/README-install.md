@@ -2,7 +2,8 @@
 
 `server/` holds the pieces that run on the arthur home server (the machine
 hosting ComfyUI + ai-toolkit), not the Obsidian plugin itself. The agent is
-at **v0.7.0** (GPU-aware spawning + pi session aggregation):
+at **v0.8.0** (GPU-aware spawning + pi session aggregation + the pi device
+registry / SSH dir listing / session spawn endpoints):
 
 ```json
 {"known": {"comfyui": {"0": null, "2": [1], "3": [0, 1]}}}
@@ -34,10 +35,14 @@ state/audit files are the per-index runtime drop-ins under
 `/run/systemd/system/comfy@<i>.service.d/` (v0.6.0, GPU-aware spawning).
 Every mutation appends one JSON line to the audit log.
 
-The v0.7.0 `/api/pi/*` endpoints are **read-only views** over the local
-*pi-sync mirror repo* — see "pi session aggregation (v0.7.0)" below. They are
-NOT a systemd-backed service (pi sessions aren't lifecycle-managed) and stay
-out of the services registry; they are never audited (audit = mutations only).
+The v0.7.0 `/api/pi/status + tail` endpoints are **read-only views** over the
+local *pi-sync mirror repo* — see "pi session aggregation (v0.7.0)" below.
+They are NOT a systemd-backed service (pi sessions aren't lifecycle-managed)
+and stay out of the services registry; they are never audited (audit =
+mutations only). The v0.8.0 additions (`/api/pi/devices`,`/api/pi/devices/`
+`{dev}/dirs`, `POST /api/pi/sessions`) build on the same pi-sync feed for
+*live freshness* but add a config-declared device registry — and the session
+spawn **is** a mutation, so it is audited (see the v0.8.0 section below).
 
 ## GPU-aware spawning (v0.6.0): spawn-state + runtime drop-ins
 
@@ -140,7 +145,7 @@ sudo install -m 644 comfy@.service comfy-dual.service arthur-agent.service \
 sudo systemctl daemon-reload
 sudo systemctl enable comfy-dual.service   # enabled but NOT started
 sudo systemctl restart arthur-agent
-curl -s http://127.0.0.1:8766/health   # → {"ok": true, "version": "0.7.0"}
+curl -s http://127.0.0.1:8766/health   # → {"ok": true, "version": "0.8.0"}
 ```
 
 Token lives in `/etc/arthur-agent/token` (root 0600) and `/etc/arthur-agent/env`
@@ -151,7 +156,9 @@ token.
 ## config.json — schema v2.1 (/etc/arthur-agent/config.json)
 
 Same as schema v2 plus the optional per-service `extra_instances` array
-(v0.5.2):
+(v0.5.2). The optional top-level `pi_devices` object (v0.8.0 — the pi device
+registry) is documented in its own section above; it is additive and validated
+with fatal-config-error strictness like the services registry.
 
 ```json
 {
@@ -198,7 +205,7 @@ Same as schema v2 plus the optional per-service `extra_instances` array
 
 ---
 
-## API surface (v0.7.0; plugin code targets exactly this)
+## API surface (v0.8.0; plugin code targets exactly this)
 
 `GET /health` is unauthenticated. **Everything under `/api/` requires
 `Authorization: Bearer <token>`.** All responses are JSON; errors are always
@@ -272,6 +279,110 @@ preview (first ~120 chars of text content, whitespace-collapsed; toolResult
 entries prefixed with their `toolName`), timestamp}`, everything else
 (e.g. `session`, `model_change`) `{type, timestamp}`. Chronological order,
 newest last.
+## pi device registry, SSH dir listing, session spawn (v0.8.0)
+
+The config gains a top-level **`pi_devices`** object (optional; the agent
+still runs fine without it): the agent device ids the plugin talks about ↔
+how to reach their filesystems + where their pi-sync feed lives. Live
+freshness/session counts are merged in from the same pi-sync feed the v0.7.0
+views use — the registry is *config* for identity, the *feed* for liveness.
+
+```json
+"pi_devices": {
+  "Arthur":   {"self": true, "user": "slix", "feed": "Arthur",
+               "allow": ["/home/slix", "/mnt/work", "/mnt/vault"]},
+  "mac.home": {"ssh": "benjaminmatthys@100.93.241.75",
+               "feed": "Voyager.local",
+               "allow": ["/Users/benjaminmatthys"]},
+  "ulysse":   {"ssh": "ulysse@100.75.249.5", "feed": "ulysse",
+               "allow": ["/home", "/mnt", "/opt"]}
+}
+```
+
+| field | meaning |
+|---|---|
+| `self` | `true` for the agent's own host (local fs listing; the spawn drops into the `user` account to exec the user's own `pi`/`tmux`) |
+| `ssh` | remote devices: the BatchMode ssh target `user@host` (required unless `self`) — the agent holds its own key for each target (`/root/.ssh/id_ed25519`, authorized in each target's `authorized_keys`) |
+| `user` | local spawn only: the unix account the spawned pi runs as (login env: HOME, PATH incl. `~/.local/bin`) |
+| `feed` | the pi-sync device name this machine's sessions/status are read from (defaults to the config key — useful e.g. when the Mac publishes as `Voyager.local`) |
+| `allow` | path-prefix allowlist: both the dirs listing and a spawn `cwd` must be absolute, free of `..` segments, and start with exactly one of these prefixes |
+
+### GET /api/pi/devices
+The registry merged with live pi-sync-feed freshness (`sessionsActive` /
+`sessionsTotal` from the feed's session data; `online` = feed `updatedAt` ≤
+5 min old **or** (`self` **and** the feed file exists — the agent's own host
+stays online even with a stale-but-present feed)):
+
+```json
+{"devices": [
+   {"id": "Arthur", "hostname": "Arthur", "online": true, "self": true,
+    "ssh": null, "sessionsActive": 1, "sessionsTotal": 3},
+   {"id": "mac.home", "hostname": "voyager.local", "online": false,
+    "self": false, "ssh": "benjaminmatthys@100.93.241.75",
+    "sessionsActive": 1, "sessionsTotal": 2},
+   {"id": "ulysse", "hostname": "ulysse", "online": false, "self": false,
+    "ssh": "ulysse@100.75.249.5", "sessionsActive": 0, "sessionsTotal": 0}
+ ], "generatedAt": "…"}
+```
+
+Devices without any feed entry (never synced — e.g. `ulysse` above) still
+list, as offline/idle (0 sessions); their `hostname` comes from the
+devices/<Device>.json info file when one exists.
+
+### GET /api/pi/devices/{device}/dirs?path=<abs>
+Subdirectory names for the plugin's directory browser: **sub**-dirs only,
+sorted, hidden dirs excluded, `parent` = the browsable parent directory when
+it is inside the allowlist (`null` otherwise — e.g. at the allowlist root).
+Response: `{"device", "path", "dirs": ["name", …], "parent": "<abs\|null>"}`.
+
+- `self` → local fs listing as the agent (root).
+- remote → `ssh -o BatchMode=yes -o ConnectTimeout=6 -o
+  StrictHostKeyChecking=accept-new user@host 'cd <path> && ls -p \| grep /'`
+  (POSIX/BSD-safe — no GNU-only find/ls flags; BatchMode means it never
+  prompts).
+- **Path safety**: request paths are absolute-only, `..` segments rejected,
+  and must start with one of the device's config-declared prefixes →
+  otherwise **400**. Unknown device → **404**; a device whose feed is stale
+  (not `online`) → **503** `{"error": "device offline"}` (note: for remote
+  devices that means the dirs listing answers 503 while their feed is stale
+  — dirs come back once the target's pi feed refreshes, within 5 min of
+  activity). A failed remote listing → **502** with the stderr preview.
+
+### POST /api/pi/sessions  — `{"device": "…", "cwd": "<abs>"}`
+START a pi session in `cwd` on that device. `cwd` is validated exactly like
+the dirs paths (absolute, allowlist-prefixed, → **400** otherwise) and its
+existence is checked on the target first (`self`: `isdir`; remote: ssh
+`test -d` → **400** when missing). Not `online` → **503**.
+
+Spawn semantics, per target environment:
+
+- **tmux available** (local: the `user`'s `command -v tmux`; remote: ssh
+  `command -v tmux`) → `tmux new-session -d -s pi-arthur-<UTC-compact>
+  'cd <cwd> && pi'` — the TUI lives in a detached tmux session (under the
+  real user/tmux socket in `/tmp/tmux-<uid>/`) that the future obsidian-pi
+  plugin can attach to; the session is named `pi-arthur-<UTC-compact>` (e.g.
+  `pi-arthur-20261107T074135Z`).
+- **Fallback** → `nohup sh -c "tail -f /dev/null \| pi --mode rpc"
+  >/dev/null 2>&1 &` — a long-lived pi RPC process with stdin held open.
+
+`201` on success:
+
+```json
+{"device": "Arthur", "cwd": "/home/slix", "spawned": "tmux",
+ "window": "pi-arthur-20261107T074135Z",
+ "hint": "attach with tmux attach -t pi-arthur-20261107T074135Z"}
+```
+
+(`window` is the tmux session name or `null` for the rpc-pipe fallback; the
+rpc `hint` points at the long-lived process.) Every spawn — and every
+refusal — lands in the audit log (`service: "pi"`, action
+`session-spawn`). Spawn failure → **502** with an stderr preview.
+
+The pi user's session lands in their own `~/.pi/agent/sessions/--<cwd>--/`
+and the pi-sync feed picks it up within seconds — it shows under
+`sessionsTotal`/`sessionsActive` on `GET /api/pi/devices` like any other
+session.
+
 Live GPU stats straight from `nvidia-smi --query-gpu=...` (5 s subprocess
 timeout):
 
@@ -495,8 +606,12 @@ same: `comfy-0`, `comfy-1`, `aitoolkit`).
   `/run/systemd/system/comfy@<i>.service.d/` — the unit name comes from the
   registry, never from the request. Bodies are capped (16 KiB).
 - The agent unit runs as root (it must control system units) and is hardened
-  with `NoNewPrivileges`, `ProtectSystem=full`, `ProtectHome=read-only`,
-  `PrivateTmp`. Audit log: `/var/log/arthur-agent/audit.jsonl`; spawn-state:
+  with `NoNewPrivileges`, `ProtectSystem=full` and `KillMode=process`. Since
+  v0.8.0 the spawn path needs `ProtectHome=no` (the spawned pi must write
+  the user's `~/.pi`) and no `PrivateTmp` (the spawned tmux socket lives in
+  the real `/tmp/tmux-<uid>/` so the user can attach), and spawned
+  sessions survive agent restarts (`KillMode=process`). Audit log:
+  `/var/log/arthur-agent/audit.jsonl`; spawn-state:
   `/var/lib/arthur-agent/instances.json`.
 - **pi tail sandbox (v0.7.0).** The `/api/pi/sessions/{d}/{id}/tail` endpoint
   reads files only: the JSONL path comes from the pi-sync status file (not the
@@ -505,3 +620,15 @@ same: `comfy-0`, `comfy-1`, `aitoolkit`).
   escapes and tampered status paths fail closed. Session files are opened
   read-only; nothing under the pi-sync repo or sessions tree is ever written
   by the agent.
+- **pi dir listing / spawn (v0.8.0).** Device identity comes from config —
+  request paths can never name a device the config doesn't know (404) or a
+  path outside its prefix allowlist (400), `..` segments are rejected before
+  anything is touched, and every remote shell command goes through
+  `-o BatchMode=yes` ssh (no interactive prompts possible). Request data that
+  does reach a shell (`cwd`/`path`) is interpolated only via
+  `shlex.quote()`-wrapped arguments of validated, allowlisted, absolute,
+  dot-segment-free paths. Spawns run as the config-declared local `user`
+  (uid/gid drop inside the agent's own child setup — no setuid binaries,
+  `NoNewPrivileges` stays on); the agent's own ssh key for remote targets
+  lives at `/root/.ssh/id_ed25519` and target hosts authorize it explicitly.
+  Every spawn/refusal is audited.

@@ -23,11 +23,22 @@ RestartSec=3
 # needs to write only its audit log under /var/log, only read /etc — and
 # rewrite its own config (config-extra forget → atomic tmp+rename in
 # /etc/arthur-agent), which ReadWritePaths carves out of ProtectSystem.
+#
+# v0.8.0 (pi session spawn) adjustments:
+#  — ProtectHome=no: the spawn path drops into the pi user's account and
+#    execs `pi`, which writes sessions under ~/.pi (read-only /home broke
+#    that outright).
+#  — PrivateTmp removed: the spawned tmux server's socket lives in the real
+#    /tmp/tmux-<uid>/ so the user can actually `tmux attach` to it.
+#  — KillMode=process: spawned pi sessions / tmux servers must survive an
+#    agent restart (agent upgrades) instead of being swept with its cgroup.
+# NoNewPrivileges stays: the uid/gid drop for `user:` spawns happens in
+# subprocess' own child setup (setuid syscall), never via setuid binaries.
 NoNewPrivileges=true
 ProtectSystem=full
-ProtectHome=read-only
+ProtectHome=no
 ReadWritePaths=/etc/arthur-agent
-PrivateTmp=true
+KillMode=process
 
 [Install]
 WantedBy=multi-user.target

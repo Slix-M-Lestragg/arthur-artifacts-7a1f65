@@ -26,5 +26,23 @@
       "probe_path": "/"
     }
   },
-  "num_gpus": 2
+  "num_gpus": 2,
+  "pi_devices": {
+    "Arthur": {
+      "self": true,
+      "user": "slix",
+      "feed": "Arthur",
+      "allow": ["/home/slix", "/mnt/work", "/mnt/vault"]
+    },
+    "mac.home": {
+      "ssh": "benjaminmatthys@100.93.241.75",
+      "feed": "Voyager.local",
+      "allow": ["/Users/benjaminmatthys"]
+    },
+    "ulysse": {
+      "ssh": "ulysse@100.75.249.5",
+      "feed": "ulysse",
+      "allow": ["/home", "/mnt", "/opt"]
+    }
+  }
 }
