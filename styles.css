@@ -488,6 +488,25 @@
 	white-space: nowrap;
 }
 
+/* INDEPENDENT GPU-column collapse chip (v0.11): a per-column chevron on the
+   column head; collapsed = ▶ muted, expanded = ▼ accent on hover */
+.arthur-grid-col-collapse {
+	align-self: flex-start;
+	background: transparent;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s, 6px);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	padding: 0 0.4em;
+	line-height: 1.4;
+	cursor: pointer;
+}
+
+.arthur-grid-col-collapse:hover {
+	color: var(--text-normal);
+	border-color: var(--interactive-accent);
+}
+
 /* Instance cards — self-contained outlined objects. Running = subtle accent
    tint (accent mixed into the primary background) + accent border; idle =
    neutral border on the primary background; down = dashed muted + grayscale
@@ -1000,17 +1019,21 @@
 	background: color-mix(in srgb, var(--text-error) 70%, var(--background-modifier-border));
 }
 
-/* ---------------------------------------------------------------- pi panel */
+/* ---------------------------------------------------------------- pi block
 
-/* the pi section: observational service above the GPU grid — same outlined
-   card feel as the other sections, own collapse toggle ('Pi' head) */
-.arthur-section--pi {
-	border: 1px solid var(--background-modifier-border);
-	border-radius: var(--radius-m, 10px);
-	padding: 0.55em 0.75em;
-	background: var(--background-primary);
-	box-shadow: var(--shadow-s);
+   The pi service's observational block — since the v0.11 merge it lives
+   INSIDE the 'Services' section (first position, above the GPU grid) and
+   carries no section chrome of its own */
+.arthur-pi-block {
+	display: flex;
+	flex-direction: column;
 	gap: 0.35em;
+}
+
+.arthur-pi-block + .arthur-grid {
+	margin-top: 0.35em;
+	border-top: 1px solid var(--background-modifier-border);
+	padding-top: 0.45em;
 }
 
 .arthur-pi-warning {
@@ -1094,6 +1117,36 @@
 .arthur-pi-card-title {
 	font-weight: var(--font-medium);
 	font-size: var(--font-ui-small);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* registry-driven service row icon (session rows): 'pi' renders the lucide
+   terminal glyph via Obsidian's setIcon — size it to the row's meta scale */
+.arthur-pi-row-icon {
+	display: inline-flex;
+	align-items: center;
+	flex-shrink: 0;
+	width: 14px;
+	height: 14px;
+	opacity: 0.85;
+}
+
+.arthur-pi-row-icon svg,
+.arthur-pi-row-icon .LucideIcon,
+.arthur-pi-row-icon svg[class] {
+	width: 14px;
+	height: 14px;
+}
+
+/* one compact stats line under the session row's main line (device ·
+   last-activity age · tokens · cost) */
+.arthur-pi-card-stats {
+	display: block;
+	padding: 0.05em 0 0 1.35em;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;

@@ -21,7 +21,7 @@ import { fmtBytes, fmtGigCompact, normalizeHost } from "./util";
 // lucide fallback on unknown service ids). Not used at runtime.
 export { normalizeHost };
 export { WsConnection, WsState } from "./connection";
-export { injectIcon } from "./icons";
+export { injectIcon, injectServiceIcon, serviceLabel, SERVICE_META } from "./icons";
 export { isWebViewerEnabled, openWebUrl, openUiTooltip, WEBVIEWER_VIEW_TYPE } from "./ui/webviewer";
 
 /** One server profile — host + which ports the services live on + tokens. */
@@ -48,8 +48,11 @@ export interface ArthurSettings {
 	instancesCollapsed: boolean;
 	/** Job-queue section collapsed (dashboard title toggle; default expanded). */
 	queueCollapsed: boolean;
-	/** Pi panel section collapsed (pi title toggle; default expanded). */
-	piCollapsed: boolean;
+	/** Per-GPU-column collapse of the Services section's instance grid —
+	 *  Record<gpuIndex, boolean> (string keys, JSON-safe): true = that column's
+	 *  rows hidden via the column-head chevron. Independent of the whole
+	 *  section collapse and of the other columns; default {} = all expanded. */
+	gpuCollapsed: Record<string, boolean>;
 	/** Per-service GPU selection for service-button spawns — Record<serviceId,
 	 *  number[]> of checked GPU indexes (empty/missing = default: single GPU,
 	 *  no pinned index → agent's modulo rotation). */
@@ -88,7 +91,7 @@ const DEFAULT_SETTINGS: ArthurSettings = {
 	debugLogging: false,
 	instancesCollapsed: false,
 	queueCollapsed: false,
-	piCollapsed: false,
+	gpuCollapsed: {},
 	spawnGpuSel: {},
 };
 
@@ -110,6 +113,21 @@ function sanitizeGpuSel(raw: unknown): Record<string, number[]> {
 			.filter((n, i, arr) => arr.indexOf(n) === i)
 			.sort((a, b) => a - b);
 		if (list.length > 0) out[key] = list;
+	}
+	return out;
+}
+
+/**
+ * Sanitize the per-GPU-column collapse map: only plain string keys (GPU
+ * indexes) with a `true` value survive — JSON-safe, default {} = all expanded.
+ * Legacy `piCollapsed` entries (the removed standalone-pi collapse) are
+ * intentionally dropped.
+ */
+function sanitizeGpuCollapsed(raw: unknown): Record<string, boolean> {
+	const out: Record<string, boolean> = {};
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+	for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+		if (typeof key === "string" && key.trim() && value === true) out[key] = true;
 	}
 	return out;
 }
@@ -621,7 +639,7 @@ export default class ArthurPlugin extends Plugin {
 			debugLogging: data?.debugLogging === true,
 			instancesCollapsed: data?.instancesCollapsed === true,
 			queueCollapsed: data?.queueCollapsed === true,
-			piCollapsed: data?.piCollapsed === true,
+			gpuCollapsed: sanitizeGpuCollapsed(data?.gpuCollapsed),
 			spawnGpuSel: sanitizeGpuSel(data?.spawnGpuSel),
 		};
 	}

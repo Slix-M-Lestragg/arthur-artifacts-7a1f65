@@ -31,8 +31,52 @@ export const SERVICE_ICONS: Record<string, string> = {
 	aitoolkit: ICON_AITOOLKIT,
 };
 
+/**
+ * Row-level service identity registry (SERVICE LISTS, not the service bar):
+ * serviceId → display label + lucide icon fallback. The session-list row
+ * renderer drives off THIS map (not pi-hardcoded) so new non-GPU services
+ * only need one registry entry. A service with an official inline-SVG mark
+ * (SERVICE_ICONS, e.g. comfyui/aitoolkit) renders that; one without renders
+ * its registered lucide glyph; an unknown id falls back to 'server'.
+ *
+ * pi: NO official logo exists — searched the pi package
+ * (@earendil-works/pi-coding-agent, ~/.pi/agent assets) for any
+ * .svg/.ico/favicon: none shipped, only the unrelated Anthropic SDK logo.
+ * Registered the tasteful lucide 'terminal' glyph (2026-11, noted here for
+ * the next maintainers — swap in the official mark when one exists).
+ */
+export const SERVICE_META: Record<string, { label: string; lucide?: string }> = {
+	comfyui: { label: "ComfyUI" },
+	aitoolkit: { label: "AI Toolkit" },
+	pi: { label: "pi", lucide: "terminal" },
+};
+
 /** Lucide icon name for service ids without an official mark. */
 export const SERVICE_ICON_FALLBACK = "server";
+
+/** Display label of a service id (the id itself when unregistered). */
+export function serviceLabel(svcId: string): string {
+	return SERVICE_META[svcId]?.label ?? svcId;
+}
+
+/**
+ * Put the service's ROW icon into `container` (registry-driven): official
+ * inline SVG when one exists, else the registered lucide glyph, else the
+ * generic 'server' fallback. Used by the service-list row renderers (pi
+ * session rows today; any future non-GPU service row for free).
+ */
+export function injectServiceIcon(container: HTMLElement, serviceId: string): void {
+	const svg = SERVICE_ICONS[serviceId];
+	if (svg) {
+		try {
+			container.innerHTML = svg;
+			return;
+		} catch {
+			// Very restricted DOM — fall through to the lucide glyph.
+		}
+	}
+	setIcon(container, SERVICE_META[serviceId]?.lucide ?? SERVICE_ICON_FALLBACK);
+}
 
 /**
  * Put the official (or fallback) mark into `container`. Inline SVGs are

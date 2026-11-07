@@ -9,22 +9,35 @@
  *                    dead services + last error + attempted host:port; hidden
  *                    entirely while everything answers (also carries the
  *                    'not configured' / token / version-mismatch states).
- *   0c. SECTION TITLES — INSTANCES and JOB QUEUE each open with a centered,
- *                    click-to-toggle collapse header ('Instances', 'Queue')
+ *   0c. SECTION TITLES — SERVICES and JOB QUEUE each open with a centered,
+ *                    click-to-toggle collapse header ('Services', 'Queue')
  *                    with a rotating chevron; collapsed state persists per
  *                    section in the plugin settings (instancesCollapsed /
  *                    queueCollapsed). The error banner sits ABOVE both
- *                    collapsibles and never collapses.
- *   1. INSTANCES   — the GPU instance grid: one COLUMN per GPU (live stats
- *                    from GET /api/gpus, agent v0.5.4) and a ROW-PACKED row
- *                    set (instances whose GPU sets don't overlap share a
- *                    visual row via the packer; multi-GPU/dual spans get their
- *                    own full row) for each GPU-owning comfy instance
- *                    queued/running ai-toolkit training job — HIDDEN entirely
- *                    while the comfyui service is inactive (v0.7.1: stop-all
- *                    leaves only the grey service pill; a stopped service's
- *                    leftover default instance renders no row). Rows are
- *                    self-contained outlined cards (running = accent tint,
+ *                    collapsibles and never collapses. (v0.11: the standalone
+ *                    'Pi' panel merged into the Services section, first
+ *                    position — pi content above the GPU grid within the
+ *                    same collapsible; its separate piCollapsed is gone.)
+ *   1. SERVICES    — the merged section (v0.11: pi + GPU grid in ONE
+ *                    collapsible): FIRST the pi observational block (device
+ *                    headers + session rows, see pi-panel.ts — no actions,
+ *                    read-only Peek), THEN the GPU instance grid: one COLUMN
+ *                    per GPU (live stats from GET /api/gpus, agent v0.5.4)
+ *                    and a ROW-PACKED row set (instances whose GPU sets
+ *                    don't overlap share a visual row via the packer;
+ *                    multi-GPU/dual spans get their own full row) for each
+ *                    GPU-owning comfy instance queued/running ai-toolkit
+ *                    training job — HIDDEN entirely while the comfyui service
+ *                    is inactive (v0.7.1: stop-all leaves only the grey
+ *                    service pill; a stopped service's leftover default
+ *                    instance renders no row). GPU columns are INDEPENDENTLY
+ *                    collapsible (v0.11): each column-head chip carries a
+ *                    chevron; collapsing a column hides only the rows bound
+ *                    exclusively to collapsed columns (a row with any GPU in
+ *                    an expanded column stays), persisted per column as
+ *                    settings.gpuCollapsed (default: all expanded), fully
+ *                    independent of the section collapse and of the other
+ *                    columns. Rows are self-contained outlined cards (running = accent tint,
  *                    idle = neutral, down = dashed muted + grayscale),
  *                    carrying a state badge (running/idle/down), quick run
  *                    stats for running rows (WS progress / job step+speed),
@@ -33,11 +46,9 @@
  *                    /forget; the agent's DEFAULT instance is never forgettable
  *                    and gets Start only; up comfy rows get Clear-queue +
  *                    Free-VRAM), a
- *                    two-line stats block (VRAM used/total matched from
- *                    /api/gpus + pending queue depth + a small WS state chip),
- *                    and a 'view in queue ↓' link for running rows WITH queue
- *                    jobs that scrolls to the matching job-queue anchor
- *                    below. Single-GPU ai-toolkit queue sets surface as tiny
+ *                    'view in queue ↓' link for running rows WITH queue jobs
+ *                    that scrolls to the matching job-queue anchor below.
+ *                    Single-GPU ai-toolkit queue sets surface as tiny
  *                    play/pause chips on their GPU column headers. Idle rows sort first, running
  *                    rows by run duration (longest first); run starts are
  *                    tracked locally (WS execution_start / queue transition;
@@ -516,8 +527,9 @@ export class ArthurDashboardView extends ItemView {
 	/** Error banner — sits outside both collapsibles; always shows when
 	 *  unhealthy (hidden while every service answers). */
 	private bannerEl!: HTMLElement;
-	/** Instances section: centered collapsible title head + scrollable body
-	 *  holding the grid, its notes and the unmanaged-row fallback. */
+	/** Services section (v0.11: pi + GPU grid merged): centered collapsible
+	 *  title head + body holding the pi block FIRST, then the grid, its notes
+	 *  and the unmanaged-row fallback. */
 	private gridHeadEl!: HTMLElement;
 	private gridBodyEl!: HTMLElement;
 	/** Job queue section: centered collapsible title head + body. */
@@ -535,8 +547,9 @@ export class ArthurDashboardView extends ItemView {
 	 *  errored (ai-toolkit collectors, unreachable comfy ports, or the
 	 *  watchdog's stuck-collector states) — never a fake empty state. */
 	private aiStateEl!: HTMLElement;
-	/** Pi panel (observational service, rendered ABOVE the GPU grid; own
-	 *  collapse toggle, NO lifecycle actions). */
+	/** Pi block (observational service; rendered FIRST inside the Services
+	 *  section body, above the GPU grid — NO own head/collapse since the v0.11
+	 *  merge, NO lifecycle actions). */
 	private piPanel!: PiPanel;
 	/** Last GET /api/pi/status snapshot (null = collector failed / not yet). */
 	private piDetail: { status: AgentPiStatus | null; error: string | null } = {
@@ -1116,33 +1129,31 @@ export class ArthurDashboardView extends ItemView {
 		this.bannerEl = root.createEl("div", { cls: "arthur-banner" });
 		this.bannerEl.hide();
 
-		// 0d. PI PANEL — the observational pi service (sessions + subagent runs):
-		// above the GPU grid because pi is NOT hardware-bound. Own collapse
-		// toggle reusing the section-head pattern (persisted piCollapsed,
-		// default expanded); carries NO lifecycle actions — read-only + peek.
-		this.piPanel = new PiPanel(root, {
-			isCollapsed: () => this.plugin.settings.piCollapsed === true,
-			onToggle: () => {
-				this.plugin.settings.piCollapsed = !(this.plugin.settings.piCollapsed === true);
-				void this.plugin.saveSettings();
-				this.piPanel.syncCollapse();
-			},
-			fetchTail: (device, sessionId) => {
-				const agent = this.plugin.clients?.agent;
-				if (!agent) return Promise.reject(new Error("agent unavailable"));
-				return agent.piSessionTail(device, sessionId, 10);
-			},
-		});
+		// PI BLOCK — v0.11 merge: the observational pi service moved INSIDE the
+		// Services section below (FIRST position, above the GPU grid; pi is not
+		// hardware-bound). No own collapse head anymore — the Services head owns
+		// the collapse; NO lifecycle actions — read-only + peek.
 
-		// 1. INSTANCES — collapsible section: a centered click-to-toggle title
-		// line ('Instances' + chevron) above the grid body (grid + notes +
-		// unmanaged-row fallback). Collapse state persists in the settings.
+		// 1. SERVICES — collapsible section (the v0.11 merge: pi + GPU grid in
+		// ONE collapsible): a centered click-to-toggle title line ('Services' +
+		// chevron) above the body (pi block + grid + notes + unmanaged-row
+		// fallback). Collapse persists in the settings (instancesCollapsed).
 		const gridSection = root.createEl("div", { cls: "arthur-section" });
 		this.gridHeadEl = this.buildSectionHead("instances");
 		gridSection.append(this.gridHeadEl);
 		this.gridBodyEl = gridSection.createEl("div", { cls: "arthur-section-body" });
 		this.gridHeadEl.setAttribute("aria-controls", "arthur-section-instances");
 		this.gridBodyEl.setAttribute("id", "arthur-section-instances");
+		// FIRST position inside Services: the pi observational block (device
+		// headers + session rows; no own head — the section head owns collapse).
+		this.piPanel = new PiPanel(this.gridBodyEl, {
+			fetchTail: (device, sessionId) => {
+				const agent = this.plugin.clients?.agent;
+				if (!agent) return Promise.reject(new Error("agent unavailable"));
+				return agent.piSessionTail(device, sessionId, 10);
+			},
+		});
+		// THEN the GPU grid within the same section.
 		this.gridEl = this.gridBodyEl.createEl("div", { cls: "arthur-grid" });
 		this.gridEl.append(el("p", { cls: "arthur-note", text: "loading…" }));
 		this.gridNoteEl = this.gridBodyEl.createEl("p", {
@@ -1182,7 +1193,7 @@ export class ArthurDashboardView extends ItemView {
 	}
 
 	/**
-	 * One collapsible section head: a centered title line ('Instances' or
+	 * One collapsible section head: a centered title line ('Services' or
 	 * 'Queue') with a rotating chevron. Clicking (or Enter/Space while
 	 * focused) toggles that section's body; the state persists per section
 	 * in the plugin settings. Returns the head element.
@@ -1195,13 +1206,13 @@ export class ArthurDashboardView extends ItemView {
 				role: "button",
 				tabindex: "0",
 				"aria-expanded": "true",
-				title: `Toggle the ${section === "instances" ? "instance grid" : "job queue"} section`,
+				title: `Toggle the ${section === "instances" ? "services (pi + instance grid)" : "job queue"} section`,
 			},
 		});
 		head.append(
 			el("span", {
 				cls: "arthur-section-title",
-				text: section === "instances" ? "Instances" : "Queue",
+				text: section === "instances" ? "Services" : "Queue",
 			}),
 			el("span", { cls: "arthur-section-chevron", attrs: { "aria-hidden": "true" } }),
 		);
@@ -1391,7 +1402,8 @@ export class ArthurDashboardView extends ItemView {
 		});
 	}
 
-	/** Sync the pi panel from the last pi snapshot (observational, no actions). */
+	/** Sync the pi block from the last pi snapshot (observational, no actions;
+	 *  rendered FIRST inside the Services body, above the grid). */
 	private renderPi(): void {
 		const status = this.piDetail.status;
 		if (status) this.piPanel.prune(status.devices ?? []);
@@ -1661,10 +1673,52 @@ export class ArthurDashboardView extends ItemView {
 		return rows;
 	}
 
+	/**
+	 * The set of currently collapsed GPU column indexes (settings.gpuCollapsed,
+	 * persisted; default empty = all columns expanded).
+	 */
+	private collapsedGpuCols(): Set<number> {
+		const map = this.plugin.settings.gpuCollapsed ?? {};
+		const out = new Set<number>();
+		for (const [key, value] of Object.entries(map)) {
+			if (value === true) {
+				const idx = parseInt(key, 10);
+				if (Number.isFinite(idx) && idx >= 0) out.add(idx);
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * Toggle one GPU column's collapsed state (the column-head chevron):
+	 * flips the persisted per-column setting, saves, repaints the grid —
+	 * fully independent of the Services section collapse and of the other
+	 * columns.
+	 */
+	private toggleGpuColumn(index: number): void {
+		const key = String(index);
+		const map = this.plugin.settings.gpuCollapsed ?? {};
+		if (map[key] === true) delete map[key];
+		else map[key] = true;
+		this.plugin.settings.gpuCollapsed = map;
+		void this.plugin.saveSettings(); // persist through loadData/saveData
+		this.renderInstances();
+	}
+
 	/** Paint the grid: column headers (live stats from /api/gpus) + row cells. */
 	private renderInstanceGrid(): void {
 		const cols = this.gridColumns();
-		const rows = this.buildGridRows();
+		const collapsed = this.collapsedGpuCols();
+		let rows = this.buildGridRows();
+		// Independent column collapse: a row is hidden when EVERY gpu it binds
+		// to sits in a collapsed column (rows with any gpu in an expanded
+		// column — including gpu-less spawn pendings — stay visible). Filtering
+		// runs BEFORE the row packer so the packed grid never keeps a hole.
+		if (collapsed.size > 0) {
+			rows = rows.filter(
+				(r) => r.gpus.length === 0 || r.gpus.some((g) => !collapsed.has(g)),
+			);
+		}
 		const grid = this.gridEl;
 		this.gridNoteEl.hide();
 		grid.empty();
@@ -1686,10 +1740,28 @@ export class ArthurDashboardView extends ItemView {
 			const head = el("div", { cls: "arthur-grid-colhead" });
 			head.style.gridColumn = `${i + 1} / span 1`;
 			head.style.gridRow = "1";
+			// INDEPENDENT column collapse (v0.11): a chevron chip per column —
+			// click collapses/expands ONLY that column's instance rows, persisted
+			// per column (settings.gpuCollapsed) across ticks and reopens.
+			const colCollapsed = collapsed.has(col.index);
+			const collapseChip = document.createElement("button");
+			collapseChip.textContent = colCollapsed ? "▶" : "▼";
+			collapseChip.addClass("arthur-btn", "arthur-btn--tiny", "arthur-grid-col-collapse");
+			collapseChip.setAttribute(
+				"title",
+				colCollapsed
+					? `Expand the instance rows of ${col.name}`
+					: `Collapse the instance rows of ${col.name}`,
+			);
+			collapseChip.setAttribute("aria-label", collapseChip.getAttribute("title") ?? "");
+			collapseChip.setAttribute("aria-expanded", String(!colCollapsed));
+			collapseChip.setAttribute("data-gpu-collapse", String(col.index));
+			collapseChip.addEventListener("click", () => this.toggleGpuColumn(col.index));
 			head.append(
 				el("span", { cls: "arthur-grid-gpu-name", text: col.name }),
 				el("div", { cls: "arthur-bar", children: [fill] }),
 				el("span", { cls: "arthur-card-meta", text: parts.join(" · ") }),
+				collapseChip,
 			);
 			// Single-GPU ai-toolkit queue set ('0' → GPU0): a tiny play/pause
 			// chip on that column's header chip (multi-GPU sets live on the

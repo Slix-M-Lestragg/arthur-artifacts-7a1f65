@@ -1,9 +1,13 @@
 /**
- * Pi panel — the observational surface for the pi coding service (agent v0.7.0
- * GET /api/pi/status + tail endpoint). Rendered as an outlined card section
- * ABOVE the GPU grid (pi is not hardware-bound): after the service bar/error
- * banner, before the Instances section. It reuses the section-head collapse
- * pattern (persisted piCollapsed setting, default expanded) and renders:
+ * Pi block — the observational surface for the pi coding service (agent
+ * v0.7.0 GET /api/pi/status + tail endpoint). v0.11 redesign: the standalone
+ * 'Pi' section is GONE — this block is owned by the merged SERVICES section
+ * (dashboard-view) and renders FIRST inside it (device headers + session
+ * cards), above the GPU grid within the same section (pi is not
+ * hardware-bound). The section's collapse state persists as the Services
+ * section's instancesCollapsed; the pi block itself has no head of its own.
+ *
+ * It renders:
  *
  *   warning line  — 'pi status unavailable (pi-sync status pipe not set up)'
  *                   whenever there is no usable device data (pipe absent →
@@ -11,34 +15,54 @@
  *                   failed); muted, never crash, never a card.
  *   device header — hostname (device id fallback), active session count, a
  *                   'stale' badge when the device reports stale:true.
- *   session cards — the pi 'instances': name-or-cwd (fallback = last path
- *                   segment of cwd), model · provider, duration
+ *   session cards — registry-driven SERVICE ROWS (src/icons.ts: id → row
+ *                   icon + label; 'pi' renders the lucide 'terminal' glyph —
+ *                   no official logo exists): row icon, name-or-cwd (fallback
+ *                   = last path segment of cwd), model · provider, duration
  *                   (now − startedAt / lastActivity), active dot (green
- *                   active / grey inactive), running-subagent count badge,
- *                   and — on ACTIVE sessions with a persisted path only — a
- *                   'Peek' button opening an inline mini-log of the session
- *                   tail (last 10 entries, preview text only, via
+ *                   active / grey inactive), subagent child-count badge,
+ *                   and a compact stats LINE below the main line: device ·
+ *                   last-activity age · session tokens (· $cost) — the
+ *                   producer's heartbeat usage rollup (pi-arthur ≥0.1.3;
+ *                   older feeds simply omit the numbers) — and, on ACTIVE
+ *                   sessions with a persisted path only, a 'Peek' button
+ *                   opening an inline mini-log of the session tail (last 10
+ *                   entries, preview text only, via
  *                   GET /api/pi/sessions/…/tail; a pathless one-shot has no
  *                   file to tail → no Peek). Pathless + inactive sessions
  *                   (dead one-shot worker pollution) never render at all
  *                   (piRenderableSession, shared with the queue).
  *   expanded card — the session's subagent runs (agent name, task preview,
  *                   state icon: running → spinner, done → check, failed →
- *                   red cross, canceled → grey dash).
+ *                   red cross, canceled → grey dash). The badge + expansion
+ *                   render as soon as the status feed carries entries whose
+ *                   parentSessionId matches the session id (the in-pi pi-arthur
+ *                   live-run listener populates them).
  *
- * NO lifecycle actions exist anywhere in this panel: pi is observational —
+ * NO lifecycle actions exist anywhere in this block: pi is observational —
  * no start/stop/restart, only the read-only Peek affordance. Active sessions
  * additionally surface in the JOB QUEUE (dashboard-view) as parent job
- * cards; the panel keeps showing every session regardless of active state.
+ * cards; the block keeps showing every session regardless of active state.
  */
 import type { AgentPiDevice, AgentPiSession, AgentPiStatus, AgentPiSubagent, AgentPiTail } from "../api/agent";
+import { injectServiceIcon, serviceLabel } from "../icons";
 import { el, fmtDuration, truncate } from "../util";
 
+/**
+ * Session-row surface: the status contract plus the producer's heartbeat
+ * usage rollup (pi-arthur ≥0.1.3 adds totalTokens/costUsd on the session
+ * entry; the agent passes session dicts through verbatim, so absent fields
+ * just mean the row's stats line omits the numbers). Declared locally —
+ * src/api/* is owned by a later worker (pi service button/dropdown).
+ */
+export interface PiSessionRow extends AgentPiSession {
+	/** Cumulative response tokens of the session (usage rollup), if reported. */
+	totalTokens?: number | null;
+	/** Cumulative response cost in USD, if reported. */
+	costUsd?: number | null;
+}
+
 export interface PiPanelOpts {
-	/** Persisted collapse state (settings.piCollapsed). */
-	isCollapsed: () => boolean;
-	/** Toggle callback (flips + persists the setting). */
-	onToggle: () => void;
 	/** Session-tail fetch backing the read-only 'Peek' mini-log. */
 	fetchTail: (device: string, sessionId: string) => Promise<AgentPiTail>;
 }
@@ -100,13 +124,27 @@ function tsMs(raw?: string | null): number {
 	return Number.isFinite(t) ? t : 0;
 }
 
+/** Compact token count: 14194 → "14.2k tok", 2_400_000 → "2.4M tok". */
+export function fmtTokens(n: number | null | undefined): string {
+	if (n == null || !Number.isFinite(n) || n <= 0) return "";
+	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M tok`;
+	if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, "")}k tok`;
+	return `${Math.round(n)} tok`;
+}
+
+/** Compact USD cost: "$0.42"; zero/absent → "". */
+export function fmtUsd(n: number | null | undefined): string {
+	if (n == null || !Number.isFinite(n) || n < 0.000005) return "";
+	return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "")}`;
+}
+
 /** Peek mini-log cap: last 10 entries, preview text only. */
 const TAIL_LINES = 10;
 
 export class PiPanel {
-	readonly sectionEl: HTMLElement;
-	private readonly headEl: HTMLElement;
-	private readonly bodyEl: HTMLElement;
+	/** The pi block's root — lives INSIDE the Services section body, FIRST
+	 *  position (the GPU grid renders below within the same section). */
+	readonly rootEl: HTMLElement;
 	private readonly warningEl: HTMLElement;
 	private readonly devicesEl: HTMLElement;
 
@@ -119,59 +157,14 @@ export class PiPanel {
 	private readonly tailBusy = new Set<string>();
 
 	constructor(parent: HTMLElement, private readonly opts: PiPanelOpts) {
-		this.sectionEl = parent.createEl("div", { cls: "arthur-section arthur-section--pi" });
-		this.headEl = this.buildHead();
-		this.sectionEl.append(this.headEl);
-		this.bodyEl = this.sectionEl.createEl("div", { cls: "arthur-section-body" });
-		this.headEl.setAttribute("aria-controls", "arthur-section-pi");
-		this.bodyEl.setAttribute("id", "arthur-section-pi");
+		this.rootEl = parent.createEl("div", { cls: "arthur-pi-block" });
 		this.warningEl = el("p", {
 			cls: "arthur-note arthur-pi-warning",
 			text: "",
 		});
 		this.warningEl.hide();
-		this.bodyEl.append(this.warningEl);
-		this.devicesEl = this.bodyEl.createEl("div", { cls: "arthur-cards arthur-pi-devices" });
-		this.syncCollapse();
-	}
-
-	/** Reuse of the section-head pattern ('Pi' + chevron, click-to-collapse). */
-	private buildHead(): HTMLElement {
-		const head = el("div", {
-			cls: "arthur-section-head",
-			attrs: {
-				"data-section": "pi",
-				role: "button",
-				tabindex: "0",
-				"aria-expanded": "true",
-				title: "Toggle the pi panel section",
-			},
-		});
-		head.append(
-			el("span", { cls: "arthur-section-title", text: "Pi" }),
-			el("span", { cls: "arthur-section-chevron", attrs: { "aria-hidden": "true" } }),
-		);
-		head.addEventListener("click", () => this.opts.onToggle());
-		head.addEventListener("keydown", (e: KeyboardEvent) => {
-			if (e.key === "Enter" || e.key === " ") {
-				e.preventDefault();
-				this.opts.onToggle();
-			}
-		});
-		return head;
-	}
-
-	/** Repaint the persisted collapse state (body hidden + muted head). */
-	syncCollapse(): void {
-		const collapsed = this.opts.isCollapsed();
-		if (collapsed) {
-			this.bodyEl.hide();
-			this.headEl.addClass("arthur-section-head--collapsed");
-		} else {
-			this.bodyEl.show();
-			this.headEl.removeClass("arthur-section-head--collapsed");
-		}
-		this.headEl.setAttribute("aria-expanded", String(!collapsed));
+		this.rootEl.append(this.warningEl);
+		this.devicesEl = this.rootEl.createEl("div", { cls: "arthur-cards arthur-pi-devices" });
 	}
 
 	/** The device's subagent runs grouped per parent session id. */
@@ -182,7 +175,6 @@ export class PiPanel {
 	/** Repaint from the last poll snapshot. Never throws with devices: []. */
 	render(data: PiPanelData): void {
 		this.lastData = data;
-		this.syncCollapse();
 		const status = data.status;
 		const devices = status?.devices ?? [];
 		this.devicesEl.empty();
@@ -228,7 +220,12 @@ export class PiPanel {
 		return wrap;
 	}
 
-	/** One compact session card — click expands the subagent run list. */
+	/**
+	 * One compact session row — registry-driven service row (icon + label),
+	 * a MAIN line (dot · icon · name · model·provider · duration · subagent
+	 * count badge · Peek) and ONE compact stats line below (device ·
+	 * last-activity age · tokens · cost). Click expands the subagent list.
+	 */
 	private sessionCard(dev: AgentPiDevice, sess: AgentPiSession, now: number): HTMLElement {
 		const key = `${dev.device}/${sess.id}`;
 		const subs = this.subsOf(dev, sess.id);
@@ -237,11 +234,16 @@ export class PiPanel {
 
 		const card = el("div", {
 			cls: `arthur-pi-card ${sess.active ? "arthur-pi-card--active" : "arthur-pi-card--inactive"}`,
-			attrs: { "data-pi-session": key },
+			attrs: { "data-pi-session": key, "data-pi-service": "pi" },
 		});
 		const dotCls = sess.active ? "arthur-dot arthur-dot--green" : "arthur-dot arthur-dot--gray";
 		const head = el("div", { cls: "arthur-pi-card-head" });
 		head.append(el("span", { cls: dotCls, attrs: { "aria-label": sess.active ? "active" : "inactive" } }));
+		// Registry-driven service row icon + label ('pi' → lucide terminal
+		// glyph; new non-GPU services render their own entry for free).
+		const icon = el("span", { cls: "arthur-pi-row-icon", attrs: { "data-service": "pi", "aria-label": serviceLabel("pi") } });
+		injectServiceIcon(icon, "pi");
+		head.append(icon);
 		head.append(el("span", { cls: "arthur-pi-card-title", text: truncate(piSessionLabel(sess), 32), attrs: { title: sess.cwd || sess.id } }));
 		head.append(el("span", {
 			cls: "arthur-card-meta arthur-pi-card-meta",
@@ -252,6 +254,8 @@ export class PiPanel {
 		if (durMs > 0) {
 			head.append(el("span", { cls: "arthur-card-meta arthur-pi-duration", text: fmtDuration(Math.max(0, (now - durMs) / 1000)) }));
 		}
+		// Subagent child-count badge — VISIBLY populated from the feed's
+		// subagent entries (parentSessionId match); click expands the list.
 		if (subs.length > 0) {
 			head.append(
 				el("span", {
@@ -262,7 +266,7 @@ export class PiPanel {
 			);
 		}
 		// Read-only 'Open session' affordance (observational — the ONLY button
-		// on a pi card; no lifecycle actions exist for pi). Needs an active
+		// on a pi row; no lifecycle actions exist for pi). Needs an active
 		// session WITH a persisted file: piSessionTail tails the jsonl path, a
 		// pathless one-shot has nothing to tail (would 404).
 		if (piPeekableSession(sess)) {
@@ -277,6 +281,19 @@ export class PiPanel {
 			head.append(peek);
 		}
 		card.append(head);
+
+		// ONE compact stats line: device · last-activity age · session tokens
+		// (· cost) — the producer's usage rollup when the feed carries it.
+		const stats: string[] = [(dev.hostname ?? "").trim() || dev.device];
+		const activityMs = tsMs(sess.lastActivity);
+		if (activityMs > 0) {
+			stats.push(`activity ${fmtDuration(Math.max(0, Math.floor((now - activityMs) / 1000)))} ago`);
+		}
+		const tok = fmtTokens((sess as PiSessionRow).totalTokens);
+		if (tok) stats.push(tok);
+		const cost = fmtUsd((sess as PiSessionRow).costUsd);
+		if (cost) stats.push(cost);
+		card.append(el("span", { cls: "arthur-card-meta arthur-pi-card-stats", text: stats.join(" · ") }));
 
 		if (expanded) {
 			card.addClass("arthur-pi-card--expanded");

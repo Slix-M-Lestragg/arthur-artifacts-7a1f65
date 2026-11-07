@@ -1302,6 +1302,23 @@ try {
 		const unknownIcon = new StubEl("span");
 		bundle.injectIcon(unknownIcon, "not-a-service");
 		assert(unknownIcon.getAttribute("data-icon") === "server", "unknown service falls back to the lucide server icon");
+		// row-registry extensibility: new non-GPU services need ONE SERVICE_META
+		// entry (icon + label) — the pi row renderer is registry-driven.
+		assert(bundle.serviceLabel("pi") === "pi", "serviceLabel resolves the registered pi label");
+		const piIconProbe = new StubEl("span");
+		bundle.injectServiceIcon(piIconProbe, "pi");
+		assert(piIconProbe.getAttribute("data-icon") === "terminal",
+			"injectServiceIcon renders the registered lucide glyph for pi (no official pi logo exists)");
+		const officialProbe = new StubEl("span");
+		bundle.injectServiceIcon(officialProbe, "comfyui");
+		assert((officialProbe.innerHTML ?? "").includes("viewBox=\"0 0 520 520\""),
+			"injectServiceIcon prefers the official inline SVG when one exists");
+		bundle.SERVICE_META["future-svc"] = { label: "Future Service", lucide: "bot" };
+		assert(bundle.serviceLabel("future-svc") === "Future Service", "the row label registry accepts new services");
+		const futureProbe = new StubEl("span");
+		bundle.injectServiceIcon(futureProbe, "future-svc");
+		assert(futureProbe.getAttribute("data-icon") === "bot", "new registry entries render their own lucide glyph");
+		delete bundle.SERVICE_META["future-svc"];
 	}
 
 	// (f2) 'view in queue ↓' hides when an instance currently holds no queue
@@ -1367,6 +1384,67 @@ try {
 		await sleep(30);
 		assert(calls14.some((c) => /\/api\/queue\/1\/start$/.test(c.url)) === true,
 			"GPU1 chip click resumes the single-GPU training queue");
+	}
+
+	// (f4) INDEPENDENT GPU-column collapse (v0.11): per-column chevron on the
+	// column head; collapsing a column hides ONLY the rows bound exclusively
+	// to it; persisted per column (settings.gpuCollapsed), independent of the
+	// section collapse and of the other column.
+	{
+		// restore the pre-collapse queue state for deterministic rows
+		// (comfy-1 keeps its running prompt — the (h) anchor test relies on it)
+		comfyQueue[8189] = { queue_running: [["exec", "prompt-two", { "9": { class_type: "VAEDecode" } }]], queue_pending: [] };
+		plugin.settings.gpuCollapsed = {}; // clean slate (all expanded)
+		await view14.refreshData();
+		const colChips14 = () =>
+			gridHead14().map((h) => findByClass(h, "arthur-grid-col-collapse")[0]);
+		const chips14 = colChips14();
+		assert(chips14.length === 2 && chips14.every((c) => !!c),
+			"each GPU column head carries its own collapse chevron chip");
+		assert(chips14.every((c) => c.textContent === "▼" && c.getAttribute("aria-expanded") === "true"),
+			"all columns start expanded (▼, aria-expanded=true)");
+		assert(rowByKey("inst:comfy-0") != null && rowByKey("inst:comfy-1") != null
+			&& rowByKey("inst:comfy-dual") != null, "all instance rows render while both columns expand");
+
+		// collapse GPU0: comfy-0 (GPU0 only) hides; comfy-1 stays; comfy-dual
+		// (GPU 0+1) STAYS (it still binds the expanded GPU1).
+		chips14[0].handlers.get("click")[0]?.();
+		assert(rowByKey("inst:comfy-0") === null, "collapsing GPU0 hides the GPU0-only instance row");
+		assert(rowByKey("inst:comfy-1") != null, "GPU1's row is INDEPENDENT of GPU0's collapse");
+		assert(rowByKey("inst:comfy-dual") != null, "a dual-GPU row stays while ANY of its columns is expanded");
+		assert(plugin.settings.gpuCollapsed["0"] === true, "column collapse persists in settings.gpuCollapsed");
+		assert(plugin._data?.gpuCollapsed?.["0"] === true, "column collapse persisted through saveData");
+		const chipsAfter = colChips14();
+		assert(chipsAfter[0].textContent === "▶" && chipsAfter[0].getAttribute("aria-expanded") === "false"
+			&& chipsAfter[1].textContent === "▼",
+			"the collapsed column chip flips to ▶ while the other stays ▼ (per-column state)");
+
+		// also collapse GPU1 → the dual row is bound ONLY to collapsed columns → hides
+		chipsAfter[1].handlers.get("click")[0]?.();
+		assert(rowByKey("inst:comfy-1") === null && rowByKey("inst:comfy-dual") === null,
+			"collapsing BOTH columns hides every bound row (dual-GPU included)");
+		assert(plugin.settings.gpuCollapsed["0"] === true && plugin.settings.gpuCollapsed["1"] === true,
+			"each column's state persists independently (both toggled)");
+
+		// section collapse is INDEPENDENT of column collapse: expanding the
+		// columns must not reopen the section and vice versa
+		chips14[0] = colChips14()[0];
+		colChips14()[0].handlers.get("click")[0]?.(); // re-expand GPU0
+		assert(plugin.settings.gpuCollapsed["0"] === undefined, "re-expanding a column clears its persisted state");
+		assert(rowByKey("inst:comfy-dual") != null,
+			"re-expanding GPU0 brings the dual-GPU row back (it bound only GPU1 collapsed before)");
+
+		// service-bar column collapse state survives reopen (persisted reload)
+		plugin.settings.gpuCollapsed = { "1": true };
+		await plugin.saveSettings();
+		await sleep(700); // debounced runtime rebuild paints from settings
+		assert(rowByKey("inst:comfy-1") === null && rowByKey("inst:comfy-0") != null,
+			"the reloaded settings render GPU1 collapsed (its row hidden, GPU0's shown)");
+		assert(findByClass(gridHead14()[1], "arthur-grid-col-collapse")[0].textContent === "▶",
+			"the relaunched column chip reflects the persisted collapsed state");
+		plugin.settings.gpuCollapsed = {}; // restore for later suites
+		await view14.refreshData();
+		assert(rowByKey("inst:comfy-1") != null, "restored expanded state re-renders GPU1's rows");
 	}
 
 	// (g) /api/gpus unreachable → derived columns + 'gpu stats unavailable' note
@@ -1471,23 +1549,23 @@ try {
 	}
 	assert(ok, "section-titles view attach + refresh did not throw");
 	const heads15 = findByClass(view15.contentEl, "arthur-section-head");
-	assert(heads15.length === 3, "each dashboard section opens with a collapse title head (pi + instances + queue: 3 total)");
+	assert(heads15.length === 2, "each dashboard section opens with a collapse title head (services + queue: 2 total)");
 	const sectionTitles15 = findByClass(view15.contentEl, "arthur-section-title").map((t) => t.textContent);
-	assert(sectionTitles15.includes("Instances") && sectionTitles15.includes("Queue") && sectionTitles15.includes("Pi"),
-		`title texts are 'Pi' + 'Instances' + 'Queue' (got: ${sectionTitles15.join(" / ")})`);
+	assert(sectionTitles15.includes("Services") && sectionTitles15.includes("Queue"),
+		`title texts are 'Services' + 'Queue' (v0.11: pi merged into Services; got: ${sectionTitles15.join(" / ")})`);
 	// centered layout + chevron live in the dedicated CSS classes; the DOM must
 	// carry both on every head
 	assert(heads15.every((h) => h.hasClass("arthur-section-head") && findByClass(h, "arthur-section-chevron").length === 1),
 		"every title head is the centered arthur-section-head with one chevron glyph");
 	const instancesHead15 = heads15.find((h) => h.getAttribute("data-section") === "instances");
 	const queueHead15 = heads15.find((h) => h.getAttribute("data-section") === "queue");
-	assert(!!instancesHead15 && !!queueHead15, "heads are tagged per section (instances / queue)");
+	assert(!!instancesHead15 && !!queueHead15, "heads are tagged per section (services / queue)");
 	assert(instancesHead15.getAttribute("aria-expanded") === "true" && queueHead15.getAttribute("aria-expanded") === "true",
 		"both sections start expanded (sensible default)");
 
 	// click a title → its section body collapses to the head + setting flips
 	instancesHead15.handlers.get("click")[0]?.();
-	assert(view15.gridBodyEl.isShown() === false, "clicking the Instances title collapses the instance-grid body");
+	assert(view15.gridBodyEl.isShown() === false, "clicking the Services title collapses the services body (pi block + grid + notes)");
 	assert(plugin.settings.instancesCollapsed === true, "grid collapse flips the persisted instancesCollapsed setting");
 	assert(plugin._data?.instancesCollapsed === true, "instancesCollapsed persisted via saveData");
 	assert(instancesHead15.getAttribute("aria-expanded") === "false", "collapsed head reports aria-expanded=false");
@@ -1508,13 +1586,13 @@ try {
 	assert(plugin.settings.instancesCollapsed === true, "instancesCollapsed reloads from saved settings");
 	await plugin.activateView();
 	const view15b = app.workspace.getLeavesOfType("arthur-dashboard")[0]?.view;
-	assert(view15b.gridBodyEl.isShown() === false, "Instances section stays collapsed across reopen");
+	assert(view15b.gridBodyEl.isShown() === false, "Services section (pi + grid) stays collapsed across reopen");
 	assert(view15b.queueBodyEl.isShown() === true, "Queue section stays expanded across reopen");
-	// restore: click the collapsed Instances title back open for later sections
+	// restore: click the collapsed Services title back open for later sections
 	const instHead15b = findByClass(view15b.contentEl, "arthur-section-head").find((h) => h.getAttribute("data-section") === "instances");
 	instHead15b.handlers.get("click")[0]?.();
 	await sleep(700);
-	assert(view15b.gridBodyEl.isShown() === true, "restored Instances section expands again");
+	assert(view15b.gridBodyEl.isShown() === true, "restored Services section expands again");
 	assert(plugin.settings.instancesCollapsed === false && plugin._data?.instancesCollapsed === false,
 		"restored expanded state persists too");
 
@@ -2632,10 +2710,10 @@ try {
 	StubNotice.reset();
 	await app.workspace.detachLeavesOfType("arthur-dashboard");
 
-	// ---- 22. pi panel + pi session/subagent queue jobs (observational service) ---
-	console.log("== 22. pi panel + session/subagent queue jobs ==");
+	// ---- 22. pi block inside the merged Services section + pi session/subagent
+	//          queue jobs (observational service) ------------------------------
+	console.log("== 22. pi in Services + session/subagent queue jobs ==");
 	plugin.settings.profiles[0].comfyPorts = ""; // pi suite runs without comfy ports
-	plugin.settings.piCollapsed = false;
 	await plugin.saveSettings();
 	await sleep(700);
 
@@ -2648,8 +2726,9 @@ try {
 				device: "dev-lt", hostname: "laptop", repoUpdatedAt: iso(3600000),
 				sessionsCount: 2, activeSessions: 1, subagentsRunning: 1,
 				sessions: [
-					{ id: "sess-a", path: "/home/me/.pi/sess-a.jsonl", cwd: "/home/me/deep/repo", name: "arthur plugin work", model: "GLM-5", provider: "zai", startedAt: iso(3600000), lastActivity: iso(5000), active: true },
-					{ id: "sess-b", path: "/home/me/.pi/sess-b.jsonl", cwd: "/srv/other", name: "", model: "MiMo", provider: "x", startedAt: iso(7200000), lastActivity: iso(120000), active: false },
+					// producer usage rollup fields (pi-arthur ≥0.1.3 heartbeat)
+					{ id: "sess-a", path: "/home/me/.pi/sess-a.jsonl", cwd: "/home/me/deep/repo", name: "arthur plugin work", model: "GLM-5", provider: "zai", startedAt: iso(3600000), lastActivity: iso(5000), active: true, totalTokens: 14194, costUsd: 0.42 },
+					{ id: "sess-b", path: "/home/me/.pi/sess-b.jsonl", cwd: "/srv/other", name: "", model: "MiMo", provider: "x", startedAt: iso(7200000), lastActivity: iso(120000), active: false, totalTokens: 2_450_000 },
 					// v0.10.1 producer guards: a PATHLESS + INACTIVE one-shot (the old
 					// pre-guard worker pollution) must NEVER render anywhere…
 					{ id: "sess-c", path: "", cwd: "/srv/workers", name: null, model: "GLM-5", provider: "zai", startedAt: iso(60000), lastActivity: iso(30000), active: false },
@@ -2706,33 +2785,26 @@ try {
 	assert(ok, "pi view attach + refresh did not throw");
 	const piPanel22 = view22.piPanel;
 	assert(!!piPanel22, "view holds a piPanel");
-	const piSection22 = piPanel22.sectionEl;
+	const piSection22 = piPanel22.rootEl;
 
-	// (a) panel ABOVE the grid — pi section precedes the section carrying .arthur-grid
+	// (a) FIRST position inside the merged SERVICES section — the pi block sits
+	// inside arthur-section-instances, BEFORE arthur-grid, with NO head of its
+	// own (the Services section head owns the collapse; separate piCollapsed gone)
 	{
-		const root22 = view22.contentEl.children[0];
-		const children22 = root22.children ?? [];
-		const piIdx = children22.indexOf(piSection22);
-		const gridSectionIdx = children22.findIndex((c) => findById(c, "arthur-section-instances") != null);
-		assert(piIdx >= 0 && gridSectionIdx >= 0 && piIdx < gridSectionIdx,
-			`pi panel sits ABOVE the GPU grid (pi=${piIdx}, grid section=${gridSectionIdx})`);
+		assert(piSection22?._parent === view22.gridBodyEl,
+			"the pi block lives INSIDE the Services section body");
+		const bodyChildren22 = view22.gridBodyEl.children ?? [];
+		const piIdx22 = bodyChildren22.indexOf(piSection22);
+		const gridIdx22 = bodyChildren22.indexOf(view22.gridEl);
+		assert(piIdx22 >= 0 && gridIdx22 > piIdx22,
+			`pi content FIRST in Services, GPU grid below it (pi=${piIdx22}, grid=${gridIdx22})`);
 		assert(findByClass(view22.contentEl, "arthur-pi-warning").every((w) => w._shown !== true),
 			"no pi warning line while devices are reported");
-		const head22 = findByClass(piSection22, "arthur-section-head")[0];
-		assert(!!head22 && head22.getAttribute("data-section") === "pi"
-			&& findByClass(piSection22, "arthur-section-title")[0]?.textContent === "Pi",
-			"pi section carries its own collapse head titled 'Pi'");
-		assert(head22.getAttribute("aria-expanded") === "true", "pi section starts expanded");
+		assert(findByClass(view22.contentEl, "arthur-section-head").every((h) => h.getAttribute("data-section") !== "pi"),
+			"NO standalone pi head exists anymore (v0.11 merge into Services)");
 		const devHead22 = findByClass(piSection22, "arthur-pi-device-head")[0];
 		assert(!!devHead22 && allText(devHead22).includes("laptop") && allText(devHead22).includes("2 active"),
 			"device header shows the hostname + active session count (2: sess-a + pathless-active sess-d)");
-		// collapse toggle persists through the settings
-		head22.handlers.get("click")[0]?.();
-		assert(findById(piSection22, "arthur-section-pi").isShown() === false, "pi head click collapses the pi body");
-		assert(plugin.settings.piCollapsed === true && plugin._data?.piCollapsed === true,
-			"pi collapse state persists through saveSettings");
-		head22.handlers.get("click")[0]?.();
-		assert(findById(piSection22, "arthur-section-pi").isShown() === true, "second click re-expands the pi body");
 	}
 
 	// (b) active + inactive session cards render with model/provider + duration
@@ -2752,6 +2824,22 @@ try {
 		assert(allText(inactiveCard22).includes("MiMo · x") && allText(inactiveCard22).includes("2:00"),
 			"inactive card shows model + lastActivity duration");
 		assert(allText(inactiveCard22).includes("other"), "inactive card falls back to the last cwd segment as name");
+		// REGISTRY-DRIVEN service row icons: 'pi' renders the lucide terminal
+		// glyph (no official pi logo exists) + the service label via the registry
+		for (const card of cards22()) {
+			const icon22 = findByClass(card, "arthur-pi-row-icon")[0];
+			assert(!!icon22 && icon22.getAttribute("data-icon") === "terminal" && icon22.getAttribute("data-service") === "pi",
+				"every pi session row renders the registry-driven service icon (lucide terminal)");
+		}
+		// ONE compact stats line: device · last-activity age · tokens (· cost)
+		const activeStats22 = findByClass(activeCard22, "arthur-pi-card-stats")[0];
+		assert(!!activeStats22 && allText(activeStats22).startsWith("laptop · activity "),
+			"the stats line opens with the device + last-activity age");
+		assert(allText(activeStats22).includes("14.2k tok · $0.42"),
+			"the stats line carries the producer usage rollup (tokens + cost)");
+		const inactiveStats22 = findByClass(inactiveCard22, "arthur-pi-card-stats")[0];
+		assert(allText(inactiveStats22).includes("2.5M tok") && !allText(inactiveStats22).includes("$"),
+			"million-scale tokens format compactly; absent cost is simply omitted (sess-b carries no costUsd)");
 		assert(findButton(inactiveCard22, "Peek") === null, "inactive cards carry NO Peek button");
 		assert(findButton(activeCard22, "Peek") != null, "active cards with a path carry the read-only Peek button");
 		const pathlessActive22 = cards22().find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-d"));
@@ -2908,4 +2996,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.7.0-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove / pure-job-list-queue / collapsible-section-titles / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-panel+pi-queue-jobs all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.7.0-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs all clean");
