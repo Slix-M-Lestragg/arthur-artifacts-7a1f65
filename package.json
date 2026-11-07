@@ -1,6 +1,6 @@
 {
 	"name": "arthur",
-	"version": "0.1.0",
+	"version": "0.13.1",
 	"description": "Remotely manage ComfyUI and ai-toolkit instances on the home server",
 	"main": "main.js",
 	"scripts": {

@@ -81,13 +81,13 @@ class StubEl extends StubNode {
 	appendChild(node) { this.append(node); return node; }
 	insertBefore(node, ref) { const i = this.children.indexOf(ref); this.children.splice(i < 0 ? this.children.length : i, 0, node); node._parent = this; return node; }
 	remove() { this._parent?.children && (this._parent.children = this._parent.children.filter((c) => c !== this)); }
-	/** Ancestor walk ('button'/'a') mirroring Element.closest — the view's
-	 *  click-to-expand guard uses it to ignore clicks on buttons/links. */
+	// Ancestor walk ('button'/'a', comma lists OK) mirroring Element.closest —
+	// the view's click guards use it to ignore clicks on buttons/links.
 	closest(sel) {
-		const tag = String(sel).toUpperCase();
+		const sels = String(sel).split(",").map((s) => s.trim()).filter(Boolean);
 		let node = this;
 		while (node) {
-			if (node.tagName === tag) return node;
+			if (sels.some((s) => node.tagName === s.toUpperCase())) return node;
 			node = node._parent;
 		}
 		return null;
@@ -1386,9 +1386,10 @@ try {
 			"GPU1 chip click resumes the single-GPU training queue");
 	}
 
-	// (f4) INDEPENDENT GPU-column collapse (v0.11): per-column chevron on the
-	// column head; collapsing a column hides ONLY the rows bound exclusively
-	// to it; persisted per column (settings.gpuCollapsed), independent of the
+	// (f4) INDEPENDENT GPU-column collapse (v0.11, reworked v0.13.1): clicking
+	// the column HEAD toggles collapse (no dedicated chevron button anymore);
+	// collapsing a column hides ONLY the rows bound exclusively to it;
+	// persisted per column (settings.gpuCollapsed), independent of the
 	// section collapse and of the other column.
 	{
 		// restore the pre-collapse queue state for deterministic rows
@@ -1396,31 +1397,61 @@ try {
 		comfyQueue[8189] = { queue_running: [["exec", "prompt-two", { "9": { class_type: "VAEDecode" } }]], queue_pending: [] };
 		plugin.settings.gpuCollapsed = {}; // clean slate (all expanded)
 		await view14.refreshData();
-		const colChips14 = () =>
-			gridHead14().map((h) => findByClass(h, "arthur-grid-col-collapse")[0]);
-		const chips14 = colChips14();
-		assert(chips14.length === 2 && chips14.every((c) => !!c),
-			"each GPU column head carries its own collapse chevron chip");
-		assert(chips14.every((c) => c.textContent === "▼" && c.getAttribute("aria-expanded") === "true"),
-			"all columns start expanded (▼, aria-expanded=true)");
+		const colHeads14 = () => gridHead14();
+		const clickHead14 = (head, target = head) =>
+			head.handlers.get("click")[0]?.({ target });
+		const heads14 = colHeads14();
+		assert(heads14.length === 2 && heads14.every((h) => h.getAttribute("role") === "button"
+				&& h.getAttribute("tabindex") === "0" && h.getAttribute("aria-expanded") === "true"),
+			"each GPU column head is the toggle (role=button, tabindex, aria-expanded=true)");
+		assert(heads14.every((h) => findByClass(h, "arthur-grid-col-chevron").length === 1),
+			"the collapse chevron lives inline in the column title (no separate button)");
 		assert(rowByKey("inst:comfy-0") != null && rowByKey("inst:comfy-1") != null
 			&& rowByKey("inst:comfy-dual") != null, "all instance rows render while both columns expand");
 
-		// collapse GPU0: comfy-0 (GPU0 only) hides; comfy-1 stays; comfy-dual
-		// (GPU 0+1) STAYS (it still binds the expanded GPU1).
-		chips14[0].handlers.get("click")[0]?.();
+		// collapse GPU0 via a plain head click: comfy-0 (GPU0 only) hides;
+		// comfy-1 stays; comfy-dual (GPU 0+1) STAYS (it still binds GPU1).
+		clickHead14(heads14[0]);
 		assert(rowByKey("inst:comfy-0") === null, "collapsing GPU0 hides the GPU0-only instance row");
 		assert(rowByKey("inst:comfy-1") != null, "GPU1's row is INDEPENDENT of GPU0's collapse");
 		assert(rowByKey("inst:comfy-dual") != null, "a dual-GPU row stays while ANY of its columns is expanded");
 		assert(plugin.settings.gpuCollapsed["0"] === true, "column collapse persists in settings.gpuCollapsed");
 		assert(plugin._data?.gpuCollapsed?.["0"] === true, "column collapse persisted through saveData");
-		const chipsAfter = colChips14();
-		assert(chipsAfter[0].textContent === "▶" && chipsAfter[0].getAttribute("aria-expanded") === "false"
-			&& chipsAfter[1].textContent === "▼",
-			"the collapsed column chip flips to ▶ while the other stays ▼ (per-column state)");
+		const headsAfter = colHeads14();
+		assert(headsAfter[0].getAttribute("aria-expanded") === "false"
+				&& headsAfter[0].className.includes("arthur-grid-colhead--collapsed")
+				&& headsAfter[1].getAttribute("aria-expanded") === "true",
+			"the collapsed column flips its inline state while the other stays expanded (per-column)");
+		assert(allText(headsAfter[0]).includes("RTX 3060"),
+			"collapsed column keeps its title row visible (reopenable)");
+		assert(findByClass(headsAfter[0], "arthur-grid-col-chevron")[0].tagName === "SPAN",
+			"chevron is an inert title marker span, not a button");
+
+		// interactive-child guard: clicking the GPU1 queue-toggle chip inside
+		// its head must NOT toggle the column collapse (it pauses the queue)
+		const gpu1Chip14 = findByClass(colHeads14()[1], "arthur-queue-toggle")[0];
+		calls14.length = 0;
+		clickHead14(colHeads14()[1], gpu1Chip14);
+		await sleep(30);
+		assert(plugin.settings.gpuCollapsed["1"] === undefined,
+			"a click on the queue-toggle chip inside the header does NOT toggle collapse");
+		gpu1Chip14.handlers.get("click")[0]?.(); // the chip's own handler
+		await sleep(30);
+		assert(calls14.some((c) => /\/api\/queue\/1\/start$/.test(c.url)) === true,
+			"the queue-toggle chip still works (resumes GPU1's queue)");
+		comfyQueue[8189] = { queue_running: [["exec", "prompt-two", { "9": { class_type: "VAEDecode" } }]], queue_pending: [] }; // reset for (h)
+
+		// keyboard: Enter and Space on the focused head toggle collapse
+		colHeads14()[1].handlers.get("keydown")[0]?.({ key: "Enter", preventDefault() {} });
+		assert(plugin.settings.gpuCollapsed["1"] === true, "Enter on the header toggles the column collapsed");
+		await view14.refreshData();
+		colHeads14()[1].handlers.get("keydown")[0]?.({ key: " ", preventDefault() {} });
+		assert(plugin.settings.gpuCollapsed["1"] === undefined, "Space on the header re-expands the column");
+		colHeads14()[1].handlers.get("keydown")[0]?.({ key: "a", preventDefault() {} });
+		assert(plugin.settings.gpuCollapsed["1"] === undefined, "other keys do NOT toggle the column");
 
 		// also collapse GPU1 → the dual row is bound ONLY to collapsed columns → hides
-		chipsAfter[1].handlers.get("click")[0]?.();
+		clickHead14(colHeads14()[1]);
 		assert(rowByKey("inst:comfy-1") === null && rowByKey("inst:comfy-dual") === null,
 			"collapsing BOTH columns hides every bound row (dual-GPU included)");
 		assert(plugin.settings.gpuCollapsed["0"] === true && plugin.settings.gpuCollapsed["1"] === true,
@@ -1428,8 +1459,7 @@ try {
 
 		// section collapse is INDEPENDENT of column collapse: expanding the
 		// columns must not reopen the section and vice versa
-		chips14[0] = colChips14()[0];
-		colChips14()[0].handlers.get("click")[0]?.(); // re-expand GPU0
+		clickHead14(colHeads14()[0]); // re-expand GPU0
 		assert(plugin.settings.gpuCollapsed["0"] === undefined, "re-expanding a column clears its persisted state");
 		assert(rowByKey("inst:comfy-dual") != null,
 			"re-expanding GPU0 brings the dual-GPU row back (it bound only GPU1 collapsed before)");
@@ -1440,8 +1470,10 @@ try {
 		await sleep(700); // debounced runtime rebuild paints from settings
 		assert(rowByKey("inst:comfy-1") === null && rowByKey("inst:comfy-0") != null,
 			"the reloaded settings render GPU1 collapsed (its row hidden, GPU0's shown)");
-		assert(findByClass(gridHead14()[1], "arthur-grid-col-collapse")[0].textContent === "▶",
-			"the relaunched column chip reflects the persisted collapsed state");
+		const persistHead14 = gridHead14()[1];
+		assert(persistHead14.getAttribute("aria-expanded") === "false"
+				&& persistHead14.className.includes("arthur-grid-colhead--collapsed"),
+			"the relaunched column head reflects the persisted collapsed state");
 		plugin.settings.gpuCollapsed = {}; // restore for later suites
 		await view14.refreshData();
 		assert(rowByKey("inst:comfy-1") != null, "restored expanded state re-renders GPU1's rows");

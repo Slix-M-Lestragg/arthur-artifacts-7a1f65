@@ -35,8 +35,9 @@
  *                    is inactive (v0.7.1: stop-all leaves only the grey
  *                    service pill; a stopped service's leftover default
  *                    instance renders no row). GPU columns are INDEPENDENTLY
- *                    collapsible (v0.11): each column-head chip carries a
- *                    chevron; collapsing a column hides only the rows bound
+ *                    collapsible (v0.11, header-click since v0.13.1):
+ *                    clicking (or Enter/Space on) the whole column head
+ *                    toggles it; collapsing a column hides only the rows bound
  *                    exclusively to collapsed columns (a row with any GPU in
  *                    an expanded column stays), persisted per column as
  *                    settings.gpuCollapsed (default: all expanded), fully
@@ -534,7 +535,7 @@ export class ArthurDashboardView extends ItemView {
 	 *  live here later). */
 	private generalHeadEl!: HTMLElement;
 	private generalBodyEl!: HTMLElement;
-	/** 'GPUs' sub-container (the GPU grid; per-GPU-column toggles unchanged). */
+	/** 'GPUs' sub-container (the GPU grid; per-GPU-column collapse heads unchanged). */
 	private gpusHeadEl!: HTMLElement;
 	private gpusBodyEl!: HTMLElement;
 	/** 'Debug' log pane (bottom of the dashboard): host element + pane model.
@@ -1280,7 +1281,7 @@ export class ArthurDashboardView extends ItemView {
 		// chevron) above TWO subordinate collapsible sub-containers:
 		//   'General' (FIRST) — the cross-device pi sessions list (non-GPU);
 		//   'GPUs' (below) — the GPU grid + its notes + unmanaged fallback,
-		// with the per-GPU-column collapse toggles unchanged. Both sub-collapses
+		// with the per-GPU-column collapse toggles (column-head clicks) unchanged. Both sub-collapses
 		// persist independently (settings.generalCollapsed / gpusCollapsed).
 		const gridSection = root.createEl("div", { cls: "arthur-section" });
 		this.gridHeadEl = this.buildSectionHead("instances");
@@ -1308,7 +1309,7 @@ export class ArthurDashboardView extends ItemView {
 			},
 		});
 
-		// 'GPUs' sub-container below (column headers + collapse chips unchanged).
+		// 'GPUs' sub-container below (column headers + header-click collapse unchanged).
 		this.gpusHeadEl = this.buildSubHead("gpus");
 		this.gridBodyEl.append(this.gpusHeadEl);
 		this.gpusBodyEl = this.gridBodyEl.createEl("div", { cls: "arthur-subbody" });
@@ -2105,8 +2106,8 @@ export class ArthurDashboardView extends ItemView {
 	}
 
 	/**
-	 * Toggle one GPU column's collapsed state (the column-head chevron):
-	 * flips the persisted per-column setting, saves, repaints the grid —
+	 * Toggle one GPU column's collapsed state (click / Enter+Space on the
+	 * column header chip): flips the persisted per-column setting, saves, repaints the grid —
 	 * fully independent of the Services section collapse and of the other
 	 * columns.
 	 */
@@ -2152,31 +2153,58 @@ export class ArthurDashboardView extends ItemView {
 			}
 			if (col.util != null) parts.push(`util ${Math.round(col.util)}%`);
 			if (col.tempC != null) parts.push(`${Math.round(col.tempC)}°`);
-			const head = el("div", { cls: "arthur-grid-colhead" });
+			const colCollapsed = collapsed.has(col.index);
+			const head = el("div", {
+				cls: colCollapsed
+					? "arthur-grid-colhead arthur-grid-colhead--collapsed"
+					: "arthur-grid-colhead",
+				attrs: {
+					"data-gpu-collapse": String(col.index),
+					role: "button",
+					tabindex: "0",
+					"aria-expanded": String(!colCollapsed),
+					title: colCollapsed
+						? `Expand the instance rows of ${col.name}`
+						: `Collapse the instance rows of ${col.name}`,
+				},
+			});
 			head.style.gridColumn = `${i + 1} / span 1`;
 			head.style.gridRow = "1";
-			// INDEPENDENT column collapse (v0.11): a chevron chip per column —
-			// click collapses/expands ONLY that column's instance rows, persisted
-			// per column (settings.gpuCollapsed) across ticks and reopens.
-			const colCollapsed = collapsed.has(col.index);
-			const collapseChip = document.createElement("button");
-			collapseChip.textContent = colCollapsed ? "▶" : "▼";
-			collapseChip.addClass("arthur-btn", "arthur-btn--tiny", "arthur-grid-col-collapse");
-			collapseChip.setAttribute(
-				"title",
-				colCollapsed
-					? `Expand the instance rows of ${col.name}`
-					: `Collapse the instance rows of ${col.name}`,
-			);
-			collapseChip.setAttribute("aria-label", collapseChip.getAttribute("title") ?? "");
-			collapseChip.setAttribute("aria-expanded", String(!colCollapsed));
-			collapseChip.setAttribute("data-gpu-collapse", String(col.index));
-			collapseChip.addEventListener("click", () => this.toggleGpuColumn(col.index));
+			// INDEPENDENT column collapse (v0.11, reworked v0.13.1): the whole
+			// header chip toggles ONLY that column's instance rows on click (or
+			// Enter/Space while focused), persisted per column
+			// (settings.gpuCollapsed) across ticks and reopens. No dedicated
+			// chevron button anymore — the chevron lives inline in the title.
+			// Interactive children (queue-toggle chips) keep working: clicks on
+			// them never bubble into a collapse toggle.
+			head.addEventListener("click", (e: MouseEvent) => {
+				if ((e?.target as HTMLElement | null)?.closest(
+					"button, a, input, select, textarea",
+				)) return; // real interactive child (queue-toggle chip, link, …)
+				this.toggleGpuColumn(col.index);
+			});
+			head.addEventListener("keydown", (e: KeyboardEvent) => {
+				if (e.key === "Enter" || e.key === " ") {
+					e.preventDefault();
+					this.toggleGpuColumn(col.index);
+				}
+			});
 			head.append(
-				el("span", { cls: "arthur-grid-gpu-name", text: col.name }),
-				el("div", { cls: "arthur-bar", children: [fill] }),
-				el("span", { cls: "arthur-card-meta", text: parts.join(" · ") }),
-				collapseChip,
+				el("span", {
+					cls: "arthur-grid-gpu-name",
+					children: [
+						el("span", {
+							cls: "arthur-section-chevron arthur-grid-col-chevron",
+							attrs: { "aria-hidden": "true" },
+						}),
+						el("span", { cls: "arthur-grid-gpu-name-text", text: col.name }),
+					],
+				}),
+				el("div", { cls: "arthur-grid-col-vram arthur-bar", children: [fill] }),
+				el("span", {
+					cls: "arthur-grid-col-stats arthur-card-meta",
+					text: parts.join(" · "),
+				}),
 			);
 			// Single-GPU ai-toolkit queue set ('0' → GPU0): a tiny play/pause
 			// chip on that column's header chip (multi-GPU sets live on the

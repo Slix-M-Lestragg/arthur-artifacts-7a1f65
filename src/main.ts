@@ -74,7 +74,7 @@ export interface ArthurSettings {
 	debugCollapsed: boolean;
 	/** Per-GPU-column collapse of the Services section's instance grid —
 	 *  Record<gpuIndex, boolean> (string keys, JSON-safe): true = that column's
-	 *  rows hidden via the column-head chevron. Independent of the whole
+	 *  rows hidden by clicking the column head. Independent of the whole
 	 *  section collapse and of the other columns; default {} = all expanded. */
 	gpuCollapsed: Record<string, boolean>;
 	/** Per-service GPU selection for service-button spawns — Record<serviceId,

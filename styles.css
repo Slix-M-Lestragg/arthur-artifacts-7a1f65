@@ -602,31 +602,75 @@
 	background: var(--background-secondary);
 }
 
+/* v0.13.1 — the WHOLE header chip toggles the column's collapse (click or
+   Enter/Space while focused): pointer cursor + subtle hover tint via theme
+   variables; the painted focus ring matches Obsidian's own. */
+.arthur-grid-colhead {
+	cursor: pointer;
+	user-select: none;
+	transition:
+		border-color 0.15s ease,
+		background-color 0.15s ease,
+		box-shadow 0.15s ease;
+}
+
+.arthur-grid-colhead:hover,
+.arthur-grid-colhead:focus-visible {
+	background: var(--background-modifier-hover);
+}
+
+.arthur-grid-colhead:focus-visible {
+	outline: 2px solid var(--interactive-accent);
+	outline-offset: -2px;
+}
+
+/* Collapsed column: title-only row — VRAM bar + stats hidden (the queue
+   toggle chip, if any, stays visible and clickable), tighter padding. */
+.arthur-grid-colhead--collapsed {
+	padding: 0.35em 0.5em;
+	gap: 0;
+}
+
+.arthur-grid-colhead--collapsed .arthur-grid-col-vram,
+.arthur-grid-colhead--collapsed .arthur-grid-col-stats {
+	display: none;
+}
+
+.arthur-grid-colhead--collapsed .arthur-grid-gpu-name {
+	color: var(--text-faint);
+}
+
+.arthur-grid-colhead:hover .arthur-grid-gpu-name,
+.arthur-grid-colhead:focus-visible .arthur-grid-gpu-name {
+	color: var(--text-normal);
+}
+
 .arthur-grid-gpu-name {
 	font-weight: var(--font-semibold);
 	min-width: 0;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+	display: flex;
+	align-items: center;
+	gap: 0.35em;
 }
 
-/* INDEPENDENT GPU-column collapse chip (v0.11): a per-column chevron on the
-   column head; collapsed = ▶ muted, expanded = ▼ accent on hover */
-.arthur-grid-col-collapse {
-	align-self: flex-start;
-	background: transparent;
-	border: 1px solid var(--background-modifier-border);
-	border-radius: var(--radius-s, 6px);
-	color: var(--text-muted);
-	font-size: var(--font-ui-smaller);
-	padding: 0 0.4em;
-	line-height: 1.4;
-	cursor: pointer;
+/* Collapse chevron inline in the column title (no separate button): points
+   down when expanded, right when collapsed (see --collapsed rotation). */
+.arthur-grid-col-chevron {
+	flex: 0 0 auto;
 }
 
-.arthur-grid-col-collapse:hover {
-	color: var(--text-normal);
-	border-color: var(--interactive-accent);
+.arthur-grid-colhead--collapsed .arthur-grid-col-chevron {
+	transform: rotate(-90deg);
+}
+
+.arthur-grid-gpu-name-text {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 /* Instance cards — self-contained outlined objects. Running = subtle accent
