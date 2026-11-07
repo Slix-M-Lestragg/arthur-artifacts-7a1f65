@@ -103,9 +103,13 @@ export interface ServiceBarState {
 export interface PiDeviceEntry {
 	id: string;
 	hostname: string | null;
-	/** Recent feed heard from? false → greyed + red dot ('offline — no feed
-	 *  in 5min' tooltip), not clickable. */
+	/** Recent feed heard from? false → greyed + red dot ('offline' state).
+	 *  Reachable rows are still clickable (New…) for the spawn flow. */
 	online: boolean;
+	/** Usable for dirs/spawn: feed-fresh OR ssh-reachable (agent v0.8.1).
+	 *  offline + reachable → greyed but clickable ('no active pi feed —
+	 *  ssh ok'); offline + unreachable → greyed AND not clickable. */
+	reachable: boolean;
 	/** True for the machine the agent runs on (picker root = /home/slix). */
 	self: boolean;
 	/** Config ssh mapping ('user@host' or bare host) — picker root inference. */
@@ -755,9 +759,10 @@ export class ServiceBar {
 
 	/** (Re)build the pi DEVICE dropdown: one row per /api/pi device — name
 	 *  (id) + dimmed hostname suffix; ONLINE rows are hoverable (they open
-	 *  the device's second-level sessions menu to the right), OFFLINE rows
-	 *  render greyed + red-dot + 'offline — no feed in 5min' tooltip and are
-	 *  NOT clickable. */
+	 *  the device's second-level sessions menu to the right); OFFLINE rows
+	 *  render greyed + red-dot: reachable ones ('no active pi feed — ssh
+	 *  ok') are clickable → the New… picker; unreachable ones are NOT
+	 *  clickable ('offline — no feed in 5min'). */
 	private buildPiMenuContent(entry: ServiceButton, data: PiMenuData): void {
 		const menu = entry.menu;
 		if (!menu) return;
@@ -777,12 +782,19 @@ export class ServiceBar {
 		}
 	}
 
-	/** One device row of the pi dropdown (+ its hover submenu wiring). */
+	/** One device row of the pi dropdown (+ its hover submenu wiring).
+	 *  online → hoverable (sessions submenu); offline+reachable → clickable
+	 *  straight into the New… picker (no live feed → no session list);
+	 *  offline+unreachable → greyed, inert. */
 	private piDeviceRow(entry: ServiceButton, dev: PiDeviceEntry): HTMLElement {
 		const online = dev.online === true;
+		const usable = online || dev.reachable === true;
 		const row = document.createElement("div");
-		row.className = "arthur-pi-dev-row" + (online ? "" : " arthur-pi-dev-row--offline");
-		if (online) row.setAttribute("role", "menuitem");
+		row.className = "arthur-pi-dev-row"
+			+ (online ? ""
+				: dev.reachable === true ? " arthur-pi-dev-row--offline arthur-pi-dev-row--sshok"
+				: " arthur-pi-dev-row--offline");
+		if (usable) row.setAttribute("role", "menuitem");
 		row.setAttribute("data-pi-device", dev.id);
 		const name = document.createElement("span");
 		name.className = "arthur-pi-dev-name";
@@ -793,7 +805,17 @@ export class ServiceBar {
 		}
 		if (!online) {
 			row.append(el("span", { cls: "arthur-dot arthur-dot--red arthur-pi-dev-offline-dot" }));
-			setTooltip(row, "offline — no feed in 5min");
+			if (dev.reachable === true) {
+				// stale feed but ssh answers: still spawnable — say so
+				row.append(el("span", { cls: "arthur-pi-dev-note", text: "no active pi feed — ssh ok" }));
+				setTooltip(row, "no active pi feed — ssh ok (click for New…)");
+				row.addEventListener("click", () => {
+					this.callbacks.onPiNewSession?.(dev.id);
+					this.closeAllMenus();
+				});
+			} else {
+				setTooltip(row, "offline — no feed in 5min");
+			}
 		} else {
 			const host = dev.hostname ?? dev.id;
 			setTooltip(

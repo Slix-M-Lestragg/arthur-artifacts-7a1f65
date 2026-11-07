@@ -1392,8 +1392,22 @@
 	filter: grayscale(1);
 }
 
+/* offline but ssh-reachable: still greyed, but clickable (New… flow — the
+   agent's ssh probe rescues dirs/spawn without a live pi feed) */
+.arthur-pi-dev-row--sshok {
+	cursor: pointer;
+	opacity: 0.7;
+}
+
 .arthur-pi-dev-offline-dot {
 	flex: none;
+}
+
+/* reachable-but-offline rows: dimmed ssh note ('no active pi feed — ssh ok') */
+.arthur-pi-dev-note {
+	opacity: 0.6;
+	font-size: var(--font-ui-smaller);
+	margin-left: auto;
 }
 
 /* second-level device menu: vertical, opens to the RIGHT of the hovered

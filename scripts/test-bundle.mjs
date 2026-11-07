@@ -712,7 +712,7 @@ try {
 
 	const jsonBody = (status, body) => ({ status, body });
 	const agentStatusBody = {
-		version: "0.7.0",
+		version: "0.8.0",
 		host_uptime: 123456.7,
 		services: [
 			{
@@ -736,7 +736,7 @@ try {
 	// Default handler: agent handshake + status answer; everything else offline.
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.7.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.8.0" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/comfyui/start")) {
 			return jsonBody(200, { action: "start", result: "started", service: agentStatusBody.services[0] });
@@ -801,7 +801,7 @@ try {
 	StubNotice.reset();
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.7.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.8.0" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/comfyui/instances")) {
 			return jsonBody(201, {
@@ -821,7 +821,7 @@ try {
 	StubNotice.reset();
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.7.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.8.0" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/aitoolkit/instances")) {
 			return jsonBody(409, { error: "single-instance service" });
@@ -844,7 +844,7 @@ try {
 	calls9 = [];
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.7.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.8.0" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/stop")) {
 			return opts.url.includes("force=1")
@@ -946,7 +946,7 @@ try {
 	];
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.7.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.8.0" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/instances/") && opts.url.endsWith("/start")) {
 			return jsonBody(200, { action: "start", result: "started", instance: { id: "comfy-2", up: true, port: 8190 } });
@@ -1005,7 +1005,7 @@ try {
 	calls9 = [];
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.7.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.8.0" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/instances/") && opts.url.endsWith("/forget")) {
 			return jsonBody(409, { error: "instance is running" });
@@ -1033,7 +1033,7 @@ try {
 		.filter((i) => i.id !== "comfy-2");
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.7.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.8.0" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/instances/") && opts.url.endsWith("/forget")) {
 			return jsonBody(200, { action: "forget", result: "forgotten", id: "comfy-2" });
@@ -1131,7 +1131,7 @@ try {
 	const json14 = (status, body) => ({ status, body });
 	const calls14 = [];
 	const gridStatusBody = {
-		version: "0.7.0",
+		version: "0.8.0",
 		host_uptime: 123456.7,
 		services: [
 			{
@@ -1165,7 +1165,7 @@ try {
 	const comfyStats = { system: {}, devices: [{ name: "cuda", type: "cuda", vram_total: 12 * 1024 * 1024, vram_free: 4 * 1024 * 1024 }] };
 	httpResponder = (opts) => {
 		calls14.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return json14(200, { ok: true, version: "0.7.0" });
+		if (opts.url.endsWith("/health")) return json14(200, { ok: true, version: "0.8.0" });
 		if (opts.url.endsWith("/api/status")) return json14(200, gridStatusBody);
 		if (opts.url.endsWith("/api/gpus")) return json14(200, gpusBody);
 		if (opts.url.endsWith("/api/jobs")) return json14(200, aiJobsBody);
@@ -1614,7 +1614,7 @@ try {
 	const json16 = (status, body) => ({ status, body });
 	// Agent status where NO comfy instance is alive (empty instance list).
 	const emptyStatus16 = {
-		version: "0.7.0",
+		version: "0.8.0",
 		host_uptime: 1,
 		services: [
 			{ id: "comfyui", name: "ComfyUI", active: true, multi_instance: true, max_instances: 4, default_port: 8188, unit_template: "comfy@{i}", instances: [] },
@@ -1681,7 +1681,7 @@ try {
 	// (b) agent UP but zero comfy instances + /api/queue broken (500):
 	// job cards must NOT disappear — only the queue toggles are lost
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.7.0" });
+		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.8.0" });
 		if (opts.url.endsWith("/api/status")) return json16(200, emptyStatus16);
 		if (opts.url.endsWith("/api/jobs")) return json16(200, aiJobs16);
 		if (opts.url.endsWith("/api/queue")) return json16(500, { error: "queue endpoint broken" });
@@ -1706,7 +1706,7 @@ try {
 	// (c) /api/jobs broken (500) with zero everything: NO cards + inline error
 	// state — never a fake 'no jobs' note
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.7.0" });
+		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.8.0" });
 		if (opts.url.endsWith("/api/status")) return json16(200, emptyStatus16);
 		if (opts.url.endsWith("/api/jobs")) return json16(500, { error: "jobs endpoint broken" });
 		if (opts.url.endsWith("/api/queue")) return json16(200, { queues: [] });
@@ -1729,7 +1729,7 @@ try {
 
 	// (d) every source answers + zero jobs anywhere → the clear note shows
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.7.0" });
+		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.8.0" });
 		if (opts.url.endsWith("/api/status")) return json16(200, emptyStatus16);
 		if (opts.url.endsWith("/api/jobs")) return json16(200, { jobs: [] });
 		if (opts.url.endsWith("/api/queue")) return json16(200, { queues: [] });
@@ -1765,7 +1765,7 @@ try {
 
 	const json17 = (status, body) => ({ status, body });
 	const status17 = {
-		version: "0.7.0",
+		version: "0.8.0",
 		host_uptime: 1,
 		services: [
 			{
@@ -1998,9 +1998,9 @@ try {
 	status17.version = "0.5.4";
 	await view17.refreshData();
 	assert(view17.bannerEl._shown === true
-		&& allText(view17.bannerEl).includes("agent version mismatch: server 0.5.4, expected 0.7.0"),
-		"older/newer server versions still trigger the mismatch banner (expected 0.7.0)");
-	status17.version = "0.7.0";
+		&& allText(view17.bannerEl).includes("agent version mismatch: server 0.5.4, expected 0.8.0"),
+		"older/newer server versions still trigger the mismatch banner (expected 0.8.0)");
+	status17.version = "0.8.0";
 
 	httpResponder = null;
 	StubNotice.reset();
@@ -2019,7 +2019,7 @@ try {
 		port, gpu, gpus: gpu != null ? [gpu] : [], up, uptime: up ? 100.0 : null,
 	});
 	const status18 = {
-		version: "0.7.0",
+		version: "0.8.0",
 		host_uptime: 1,
 		services: [
 			{
@@ -2035,7 +2035,7 @@ try {
 		],
 	};
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json18(200, { ok: true, version: "0.7.0" });
+		if (opts.url.endsWith("/health")) return json18(200, { ok: true, version: "0.8.0" });
 		if (opts.url.endsWith("/api/status")) return json18(200, status18);
 		if (opts.url.endsWith("/api/gpus")) return json18(200, { gpus: [
 			{ index: 0, name: "NVIDIA GeForce RTX 3060", mem_total_mb: 12288, mem_used_mb: 1000, util_percent: 0, temp_c: 35 },
@@ -2181,7 +2181,7 @@ try {
 		port, gpu, gpus: gpu != null ? [gpu] : [], up, uptime: up ? 100.0 : null,
 	});
 	const status20 = {
-		version: "0.7.0",
+		version: "0.8.0",
 		host_uptime: 1,
 		services: [
 			{
@@ -2209,7 +2209,7 @@ try {
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/comfyui/start")) {
 			return json20(200, { action: "start", result: "started", instance: { id: "comfy-0", service: "comfyui", port: 8188, up: false } });
 		}
-		if (opts.url.endsWith("/health")) return json20(200, { ok: true, version: "0.7.0" });
+		if (opts.url.endsWith("/health")) return json20(200, { ok: true, version: "0.8.0" });
 		if (opts.url.endsWith("/api/status")) return json20(200, status20);
 		if (opts.url.endsWith("/api/gpus")) return json20(200, gpus20);
 		if (opts.url.endsWith("/api/jobs")) return json20(200, { jobs: [] });
@@ -2583,7 +2583,7 @@ try {
 		port, gpu: gpus.length === 1 ? gpus[0] : null, gpus, up, uptime: up ? 100.0 : null, unit: `comfy@${id.slice(-1)}`,
 	});
 	const status21 = {
-		version: "0.7.0",
+		version: "0.8.0",
 		host_uptime: 1,
 		services: [
 			{
@@ -2620,7 +2620,7 @@ try {
 		],
 	};
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json21(200, { ok: true, version: "0.7.0" });
+		if (opts.url.endsWith("/health")) return json21(200, { ok: true, version: "0.8.0" });
 		if (opts.url.endsWith("/api/status")) return json21(200, status21);
 		if (opts.url.endsWith("/api/gpus")) return json21(200, gpus21);
 		if (opts.url.endsWith("/api/jobs")) return json21(200, jobs21);
@@ -2754,9 +2754,9 @@ try {
 	const calls22 = [];
 	httpResponder = (opts) => {
 		calls22.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return json22(200, { ok: true, version: "0.7.0" });
+		if (opts.url.endsWith("/health")) return json22(200, { ok: true, version: "0.8.0" });
 		if (opts.url.endsWith("/api/status")) return json22(200, {
-			version: "0.7.0", host_uptime: 1,
+			version: "0.8.0", host_uptime: 1,
 			services: [
 				{ id: "comfyui", name: "ComfyUI", active: true, multi_instance: true, max_instances: 4, default_port: 8188, unit_template: "comfy@{i}", instances: [] },
 			],
@@ -2987,9 +2987,10 @@ try {
 		const json23 = (status, body) => ({ status, body });
 		const iso23 = (msAgo) => new Date(Date.now() - msAgo).toISOString();
 		const devEntries23 = [
-			{ id: "dev-main", hostname: "mainbox", online: true, self: true, ssh: "slix@main", sessionsActive: 1, sessionsTotal: 2 },
-			{ id: "mac.home", hostname: "mac.home", online: false, self: false, ssh: "benjaminmatthys@mac.home", sessionsActive: 0, sessionsTotal: 0 },
-			{ id: "ulysse", hostname: "ulysse", online: true, self: false, ssh: "ulysse", sessionsActive: 0, sessionsTotal: 1 },
+			{ id: "dev-main", hostname: "mainbox", online: true, reachable: true, self: true, ssh: "slix@main", sessionsActive: 1, sessionsTotal: 2 },
+			{ id: "mac.home", hostname: "mac.home", online: false, reachable: true, self: false, ssh: "benjaminmatthys@mac.home", sessionsActive: 0, sessionsTotal: 0 },
+			{ id: "ulysse", hostname: "ulysse", online: true, reachable: true, self: false, ssh: "ulysse", sessionsActive: 0, sessionsTotal: 1 },
+			{ id: "dev-dead", hostname: null, online: false, reachable: false, self: false, ssh: "ghost@nowhere", sessionsActive: 0, sessionsTotal: 0 },
 		];
 		const piStatusBody23 = {
 			generatedAt: iso23(0),
@@ -3010,6 +3011,7 @@ try {
 			"/home/slix": { dirs: ["deep", "proj", "Downloads"], parent: "/" },
 			"/home/slix/deep": { dirs: ["repo"], parent: "/home/slix" },
 			"/home/slix/proj": { dirs: ["night"], parent: "/home/slix" },
+			"/Users/benjaminmatthys": { dirs: ["Documents"], parent: "/" },
 		};
 		const calls23 = [];
 		const spawnBodies23 = [];
@@ -3094,13 +3096,37 @@ try {
 		const menu23 = piBtn23.menu;
 		assert(!!menu23 && menu23.hasClass("arthur-svc-menu--open"), "(b) hovering the pi pill opens the device dropdown");
 		const devRows23 = findByClass(menu23, "arthur-pi-dev-row");
-		assert(devRows23.length === 3, `(b) one row per device (got ${devRows23.length})`);
+		assert(devRows23.length === 4, `(b) one row per device (got ${devRows23.length})`);
 		const macRow23 = devRows23.find((r) => r.getAttribute("data-pi-device") === "mac.home");
 		assert(macRow23.hasClass("arthur-pi-dev-row--offline") === true, "(b) offline device renders the greyed offline state");
 		assert(findByClass(macRow23, "arthur-dot--red").length === 1, "(b) offline device row carries the red feed dot");
-		assert((macRow23.getAttribute("data-tooltip") ?? "") === "offline — no feed in 5min",
-			"(b) offline device tooltip reads 'offline — no feed in 5min' verbatim");
-		assert((macRow23.handlers.get("click") ?? []).length === 0, "(b) offline device row is NOT clickable");
+		assert((macRow23.getAttribute("data-tooltip") ?? "") === "no active pi feed — ssh ok (click for New…)",
+			"(b) offline-but-reachable row tooltip reads 'no active pi feed — ssh ok (click for New…)' verbatim");
+		const macNote23 = findByClass(macRow23, "arthur-pi-dev-note")[0];
+		assert(!!macNote23 && macNote23.textContent === "no active pi feed — ssh ok",
+			"(b) offline-but-reachable row carries the 'no active pi feed — ssh ok' subtitle");
+		assert((macRow23.handlers.get("click") ?? []).length === 1,
+			"(b) offline-but-reachable row IS clickable (ssh rescue)");
+		const deadRow23 = devRows23.find((r) => r.getAttribute("data-pi-device") === "dev-dead");
+		assert(!!deadRow23 && deadRow23.hasClass("arthur-pi-dev-row--offline") === true,
+			"(b) offline+unreachable device renders the greyed offline state");
+		assert(findByClass(deadRow23, "arthur-dot--red").length === 1, "(b) offline+unreachable row carries the red feed dot");
+		assert((deadRow23.getAttribute("data-tooltip") ?? "") === "offline — no feed in 5min",
+			"(b) offline+unreachable row tooltip reads 'offline — no feed in 5min' verbatim");
+		assert((deadRow23.handlers.get("click") ?? []).length === 0,
+			"(b) offline+unreachable device row is NOT clickable");
+		assert(deadRow23.getAttribute("role") == null,
+			"(b) offline+unreachable row carries no menuitem role");
+		// (b-bis) the ssh-rescued row click → the picker opens on the macOS root
+		StubModal.reset();
+		macRow23.handlers.get("click")[0]?.();
+		await sleep(30);
+		const macModal23 = StubModal.opened[StubModal.opened.length - 1];
+		assert(!!macModal23 && macModal23.titleEl.textContent === "mac.home — choose working directory",
+			"(b) clicking the offline-but-reachable row opens its picker (New… flow)");
+		assert(calls23.some((c) => c.url.includes("/api/pi/devices/mac.home/dirs") && c.url.includes("path=%2FUsers%2Fbenjaminmatthys")),
+			"(b) the mac device's picker opens on /Users/<user> (ssh mapping root)");
+		findButton(macModal23.contentEl, "Cancel").handlers.get("click")[0]?.();
 		const mainRow23 = devRows23.find((r) => r.getAttribute("data-pi-device") === "dev-main");
 		assert(!!mainRow23 && allText(mainRow23).includes("mainbox"), "(b) online row carries the (dimmed) hostname suffix");
 		const ulysseRow23 = devRows23.find((r) => r.getAttribute("data-pi-device") === "ulysse");
@@ -3246,4 +3272,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.7.0-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.0-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker all clean");

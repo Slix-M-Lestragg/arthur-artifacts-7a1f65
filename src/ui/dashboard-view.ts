@@ -1471,6 +1471,7 @@ export class ArthurDashboardView extends ItemView {
 					id: e.id,
 					hostname: e.hostname ?? null,
 					online: e.online === true,
+					reachable: e.reachable === true,
 					self: e.self === true,
 					ssh: e.ssh ?? null,
 					sessionsActive:
@@ -1487,6 +1488,7 @@ export class ArthurDashboardView extends ItemView {
 				id: d.device,
 				hostname: d.hostname ?? null,
 				online: d.stale !== true,
+				reachable: d.stale !== true,
 				self: false,
 				ssh: null,
 				sessionsActive:
@@ -1502,12 +1504,14 @@ export class ArthurDashboardView extends ItemView {
 	// ------------------------------------------------------------ pi flow ----
 
 	/** Pi button click → open the New-session flow pinned to the last-used
-	 *  (and online) device, else the only online device, else the first
-	 *  online one; no online device → muted error toast, no modal. */
+	 *  device, else the only usable device, else the first usable one (usable
+	 *  = online OR ssh-reachable — a stale feed no longer blocks the picker
+	 *  since the agent's ssh probe rescues dirs/spawn); none → muted error
+	 *  toast, no modal. */
 	private piOpenNewSession(pinnedId: string | null): void {
 		const state = this.piBarState();
 		if (!state.reachable) return; // the button is disabled anyway
-		const online = state.devices.filter((d) => d.online);
+		const online = state.devices.filter((d) => d.online || d.reachable);
 		let dev = pinnedId ? online.find((d) => d.id === pinnedId) ?? null : null;
 		if (!dev) {
 			const last = (this.plugin.settings.lastUsedPiDevice ?? "").trim();
@@ -1542,7 +1546,7 @@ export class ArthurDashboardView extends ItemView {
 	/** The 'New…' submenu entry on a device row → the same picker. */
 	private piNewSessionFor(deviceId: string): void {
 		const dev = this.piBarState().devices.find((d) => d.id === deviceId);
-		if (!dev || !dev.online) return;
+		if (!dev || !(dev.online || dev.reachable)) return;
 		this.piOpenPicker(dev);
 	}
 

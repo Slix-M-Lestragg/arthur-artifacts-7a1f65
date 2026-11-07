@@ -124,7 +124,7 @@ export interface AgentActionResult {
  *  0.7.0: pi observational surface — GET /api/pi/status (pi sessions +
  *  subagent runs per device) and GET /api/pi/sessions/{device}/{id}/tail.
  *  pi is NOT a managed service: no lifecycle endpoints, pure observation. */
-export const AGENT_VERSION = "0.7.0";
+export const AGENT_VERSION = "0.8.0";
 
 /** GET /health — unauthenticated {ok:true, version}; distinguishes "agent down" from "bad token". */
 export interface AgentHealth {
@@ -425,6 +425,9 @@ export interface AgentPiDeviceEntry {
 	hostname?: string | null;
 	/** Recent feed heard from? false → offline (no feed in 5min). */
 	online: boolean;
+	/** Usable for dirs/spawn: feed-fresh OR ssh-reachable (agent v0.8.1).
+	 *  Distinguishes 'offline, no feed' (grey) from 'no feed but ssh ok'. */
+	reachable: boolean;
 	/** True for the machine the agent runs on. */
 	self?: boolean;
 	/** The config ssh mapping, e.g. "benjaminmatthys@mac.home" or "ulysse". */
