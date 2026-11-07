@@ -12,6 +12,7 @@ import { obsidianRequester } from "./api/transport";
 import { Poller } from "./poller";
 import { DETAIL_INTERVAL_MS } from "./util";
 import { ArthurDashboardView, VIEW_TYPE_ARTHUR_DASHBOARD } from "./ui/dashboard-view";
+import { AhpView, VIEW_TYPE_AHP } from "./ui/ahp-view";
 import { StatusBarPill, StatusBarState } from "./ui/status-bar";
 import { fmtBytes, fmtGigCompact, normalizeHost } from "./util";
 
@@ -32,6 +33,10 @@ export type { PiPickerDevice, PiPickerOpts } from "./ui/pi-picker";
 // grouping helpers directly against the compiled main.js export surface).
 export { piSessionState, piDeviceSessionGroups, piSessionLabel, piRenderableSession } from "./ui/pi-panel";
 export type { PiSessionState, PiDeviceSessionGroups } from "./ui/pi-panel";
+// AHP read-only slice (smoke-tests assert the URL normalizer + the view's
+// lifecycle against the compiled main.js export surface).
+export { VIEW_TYPE_AHP, AhpView } from "./ui/ahp-view";
+export { AhpClient, ahpWsUrl, AHP_PROTOCOL_VERSION } from "./api/ahp";
 
 /** One server profile — host + which ports the services live on + tokens. */
 export interface ServerProfile {
@@ -88,6 +93,16 @@ export interface ArthurSettings {
 	 *  collapsed (default true). One persisted bool for the whole group —
 	 *  mirrors the subagent archives pattern. */
 	piArchivesCollapsed: boolean;
+	/** AHP broker (pi-ahp-server, protocol 0.3.0) WebSocket endpoint as
+	 *  host[:port] — no scheme (ws:// is added by the client). Default points
+	 *  at the canonical 0.3.0 broker on ulysse (tailscale). The connection is
+	 *  LAZY: opened only by the AHP view's Refresh (a user action), never on
+	 *  plugin load. */
+	ahpEndpoint: string;
+	/** AHP broker shared token — sent ONLY as initialize.params.token over the
+	 *  WS (never a URL/query/header, never logged). Plaintext in data.json —
+	 *  an existing, documented reality (PI-AHP-INTEGRATION-PLAN §6). */
+	ahpToken: string;
 }
 
 /** Clients built from the active profile — rebuilt when settings change. */
@@ -130,6 +145,8 @@ const DEFAULT_SETTINGS: ArthurSettings = {
 	spawnGpuSel: {},
 	lastUsedPiDevice: "",
 	piArchivesCollapsed: true,
+	ahpEndpoint: "100.75.249.5:4500",
+	ahpToken: "",
 };
 
 /** Parse a bounded positive int; invalid/missing → fallback. */
@@ -318,6 +335,30 @@ class ArthurSettingTab extends PluginSettingTab {
 				});
 			});
 
+		const settings = this.plugin.settings;
+		containerEl.createEl("h3", { text: "AHP broker (pi sessions)" });
+		new Setting(containerEl)
+			.setName("AHP endpoint")
+			.setDesc("WebSocket endpoint of the AHP broker (pi-ahp-server, protocol 0.3.0) as host:port — e.g. 100.75.249.5:4500. The connection opens only from the pi-sessions view's Refresh button (never on plugin load).")
+			.addText((text) =>
+				text
+					.setValue(settings.ahpEndpoint)
+					.onChange(async (value) => {
+						settings.ahpEndpoint = value;
+						await this.plugin.saveSettings();
+					})
+			);
+		new Setting(containerEl)
+			.setName("AHP token")
+			.setDesc("Shared broker token, sent ONLY inside the WS initialize handshake (never a URL/HTTP header, never logged). Leave empty when the broker runs without a token.")
+			.addText((text) => {
+				text.inputEl.type = "password";
+				text.setValue(settings.ahpToken).onChange(async (value) => {
+					settings.ahpToken = value;
+					await this.plugin.saveSettings();
+				});
+			});
+
 		const s = this.plugin.settings;
 		containerEl.createEl("h3", { text: "Dashboard display" });
 		new Setting(containerEl)
@@ -396,6 +437,17 @@ export default class ArthurPlugin extends Plugin {
 			VIEW_TYPE_ARTHUR_DASHBOARD,
 			(leaf) => new ArthurDashboardView(leaf, this),
 		);
+
+		// AHP read-only view factory + open command (same registerView pattern;
+		// the WS client inside is lazy and only connects on the view's Refresh).
+		this.registerView(VIEW_TYPE_AHP, (leaf) => new AhpView(leaf, this));
+		this.addCommand({
+			id: "open-ahp-sessions",
+			name: "Open pi sessions (AHP)",
+			callback: () => {
+				void this.activateAhpView();
+			},
+		});
 
 		// Ribbon icon opens the dashboard view.
 		this.addRibbonIcon("monitor-cog", "Open Arthur dashboard", () => {
@@ -672,6 +724,10 @@ export default class ArthurPlugin extends Plugin {
 		this.app.workspace.detachLeavesOfType(VIEW_TYPE_ARTHUR_DASHBOARD);
 		this.dashboardView = null;
 
+		// Detach the AHP view leaves too → AhpView.onClose closes its WS client
+		// (teardown incl. the fire-and-forget unsubscribe notification).
+		this.app.workspace.detachLeavesOfType(VIEW_TYPE_AHP);
+
 		// Stop poller timers (registerInterval above is the backstop).
 		this.clients?.lightPoller.stop();
 		this.clients?.detailPoller.stop();
@@ -708,6 +764,11 @@ export default class ArthurPlugin extends Plugin {
 			lastUsedPiDevice:
 				typeof data?.lastUsedPiDevice === "string" ? data.lastUsedPiDevice.trim() : "",
 			piArchivesCollapsed: data?.piArchivesCollapsed !== false,
+			ahpEndpoint:
+				typeof data?.ahpEndpoint === "string" && data.ahpEndpoint.trim()
+					? data.ahpEndpoint.trim()
+					: DEFAULT_SETTINGS.ahpEndpoint,
+			ahpToken: typeof data?.ahpToken === "string" ? data.ahpToken : "",
 		};
 	}
 
@@ -737,6 +798,23 @@ export default class ArthurPlugin extends Plugin {
 		if (!leaf) leaf = workspace.getLeaf(true);
 		await leaf.setViewState({
 			type: VIEW_TYPE_ARTHUR_DASHBOARD,
+			active: true,
+		});
+		workspace.revealLeaf(leaf);
+	}
+
+	/**
+	 * Open (or reveal) the AHP view — the same registerView/right-leaf pattern
+	 * as activateView(): reuse an existing leaf, else the right leaf (fallback
+	 * getLeaf(true)), setViewState → registerView factory → onOpen(), reveal.
+	 */
+	async activateAhpView(): Promise<void> {
+		const { workspace } = this.app;
+		const leaves = workspace.getLeavesOfType(VIEW_TYPE_AHP);
+		let leaf = leaves.length ? leaves[0] : workspace.getRightLeaf(false);
+		if (!leaf) leaf = workspace.getLeaf(true);
+		await leaf.setViewState({
+			type: VIEW_TYPE_AHP,
 			active: true,
 		});
 		workspace.revealLeaf(leaf);

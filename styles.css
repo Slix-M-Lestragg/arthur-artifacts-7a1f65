@@ -1907,3 +1907,223 @@
 .arthur-pi-sess-archives {
 	margin-bottom: 0.15em;
 }
+
+/* ---------------------------------------------------------------- slice 1
+   AHP read-only pi-sessions catalogue view (docs/PI-AHP-INTEGRATION-PLAN.md)
+   ---------------------------------------------------------------- */
+
+/* the pi block's optional 'pi sessions (AHP)' affordance (dashboard wiring) */
+.arthur-pi-ahp-open {
+	margin-bottom: 0.25em;
+}
+
+/* AHP view: state line ('connecting…' / 'live' / error) + refresh action */
+.arthur-ahp-state {
+	margin-bottom: 0.5em;
+}
+
+.arthur-ahp-state-line {
+	display: flex;
+	align-items: center;
+	gap: 0.8em;
+}
+
+.arthur-ahp-state--reconnecting,
+.arthur-ahp-state--connecting {
+	color: var(--text-muted);
+	font-style: italic;
+}
+
+.arthur-ahp-state--ready {
+	color: var(--color-green);
+}
+
+.arthur-ahp-state--error {
+	color: var(--text-error);
+	font-weight: var(--font-medium);
+}
+
+.arthur-ahp-error {
+	color: var(--text-error);
+	font-size: var(--font-ui-smaller);
+}
+
+/* catalogue rows — compact session cards, rendered incrementally + capped */
+.arthur-ahp-list {
+	display: flex;
+	flex-direction: column;
+	gap: 0.35em;
+}
+
+.arthur-ahp-card {
+	display: flex;
+	flex-direction: column;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	padding: 0.5em 0.7em;
+	background: var(--background-secondary);
+}
+
+.arthur-ahp-card--paused {
+	opacity: 0.7;
+	border-style: dashed;
+}
+
+.arthur-ahp-title {
+	font-size: var(--font-ui-medium);
+	color: var(--text-normal);
+}
+
+.arthur-ahp-meta {
+	display: block;
+	margin-top: 0.15em;
+}
+
+.arthur-ahp-badges,
+.arthur-ahp-badge {
+	margin-top: 0.15em;
+	display: inline;
+	margin-right: 0.4em;
+}
+
+/* selection: cards are clickable; the selected card subscribes live detail.
+   Hover is deliberately subtle (background only); the persistent selection
+   gets accent border + left bar + background tint + a text marker, so the
+   two states are unmistakable — including the selected+hover combination. */
+.arthur-ahp-card--selectable {
+	cursor: pointer;
+}
+
+.arthur-ahp-card--selectable:hover {
+	background: var(--background-modifier-hover);
+	border-color: var(--background-modifier-border-hover, var(--background-modifier-border));
+}
+
+.arthur-ahp-card--selected {
+	border-color: var(--interactive-accent);
+	box-shadow: inset 3px 0 0 var(--interactive-accent);
+	background: var(--background-modifier-active-hover, var(--background-modifier-hover));
+}
+
+.arthur-ahp-card--selected:hover {
+	/* selected+hover must not read as hover-tint: lock the selection look */
+	border-color: var(--interactive-accent);
+	box-shadow: inset 3px 0 0 var(--interactive-accent);
+	background: var(--background-modifier-active-hover, var(--background-modifier-hover));
+}
+
+.arthur-ahp-card--selected-marker {
+	color: var(--interactive-accent);
+	font-weight: var(--font-medium);
+	margin-top: 0.15em;
+	display: inline;
+	margin-right: 0.4em;
+}
+
+/* negotiated protocol badge next to the state line ('live · 0.3.0') */
+.arthur-ahp-protocol {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+/* live chat detail, DETAIL-FIRST above the catalogue (bounded
+   chats/turns/parts); the empty (nothing-selected) panel hides entirely */
+.arthur-ahp-detail {
+	margin-bottom: 0.8em;
+	display: flex;
+	flex-direction: column;
+	gap: 0.6em;
+}
+
+.arthur-ahp-detail:empty {
+	display: none;
+}
+
+.arthur-ahp-detail-head {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 0.6em;
+	border-bottom: 1px solid var(--background-modifier-border);
+	padding-bottom: 0.25em;
+}
+
+.arthur-ahp-detail-title {
+	font-size: var(--font-ui-medium);
+	color: var(--text-normal);
+	font-weight: var(--font-medium);
+}
+
+.arthur-ahp-chat {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	padding: 0.5em 0.7em;
+}
+
+.arthur-ahp-chat-head {
+	display: flex;
+	align-items: baseline;
+	gap: 0.5em;
+}
+
+.arthur-ahp-question {
+	color: var(--text-warning, var(--text-normal));
+	margin-top: 0.3em;
+}
+
+.arthur-ahp-turn {
+	margin-top: 0.4em;
+	padding-top: 0.3em;
+	border-top: 1px dashed var(--background-modifier-border);
+}
+
+.arthur-ahp-turn--active {
+	border-top: 1px solid var(--interactive-accent);
+}
+
+.arthur-ahp-turn-head {
+	display: flex;
+	align-items: baseline;
+	gap: 0.6em;
+	flex-wrap: wrap;
+}
+
+.arthur-ahp-turn-state--active {
+	color: var(--interactive-accent);
+}
+
+.arthur-ahp-turn-state--cancelled,
+.arthur-ahp-turn-state--error {
+	color: var(--text-error);
+}
+
+.arthur-ahp-turn-state--complete {
+	color: var(--text-muted);
+}
+
+.arthur-ahp-turn-user {
+	font-size: var(--font-ui-small);
+	color: var(--text-normal);
+}
+
+.arthur-ahp-turn-usage,
+.arthur-ahp-part--reasoning {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.arthur-ahp-part {
+	margin-top: 0.2em;
+	font-size: var(--font-ui-small);
+	color: var(--text-normal);
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.arthur-ahp-part--tool {
+	color: var(--text-muted);
+}
+
+.arthur-ahp-part--question {
+	color: var(--text-warning, var(--text-normal));
+}

@@ -1350,6 +1350,11 @@ export class ArthurDashboardView extends ItemView {
 				this.plugin.settings.piArchivesCollapsed = collapsed === true;
 				void this.plugin.saveSettings();
 			},
+			// AHP slice-1 bridge: the panel button opens the read-only AHP view
+			// via the plugin's view-activation path (main.ts open command target).
+			openAhp: () => {
+				void this.plugin.activateAhpView();
+			},
 		});
 
 		// 'GPUs' sub-container below (column headers + header-click collapse unchanged).

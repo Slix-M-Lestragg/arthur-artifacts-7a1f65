@@ -171,6 +171,8 @@ class StubPlugin {
 		this.app = app;
 		this.manifest = manifest;
 		this._data = null;
+		/** addCommand() registry (id → cmd) — the AHP open command is asserted. */
+		this.commands = new Map();
 	}
 	async loadData() { return this._data; }
 	async saveData(data) { this._data = JSON.parse(JSON.stringify(data)); }
@@ -180,6 +182,7 @@ class StubPlugin {
 	addStatusBarItem() { return new StubEl("div"); }
 	registerInterval() {}
 	register() {}
+	addCommand(cmd) { this.commands.set(cmd.id, cmd); return cmd; }
 }
 
 class StubItemView {
@@ -4078,7 +4081,733 @@ try {
 	StubNotice.reset();
 	await app.workspace.detachLeavesOfType("arthur-dashboard");
 
-	// ---- cleanup ----------------------------------------------------------
+	// ---- 28. AHP read-only slice — lazy WS, 0.3.0 initialize contract, ----
+	//          listSessions pagination, per-channel serverSeq dedupe, -------
+	//          reconnect cursor, unsubscribe teardown, fail-closed mismatch
+	console.log("== 28. AHP read-only slice (lazy ws / initialize / pagination / dedupe / reconnect-cursor / unsubscribe / fail-closed) ==");
+
+	plugin.settings.ahpEndpoint = "100.75.249.5:4500";
+	plugin.settings.ahpToken = ""; // reset: onload below reloads settings anyway
+
+	// Scripted 0.3.0 broker behind the same global-WebSocket seam the real
+	// client uses: JSON-RPC framing, listSessions cursor pages, action
+	// envelopes + root/* notifications, replay-mode reconnect — NO real
+	// network anywhere.
+	const ws28 = {
+		instances: [],
+		initCount: 0,
+		initializeFrame: null,
+		listCalls: [],
+		reconnects: [],
+		replayActions: [],
+		mismatch: false,
+		// detail-slice bookkeeping (selection + per-channel subscribe/unsubscribe)
+		subscribeCalls: [],
+		unsubs: [],
+		snapshots: {},
+		// reconnect reply: null = the legacy replay shape (live ws28.replayActions);
+		// 28b overrides it for the multi-channel/Snapshot-mode reconnects.
+		reconnectResult: null,
+	};
+	class MockAhpBroker {
+		constructor(url) {
+			ws28.instances.push(this);
+			// 28c: modeled per-socket subscription set (null = legacy static-snapshot mode)
+			this.subs = ws28.serverModel ? new Set() : null;
+			this.url = String(url);
+			this.readyState = 0; // CONNECTING
+			this.sent = [];
+			this.onopen = null;
+			this.onmessage = null;
+			this.onclose = null;
+			this.onerror = null;
+			queueMicrotask(() => {
+				this.readyState = 1; // OPEN
+				this.onopen?.();
+			});
+		}
+		send(data) {
+			const frame = JSON.parse(String(data));
+			this.sent.push(frame);
+			if (frame.method === "initialize" && ws28.mismatch) {
+				ws28.initCount++;
+				ws28.initializeFrame = frame;
+				this.serve({ jsonrpc: "2.0", id: frame.id, result: { protocolVersion: "0.4.0", serverSeq: 1, snapshots: [] } });
+				return;
+			}
+			switch (frame.method) {
+				case "initialize": {
+					ws28.initCount++;
+					ws28.initializeFrame = frame;
+					if (this.subs) {
+						for (const ch of (frame.params?.initialSubscriptions ?? [])) this.subs.add(ch);
+					}
+					if (ws28.dropMidHandshake) {
+						// Mid-handshake vanish: socket opens, initialize never answers.
+						setTimeout(() => this.drop(), 5);
+						return;
+					}
+					this.serve({
+						jsonrpc: "2.0",
+						id: frame.id,
+						result: { protocolVersion: "0.3.0", serverSeq: 40, snapshots: [], defaultDirectory: "file:///srv" },
+					});
+					return;
+				}
+				case "listSessions": {
+					ws28.listCalls.push(frame.params);
+					const cursor = typeof frame.params.cursor === "string" ? Number(frame.params.cursor) : 0;
+					if (cursor === 0) {
+						this.serve({ jsonrpc: "2.0", id: frame.id, result: { items: [
+							{ resource: "ahp-session:/a", title: "session A", provider: "pi", model: "glm-5", tokensIn: 1200, tokensOut: 300, cost: 0.02, childChatCount: 2, waitingOnCount: 1, kind: "hosted", modifiedAt: "2026-11-07T10:00:00Z" },
+							{ resource: "ahp-session:/b", title: "session B", provider: "pi", model: "mimo", tokensIn: 10, tokensOut: 2, cost: 0.0002, childChatCount: 0, kind: "hosted", modifiedAt: "2026-11-07T09:00:00Z" },
+						], nextCursor: "2" } });
+					} else {
+						this.serve({ jsonrpc: "2.0", id: frame.id, result: {
+							items: [{ resource: "ahp-session:/c", title: "session C", provider: "pi", modifiedAt: "2026-11-07T08:00:00Z" }],
+						} });
+					}
+					return;
+				}
+				case "reconnect": {
+					ws28.reconnects.push(frame.params);
+					if (this.subs) this.subs = new Set(frame.params?.subscriptions ?? []);
+					this.serve({
+						jsonrpc: "2.0",
+						id: frame.id,
+						result: ws28.reconnectResult ?? { type: "replay", actions: ws28.replayActions, missing: [] },
+					});
+					return;
+				}
+				case "subscribe": {
+					ws28.subscribeCalls.push(frame.params.channel);
+					const model = ws28.serverModel;
+					if (model) {
+						// 28c: models the verified 0.3.0 broker (server.ts/store.ts):
+						// per-channel seq counters UNCHANGED while a channel is idle,
+						// an explicit per-socket subscription set removed by the
+						// unsubscribe notification, snapshot fromSeq = the CURRENT
+						// per-channel counter (can EQUAL the previous epoch's client
+						// watermark), and optionally HELD replies (in-flight races).
+						const ch = frame.params.channel;
+						model.counts.set(ch, (model.counts.get(ch) ?? 0) + 1);
+						this.subs.add(ch);
+						const stateSnap = model.states.get(ch);
+						const reply = { jsonrpc: "2.0", id: frame.id, result: stateSnap === undefined ? {} : { snapshot: { resource: ch, state: stateSnap, fromSeq: model.chanSeq.get(ch) ?? 0 } } };
+						if (model.defer?.has(ch)) model.held.push(() => this.serve(reply));
+						else this.serve(reply);
+						return;
+					}
+					const snap = ws28.snapshots[frame.params.channel];
+					this.serve({
+						jsonrpc: "2.0",
+						id: frame.id,
+						result: snap === undefined ? {} : { snapshot: { resource: frame.params.channel, ...snap } },
+					});
+					return;
+				}
+				case "unsubscribe": {
+					ws28.unsubs.push(frame.params.channel);
+					if (this.subs) this.subs.delete(frame.params.channel);
+					return; // NOTIFICATION — no id, no reply, exactly like the broker
+				}
+				default:
+					this.serve({ jsonrpc: "2.0", id: frame.id, result: null });
+					return;
+			}
+		}
+		serve(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+		push(method, params) {
+			if (method === "action" && this.subs && !this.subs.has(params.channel)) return; // unsubscribe removal is REAL
+			this.onmessage?.({ data: JSON.stringify({ jsonrpc: "2.0", method, params }) });
+		}
+		close() { this.readyState = 3; }
+		drop() {
+			this.readyState = 3;
+			this.onclose?.({});
+		}
+	}
+	globalThis.WebSocket = MockAhpBroker;
+
+	await plugin.onunload(); // reset workspace + pollers from section 27
+	await plugin.onload();
+	// onload() reloaded settings from data (absent keys → defaults) — set the
+	// AHP profile AFTER the reload so both fields survive into the view calls.
+	plugin.settings.ahpEndpoint = "100.75.249.5:4500";
+	plugin.settings.ahpToken = "smoke-token";
+
+	// (a) the open command is registered with the exact id + a right-leaf
+	// activate method on the plugin.
+	const ahpCmd = plugin.commands.get("open-ahp-sessions");
+	assert(typeof ahpCmd?.callback === "function", "(a) open-ahp-sessions command is registered");
+	assert(typeof plugin.activateAhpView === "function", "(a) plugin.activateAhpView exists");
+
+	// (b) view attach is LAZY: zero WebSocket constructions on open.
+	let ahpView;
+	ok = true;
+	try {
+		await plugin.activateAhpView();
+		ahpView = app.workspace.getLeavesOfType("arthur-ahp")[0]?.view;
+	} catch (err) {
+		ok = false;
+		console.error(`    ahp view attach threw: ${err?.stack ?? err}`);
+	}
+	assert(ok && !!ahpView, "(b) AHP view attaches through the real leaf contract");
+	assert(ws28.instances.length === 0, "(b) view open constructed ZERO WebSocket (lazy connect)");
+	const ahpCards = () => (ahpView.listEl?.children ?? []).filter((c) => c.attributes?.get?.("data-ahp-session"));
+
+	// (c) Refresh (user action) → initialize params.token + protocolVersions
+	// exactly ["0.3.0"], token NEVER in the URL, then paged listSessions.
+	findButton(ahpView.contentEl, "Refresh")?.handlers.get("click")[0]?.();
+	await sleep(80);
+	const broker = ws28.instances[0];
+	assert(broker && broker.readyState === 1, "(c) refresh opened the mocked broker socket");
+	assert(ws28.initCount === 1, "(c) exactly one initialize handshake");
+	assert(JSON.stringify(ws28.initializeFrame?.params?.protocolVersions) === '["0.3.0"]',
+		"(c) initialize sends protocolVersions exactly [0.3.0]");
+	assert(ws28.initializeFrame?.params?.token === "smoke-token", "(c) token arrives as initialize.params.token");
+	assert(ws28.instances.every((w) => !w.url.includes("smoke-token")), "(c) the token never appears in any WS URL");
+	assert(ws28.listCalls.length === 2, "(c) listSessions paginated (2 pages)");
+	assert(ws28.listCalls[0]?.cursor === undefined && ws28.listCalls[1]?.cursor === "2",
+		"(c) the nextCursor string cursor is honored");
+	assert(ws28.listCalls.every((p) => p.channel === "ahp-root://"), "(c) listSessions targets ahp-root://");
+	assert(ahpCards().length === 3, "(c) both catalogue pages merged → 3 session cards");
+	assert(allText(ahpCards()[0]).includes("session A"), "(c) the newest-modified session renders first");
+	assert(allText(ahpCards()[0]).includes("2 chats") && allText(ahpCards()[0]).includes("1 waiting"),
+		"(c) summary detail lines (chats / waiting-on) render");
+	assert(allText(ahpView.stateEl).includes("live") && allText(ahpView.stateEl).includes("0.3.0"),
+		"(c) the ready state line shows the negotiated protocol explicitly ('live · 0.3.0')");
+	assert(ahpView.client?.negotiatedVersion === "0.3.0", "(c) the client parked the negotiated protocolVersion");
+
+	// (d) live stream: action envelopes dedupe per channel serverSeq; root/*
+	// notifications merge (added / summaryChanged / removed; dupes idempotent).
+	broker.push("action", { channel: "ahp-root://", action: { type: "root/activeSessionsChanged", activeSessions: 1 }, serverSeq: 55, origin: { clientId: "server", clientSeq: 0 } });
+	broker.push("action", { channel: "ahp-root://", action: { type: "root/activeSessionsChanged", activeSessions: 2 }, serverSeq: 55, origin: { clientId: "server", clientSeq: 0 } }); // dup → deduped
+	broker.push("action", { channel: "ahp-root://", action: {}, serverSeq: 40, origin: { clientId: "server", clientSeq: 0 } }); // stale → deduped
+	broker.push("root/sessionAdded", { channel: "ahp-root://", summary: { resource: "ahp-session:/d", title: "live session D", provider: "pi", modifiedAt: "2026-11-07T11:00:00Z" } });
+	broker.push("root/sessionAdded", { channel: "ahp-root://", summary: { resource: "ahp-session:/d", title: "live session D", provider: "pi", modifiedAt: "2026-11-07T11:00:00Z" } }); // dup row
+	broker.push("root/sessionSummaryChanged", { channel: "ahp-root://", session: "ahp-session:/a", changes: { title: "renamed A" } });
+	broker.push("root/sessionRemoved", { channel: "ahp-root://", session: "ahp-session:/b" });
+	await sleep(400);
+	assert(ahpCards().length === 3, "(d) stream merges to 3 cards (B removed, D added once)");
+	const cardA = ahpCards().find((c) => c.attributes.get("data-ahp-session") === "ahp-session:/a");
+	const cardD = ahpCards().filter((c) => c.attributes.get("data-ahp-session") === "ahp-session:/d");
+	assert(cardA && allText(cardA).includes("renamed A"), "(d) root/sessionSummaryChanged merged");
+	assert(cardD.length === 1, "(d) duplicate sessionAdded folds into one card (idempotent upsert)");
+	assert(ahpView.client?.channelWatermark?.("ahp-root://") === 55,
+		"(d) root serverSeq watermark parked at 55 (dup + stale envelopes skipped)");
+
+	// (d2) catalogue order stability (ahp-ux-2): live summary churn must never
+	// re-sort rows under the cursor — existing cards hold their positions
+	// while their contents update, new sessions APPEND, removals disappear.
+	assert(JSON.stringify(ahpCards().map((c) => c.attributes.get("data-ahp-session")))
+			=== '["ahp-session:/a","ahp-session:/c","ahp-session:/d"]',
+		"(d2) baseline stable order A,C,D (D appended, no modifiedAt resort)");
+	broker.push("root/sessionSummaryChanged", { channel: "ahp-root://", session: "ahp-session:/c", changes: { title: "bumped C", modifiedAt: "2026-11-07T12:00:00Z" } });
+	broker.push("root/sessionAdded", { channel: "ahp-root://", summary: { resource: "ahp-session:/e", title: "live session E", provider: "pi", modifiedAt: "2026-11-07T13:00:00Z" } });
+	await sleep(300);
+	const resourcesAfterChurn = ahpCards().map((c) => c.attributes.get("data-ahp-session"));
+	assert(JSON.stringify(resourcesAfterChurn) === '["ahp-session:/a","ahp-session:/c","ahp-session:/d","ahp-session:/e"]',
+		"(d2) a newer modifiedAt does NOT re-sort; the genuinely new session appended last");
+	const cardAAfterChurn = ahpCards()[0];
+	assert(cardAAfterChurn.attributes.get("data-ahp-session") === "ahp-session:/a" && allText(cardAAfterChurn).includes("renamed A"),
+		"(d2) the first card is still session A with its updated content (in-place merge, not a move)");
+	broker.push("root/sessionRemoved", { channel: "ahp-root://", session: "ahp-session:/c" });
+	await sleep(300);
+	assert(JSON.stringify(ahpCards().map((c) => c.attributes.get("data-ahp-session")))
+			=== '["ahp-session:/a","ahp-session:/d","ahp-session:/e"]',
+		"(d2) removal drops the row; the remaining cards keep their relative order");
+
+	// (e) drop → 1s backoff → reconnect request carries lastSeenServerSeq=55
+	// + ahp-root:// subscriptions, replay envelopes apply, catalogue refreshes.
+	ws28.replayActions = [{ channel: "ahp-root://", action: { type: "root/activeSessionsChanged" }, serverSeq: 56, origin: { clientId: "server", clientSeq: 0 } }];
+	broker.drop();
+	await sleep(1700);
+	assert(ws28.initCount === 1, "(e) reconnect does NOT re-initialize");
+	assert(ws28.reconnects.length === 1, "(e) exactly one reconnect request after the drop");
+	assert(ws28.reconnects[0]?.lastSeenServerSeq === 55, "(e) reconnect carries the per-channel serverSeq cursor (55)");
+	assert(JSON.stringify(ws28.reconnects[0]?.subscriptions) === '["ahp-root://"]', "(e) reconnect re-subscribes ahp-root://");
+	assert(ahpView.client?.channelWatermark?.("ahp-root://") === 56, "(e) replay envelope advanced the watermark to 56");
+	assert(ws28.listCalls.length === 4, "(e) reconnect triggers a fresh 2-page catalogue reload");
+	assert(ahpCards().length === 3, "(e) catalogue intact after reconnect+reload");
+	assert(JSON.stringify(ahpCards().map((c) => c.attributes.get("data-ahp-session")))
+			=== '["ahp-session:/a","ahp-session:/b","ahp-session:/c"]',
+		"(e) the full reload re-established the server's fresh order (B back in the list)");
+
+	// (f) teardown: view close sends the unsubscribe NOTIFICATION (no id,
+	// never awaited) and closes the socket; leaves detach cleanly.
+	await app.workspace.detachLeavesOfType("arthur-ahp");
+	const lastBroker = ws28.instances[ws28.instances.length - 1];
+	const unsub = lastBroker.sent.find((f) => f.method === "unsubscribe");
+	assert(unsub && !("id" in unsub) && unsub.params?.channel === "ahp-root://",
+		"(f) close sent the unsubscribe notification (no id, ahp-root://)");
+	assert(lastBroker.readyState === 3, "(f) the client socket closed after teardown");
+	assert(app.workspace.getLeavesOfType("arthur-ahp").length === 0, "(f) AHP leaves detached");
+
+	// (g) protocol mismatch fails CLOSED: no listSessions after a 0.4.0 answer.
+	ws28.mismatch = true;
+	await plugin.activateAhpView();
+	const ahpView2 = app.workspace.getLeavesOfType("arthur-ahp")[0]?.view;
+	findButton(ahpView2.contentEl, "Refresh")?.handlers.get("click")[0]?.();
+	await sleep(80);
+	assert(ws28.initCount === 2, "(g) second view refresh initialized once more");
+	assert(ws28.listCalls.length === 4, "(g) NO listSessions after the 0.4.0 answer (fail closed)");
+	assert(allText(ahpView2.stateEl).includes("0.4.0"), "(g) the mismatch surfaces as a clear UI error");
+	assert(ahpView2.client?.currentState === "error", "(g) the client settled in state error (no retry loop)");
+	await app.workspace.detachLeavesOfType("arthur-ahp");
+
+	// (h) blank endpoint → config error WITHOUT opening any socket.
+	plugin.settings.ahpEndpoint = "   ";
+	await plugin.activateAhpView();
+	const ahpView3 = app.workspace.getLeavesOfType("arthur-ahp")[0]?.view;
+	findButton(ahpView3.contentEl, "Refresh")?.handlers.get("click")[0]?.();
+	await sleep(60);
+	assert(ws28.instances.length === 3, "(h) blank endpoint constructs NO WebSocket (3rd instance = the fail-closed mismatch one)");
+	assert(allText(ahpView3.stateEl).includes("not configured"), "(h) blank endpoint surfaces 'not configured'");
+	await app.workspace.detachLeavesOfType("arthur-ahp");
+
+	// (i) unloaded plugin detaches any open AHP leaf (belt-and-braces).
+	await plugin.activateAhpView();
+	assert(app.workspace.getLeavesOfType("arthur-ahp").length === 1, "(i) AHP leaf reopened");
+
+	// ---- 28b. AHP slice-1 detail: selection subscribes ahp-session/ahp-chat,
+	//          exact 0.3.0 chat reducers (turn/delta/tool/usage/question_user),
+	//          subagent chatAdded/chatRemoved churn, per-channel dedupe +
+	//          snapshots, selection-change unsubscribe, multi-channel reconnect
+	//          (min lastSeenServerSeq + snapshot mode), teardown cleanup.
+	console.log("== 28b. AHP slice-1 detail (selection subscribe / chat reducers / dedupe / unsubs / multi-channel reconnect) ==");
+
+	ws28.mismatch = false;
+	plugin.settings.ahpEndpoint = "100.75.249.5:4500";
+	plugin.settings.ahpToken = "smoke-token";
+
+	// Scripted 0.3.0 snapshots (shapes copied from the verified 0.3.0 wire:
+	// subscribe → {snapshot:{resource, state, fromSeq}}; session state =
+	// SessionState {chats: ChatSummary[]}; chat state = ChatState
+	// {turns, activeTurn}; ChatSummary.origin.kind 'tool' = subagent).
+	const sessionASnap = {
+		state: {
+			chats: [
+				{ resource: "ahp-chat:/a-main", title: "main", status: 1, activity: "working", modifiedAt: "2026-11-07T10:00:00Z" },
+				{ resource: "ahp-chat:/a-sub", title: "scout", status: 1, modifiedAt: "2026-11-07T10:01:00Z", origin: { kind: "tool", toolCallId: "tc-parent", chat: "ahp-chat:/a-main" } },
+			],
+		},
+		fromSeq: 100,
+	};
+	const mainASnap = {
+		state: {
+			title: "main",
+			status: 1,
+			activity: "working",
+			turns: [
+				{
+					id: "t1",
+					message: { text: "hello", origin: { kind: "user" } },
+					parts: [{ kind: "markdown", id: "p1", content: "Answer text from the snapshot" }],
+					usage: { inputTokens: 10, outputTokens: 5, model: "glm-5" },
+					state: "complete",
+				},
+			],
+			activeTurn: null,
+		},
+		fromSeq: 100,
+	};
+	ws28.snapshots = {
+		"ahp-session:/a": sessionASnap,
+		"ahp-chat:/a-main": mainASnap,
+		"ahp-chat:/a-sub": { state: { title: "scout", status: 1, turns: [], activeTurn: null }, fromSeq: 101 },
+		"ahp-session:/b": { state: { chats: [{ resource: "ahp-chat:/b-main", title: "main", status: 1 }] }, fromSeq: 300 },
+		"ahp-chat:/b-main": { state: { title: "main", status: 1, turns: [], activeTurn: null }, fromSeq: 300 },
+	};
+	ws28.unsubs = [];
+	ws28.subscribeCalls = [];
+
+	const ahpView4 = app.workspace.getLeavesOfType("arthur-ahp")[0]?.view;
+	assert(!!ahpView4, "(28b) view from (i) is reusable");
+	findButton(ahpView4.contentEl, "Refresh")?.handlers.get("click")[0]?.();
+	await sleep(80);
+	assert(ahpView4.client?.currentState === "ready", "(28b) refreshed to live state");
+	const baseInitCount = ws28.initCount;
+	const baseReconnectCount = ws28.reconnects.length;
+
+	const detailSections = () => (ahpView4.detailEl?.children ?? []).filter((c) => c.attributes?.get?.("data-ahp-chat"));
+	const ahpCards4 = () => (ahpView4.listEl?.children ?? []).filter((c) => c.attributes?.get?.("data-ahp-session"));
+	const clickCard = (resource) =>
+		ahpCards4().find((c) => c.attributes.get("data-ahp-session") === resource)?.handlers?.get("click")?.[0]?.();
+
+	// (j) card click → subscribe ahp-session:/a, then both child chats (with
+	// snapshots); detail renders chats + subagent badge + snapshot content.
+	clickCard("ahp-session:/a");
+	await sleep(320);
+	assert(ahpView4.client?.selected === "ahp-session:/a", "(j) the clicked session is now selected");
+	assert(ws28.subscribeCalls[0] === "ahp-session:/a", "(j) subscribe targets the session channel first");
+	assert(JSON.stringify(ws28.subscribeCalls.slice(1).sort()) === '["ahp-chat:/a-main","ahp-chat:/a-sub"]',
+		"(j) both child chats from the session snapshot are subscribed");
+	assert(detailSections().length === 2, "(j) two chat sections render");
+	assert(allText(ahpView4.detailEl).includes("Answer text from the snapshot"), "(j) snapshot markdown part renders");
+	assert(allText(ahpView4.detailEl).includes("glm-5"), "(j) snapshot usage model surfaces in the meta line");
+	const subSection = detailSections().find((c) => c.attributes.get("data-ahp-chat") === "ahp-chat:/a-sub");
+	assert(subSection && allText(subSection).includes("subagent"), "(j) the origin.kind 'tool' chat renders a subagent badge");
+	assert(ahpView4.client?.channelWatermark?.("ahp-chat:/a-main") === 100,
+		"(j) the snapshot seeds the chat channel watermark with fromSeq");
+
+	// (j2) UX polish: detail-first placement, clear heading + close control,
+	// and an unmistakable selected-card affordance (ahp-ux-3/ahp-ux-4).
+	const contentKids = ahpView4.contentEl?.children ?? [];
+	assert(contentKids.indexOf(ahpView4.detailEl) !== -1 && contentKids.indexOf(ahpView4.listEl) !== -1
+			&& contentKids.indexOf(ahpView4.detailEl) < contentKids.indexOf(ahpView4.listEl),
+		"(j2) the detail panel renders ABOVE the catalogue (detail-first, right below the controls)");
+	const closeDetailBtn = findButton(ahpView4.contentEl, "close detail");
+	assert(!!closeDetailBtn && closeDetailBtn.handlers.get("click")?.length === 1,
+		"(j2) the detail head offers a wired close-detail control");
+	const selectedCardA = ahpCards4().find((c) => c.attributes.get("data-ahp-session") === "ahp-session:/a");
+	assert(selectedCardA.className.includes("arthur-ahp-card--selected") && selectedCardA.attributes.get("aria-pressed") === "true",
+		"(j2) the selected card carries the distinct selected class + aria-pressed marker");
+
+	// (k) live reducers on ahp-chat:/a-main: turnStarted → delta → toolCallStart
+	// (question_user; duplicate toolCallId folded once) → usage (one fresh, one
+	// stale-seq deduped) → unrelated-channel envelopes ignored.
+	const broker2 = ws28.instances[ws28.instances.length - 1];
+	let seq28 = 100; // the /a-main watermark is 100 post-snapshot
+	const pushChat = (channel, action, atSeq = ++seq28) => {
+		broker2.push("action", { channel, action, serverSeq: atSeq, origin: { clientId: "server", clientSeq: 0 } });
+		return atSeq;
+	};
+	pushChat("ahp-chat:/a-main", { type: "chat/turnStarted", turnId: "t2", message: { text: "second user msg", origin: { kind: "user" } } });
+	pushChat("ahp-chat:/a-main", { type: "chat/delta", turnId: "t2", partId: "p2", content: "streaming output" });
+	pushChat("ahp-chat:/a-main", { type: "chat/toolCallStart", turnId: "t2", toolCallId: "tcq", toolName: "question_user", displayName: "question_user" });
+	pushChat("ahp-chat:/a-main", { type: "chat/toolCallStart", turnId: "t2", toolCallId: "tcq", toolName: "question_user", displayName: "question_user" }); // dup id → one part
+	pushChat("ahp-chat:/a-main", { type: "chat/usage", turnId: "t2", usage: { inputTokens: 20, outputTokens: 8, model: "STALE-MODEL" } }, 101); // stale seq → deduped
+	pushChat("ahp-chat:/a-main", { type: "chat/usage", turnId: "t2", usage: { inputTokens: 20, outputTokens: 8, model: "mimo" } });
+	pushChat("ahp-chat:/not-selected", { type: "chat/turnStarted", turnId: "x", message: { text: "ignored" } }); // unrelated → ignored
+	await sleep(320);
+	const mainSection = detailSections().find((c) => c.attributes.get("data-ahp-chat") === "ahp-chat:/a-main");
+	assert(mainSection && allText(mainSection).includes("● running"), "(k) the in-flight turn renders as running");
+	assert(allText(mainSection).includes("second user msg"), "(k) chat/turnStarted message.text renders");
+	assert(allText(mainSection).includes("streaming output"), "(k) chat/delta content renders");
+	assert(allText(mainSection).includes("❓"), "(k) in-flight question_user toolCall (status streaming) surfaces the input banner");
+	assert(allText(mainSection).includes("mimo") && !allText(mainSection).includes("STALE-MODEL"),
+		"(k) the stale-seq (≤ watermark) usage was deduped per channel; the fresh one applied");
+	// toolCall-part count asserted on CLIENT state (allText double-counts;
+	// DOM asserts use includes() only).
+	const tcPartCount = () => ([ahpView4.client?.selectedChats?.find((c) => c.resource === "ahp-chat:/a-main")?.activeTurn].filter((t) => !!t))
+		.flatMap((t) => t.parts)
+		.filter((p) => !!p.toolCall).length;
+	assert(allText(mainSection).split("▸").length - 1 >= 1, "(k) a tool-call part renders");
+	assert(tcPartCount() === 1, "(k) exactly ONE toolCall part client-side (the duplicate toolCallId folded)");
+	assert(ahpView4.client?.channelWatermark?.("ahp-chat:/a-main") === 105,
+		"(k) per-channel watermark advanced to 105 (dup id tolerated, stale seq skipped)");
+
+	// (k2) answering the question → toolCallComplete (banner gone), then
+	// turnComplete folds the active turn into the bounded history.
+	pushChat("ahp-chat:/a-main", { type: "chat/toolCallComplete", turnId: "t2", toolCallId: "tcq", result: { success: true, pastTenseMessage: "question_user answered", content: "" } });
+	pushChat("ahp-chat:/a-main", { type: "chat/turnComplete", turnId: "t2" });
+	await sleep(320);
+	const mainSection2 = detailSections().find((c) => c.attributes.get("data-ahp-chat") === "ahp-chat:/a-main");
+	const mainChat2 = ahpView4.client?.selectedChats?.find((c) => c.resource === "ahp-chat:/a-main");
+	assert(!allText(mainSection2).includes("❓") && !allText(mainSection2).includes("● running"), "(k2) no pending input after the answer + completion");
+	assert(allText(mainSection2).includes("question_user answered"), "(k2) chat/toolCallComplete result.pastTenseMessage renders");
+	assert(mainChat2?.activeTurn === null, "(k2) chat/turnComplete folded the active turn into the bounded history");
+	assert(allText(mainSection2).includes("✓"), "(k2) the completed turn renders the ✓ state");
+	assert((mainChat2?.turns ?? []).length === 2, "(k2) both turns kept (t1 snapshot + t2 live) in the bounded history");
+
+	// (k3) subagent churn: session/chatAdded subscribes + renders the new chat;
+	// session/chatRemoved unsubscribes + drops it (fire-and-forget notification).
+	broker2.push("action", { channel: "ahp-session:/a", action: { type: "session/chatAdded", summary: { resource: "ahp-chat:/a-sub2", title: "watcher", status: 1, modifiedAt: "2026-11-07T10:02:00Z", origin: { kind: "tool", toolCallId: "tc2", chat: "ahp-chat:/a-main" } } }, serverSeq: 600, origin: { clientId: "server", clientSeq: 0 } });
+	await sleep(320);
+	assert(ws28.subscribeCalls.includes("ahp-chat:/a-sub2"), "(k3) session/chatAdded subscribes the new chat channel");
+	assert(detailSections().length === 3, "(k3) the added subagent chat renders");
+	broker2.push("action", { channel: "ahp-session:/a", action: { type: "session/chatRemoved", chat: { resource: "ahp-chat:/a-sub2", title: "watcher" } }, serverSeq: 601, origin: { clientId: "server", clientSeq: 0 } });
+	await sleep(320);
+	assert(broker2.sent.some((f) => f.method === "unsubscribe" && f.params?.channel === "ahp-chat:/a-sub2"), "(k3) session/chatRemoved sends the unsubscribe notification (no id)");
+	assert(detailSections().length === 2, "(k3) the removed chat section is gone");
+
+	// (l) selection change: unsubscribes EVERY previous channel (session +
+	// chats), subscribes the new one.
+	ws28.unsubs = [];
+	clickCard("ahp-session:/b");
+	await sleep(320);
+	const unsubsAfterSwitch = ws28.unsubs.slice();
+	assert(unsubsAfterSwitch.length === 3, "(l) selection change unsubscribes 3 channels (session A + its 2 chats)");
+	assert(unsubsAfterSwitch.every((c) => ["ahp-session:/a", "ahp-chat:/a-main", "ahp-chat:/a-sub"].includes(c)), "(l) exactly the session A channel set is dropped");
+	assert(unsubsAfterSwitch.every((c) => broker2.sent.every((f) => f.method !== "unsubscribe" || !("id" in f) || f.params?.channel !== c)), "(l) the selection unsubscribes remain id-less notifications");
+	assert(ws28.subscribeCalls.includes("ahp-session:/b") && ws28.subscribeCalls.includes("ahp-chat:/b-main"), "(l) session B + its chat subscribe");
+	assert(detailSections().length === 1, "(l) only session B's chat renders");
+
+	// (l2) multi-channel reconnect: drop → reconnect carries ALL subscribed
+	// channels; the scalar cursor is the per-channel MIN watermark (root 40 —
+	// the fresh initialize set it low) and replay envelopes are per-channel
+	// deduped against the snapshot-seeded watermarks.
+	assert(ahpView4.client?.channelWatermark?.("ahp-chat:/b-main") === 300, "(l2) chat /b-main watermark seeded by its snapshot (300)");
+	ws28.reconnectResult = {
+		type: "replay",
+		actions: [
+			// stale for ahp-chat:/b-main (≤ 300) — fromSeq seeding must prevent a
+			// pre-cursor replayed action from double-applying its content.
+			{ channel: "ahp-chat:/b-main", action: { type: "chat/turnStarted", turnId: "t8", message: { text: "REPLAYED" } }, serverSeq: 299, origin: { clientId: "server", clientSeq: 0 } },
+			{ channel: "ahp-chat:/b-main", action: { type: "chat/turnStarted", turnId: "t9", message: { text: "live after reconnect" } }, serverSeq: 301, origin: { clientId: "server", clientSeq: 0 } },
+		],
+		missing: [],
+	};
+	broker2.drop();
+	await sleep(1700);
+	assert(ws28.initCount === baseInitCount, "(l2) reconnect does NOT re-initialize");
+	assert(ws28.reconnects.length === baseReconnectCount + 1, "(l2) exactly one reconnect request after the drop");
+	const lastReconnect = ws28.reconnects[ws28.reconnects.length - 1];
+	assert(JSON.stringify(lastReconnect.subscriptions.slice().sort()) === '["ahp-chat:/b-main","ahp-root://","ahp-session:/b"]',
+		"(l2) reconnect subscribes root + session + its chat channels");
+	assert(lastReconnect.lastSeenServerSeq === 40, "(l2) the scalar cursor is the SAFE per-channel MIN watermark (root 40, chat 300 → 40)");
+	assert(ahpView4.client?.channelWatermark?.("ahp-chat:/b-main") === 301, "(l2) fresh replay envelope applied (301); stale ≤ 300 skipped");
+	await sleep(320);
+	const bSection = detailSections()[0];
+	assert(bSection && allText(bSection).includes("live after reconnect"), "(l2) replayed turnStarted applied to the restored detail");
+	assert(!allText(bSection).includes("REPLAYED"), "(l2) the ≤ watermark replay envelope was deduped (no double content)");
+
+	// (m) snapshot-mode reconnect (the ahp-root:// subscription makes the server
+	// downgrade): snapshots re-establish the detail; watermarks reseed.
+	ws28.reconnectResult = {
+		type: "snapshot",
+		snapshots: [
+			{ resource: "ahp-root://", state: { sessions: [] }, fromSeq: 60 },
+			{ resource: "ahp-session:/b", state: { chats: [{ resource: "ahp-chat:/b-main", title: "main", status: 1 }] }, fromSeq: 310 },
+			{ resource: "ahp-chat:/b-main", state: { title: "main", status: 1, turns: [{ id: "t10", message: { text: "restored", origin: { kind: "user" } }, parts: [], state: "complete" }], activeTurn: null }, fromSeq: 310 },
+		],
+	};
+	ws28.reconnects = [];
+	broker2.drop();
+	await sleep(1700);
+	assert(ws28.reconnects.length === 1, "(m) one reconnect for the snapshot-mode drop");
+	const bSection2 = detailSections()[0];
+	assert(bSection2 && allText(bSection2).includes("restored"), "(m) the snapshot-mode reconnect re-established the chat detail");
+	assert(!allText(bSection2).includes("live after reconnect"), "(m) the snapshot state replaced the stale reduced state (watermark reseeded to 310)");
+	assert(ahpView4.client?.channelWatermark?.("ahp-chat:/b-main") === 310, "(m) the snapshot's fromSeq reseeded the watermark");
+
+	// (n) deselect: the close-detail control unsubscribes + clears detail;
+	// clicking a card re-selects; re-clicking the selected card deselects too.
+	ws28.unsubs = [];
+	findButton(ahpView4.contentEl, "close detail")?.handlers?.get("click")?.[0]?.();
+	await sleep(320);
+	assert(ahpView4.client?.selected === null, "(n) the close-detail control deselects the session");
+	assert(JSON.stringify(ws28.unsubs.slice().sort()) === '["ahp-chat:/b-main","ahp-session:/b"]',
+		"(n) close-detail sent the id-less unsubscribe notification for the session + its chat (root stays subscribed)");
+	assert(detailSections().length === 0, "(n) the detail panel is empty after deselect");
+	clickCard("ahp-session:/b");
+	await sleep(320);
+	assert(ahpView4.client?.selected === "ahp-session:/b", "(n) clicking a card re-selects after close");
+	clickCard("ahp-session:/b");
+	await sleep(320);
+	assert(ahpView4.client?.selected === null, "(n) re-clicking the selected card still deselects it");
+	assert(detailSections().length === 0, "(n) no detail after the card-deselect either");
+
+	// (o) cleanup on close: select again, then detach the leaf — EVERY channel
+	// (root included) unsubscribes + the socket closes (onClose → client.close()).
+	clickCard("ahp-session:/b");
+	await sleep(50);
+	ws28.unsubs = [];
+	await app.workspace.detachLeavesOfType("arthur-ahp");
+	const lastBroker2 = ws28.instances[ws28.instances.length - 1];
+	const closeUnsubs = lastBroker2.sent.filter((f) => f.method === "unsubscribe").map((f) => f.params?.channel);
+	assert(closeUnsubs.includes("ahp-session:/b") && closeUnsubs.includes("ahp-chat:/b-main") && closeUnsubs.includes("ahp-root://"),
+		"(o) view close/teardown unsubscribes root + session + chat channels");
+	assert(lastBroker2.readyState === 3, "(o) the client socket closed after teardown");
+	assert(lastBroker2.sent.filter((f) => f.method === "unsubscribe").every((f) => !("id" in f)), "(o) unsubscribes remain id-less notifications");
+
+	// (p) mid-handshake drop never strands 'connecting': the socket closes and
+	// the backoff retries with a fresh initialize, settling in 'ready'.
+	plugin.settings.ahpEndpoint = "100.75.249.5:4500";
+	await plugin.activateAhpView();
+	const ahpView5 = app.workspace.getLeavesOfType("arthur-ahp")[0]?.view;
+	ws28.dropMidHandshake = true;
+	const initCountBeforeP = ws28.initCount;
+	findButton(ahpView5.contentEl, "Refresh")?.handlers.get("click")[0]?.();
+	await sleep(40);
+	assert(ahpView5.client?.currentState === "reconnecting", "(p) a mid-handshake drop surfaced as reconnecting (never stranded 'connecting')");
+	ws28.dropMidHandshake = false;
+	await sleep(1400);
+	assert(ws28.initCount === initCountBeforeP + 2, "(p) the backoff retry re-initialized a fresh handshake (no zombie socket, no infinite 'connecting')");
+	assert(ahpView5.client?.currentState === "ready", "(p) the client recovered to 'ready' after the retry");
+	await app.workspace.detachLeavesOfType("arthur-ahp");
+
+	// ---- 28c. AHP re-subscribe regression: the per-channel serverSeq water-
+	//          marks must be EPOCH-SCOPED. The verified 0.3.0 broker counts
+	//          seq PER CHANNEL and leaves it unchanged while a channel is
+	//          idle, so a re-subscribe snapshot can carry fromSeq EQUAL to
+	//          the previous epoch's watermark. The pre-fix build dedupe-
+	//          skipped that fresh snapshot: re-selecting the SAME session
+	//          after close-detail (or after A->B->A) never re-applied its
+	//          chats and hung forever on "subscribing chat detail…". The
+	//          model broker below removes subscriptions server-side on
+	//          unsubscribe (subscribe counts prove the second epoch is
+	//          really re-requested; gated envelope delivery proves removal).
+	console.log("== 28c. AHP re-subscribe epochs (same-session reselect / A->B->A / held-reply races / teardown) ==");
+
+	plugin.settings.ahpEndpoint = "100.75.249.5:4500";
+	plugin.settings.ahpToken = "smoke-token";
+
+	ws28.serverModel = {
+		counts: new Map(),   // subscribe count per channel
+		chanSeq: new Map(),  // per-channel broker seq counter (idle channels never advance)
+		states: new Map(Object.entries({
+			"ahp-session:/a": { chats: [
+				{ resource: "ahp-chat:/a-main", title: "main", status: 1, activity: "idle-activity", modifiedAt: "2026-11-07T10:00:00Z" },
+				{ resource: "ahp-chat:/a-sub", title: "scout", status: 1, modifiedAt: "2026-11-07T10:01:00Z", origin: { kind: "tool", toolCallId: "tcs", chat: "ahp-chat:/a-main" } },
+			] },
+			"ahp-chat:/a-main": { title: "main", status: 1, turns: [{ id: "c-t1", message: { text: "first user msg", origin: { kind: "user" } }, parts: [{ kind: "markdown", id: "cp1", content: "A-main snapshot content" }], usage: { inputTokens: 10, outputTokens: 5, model: "glm-5" }, state: "complete" }], activeTurn: null },
+			"ahp-chat:/a-sub": { title: "scout", status: 1, turns: [], activeTurn: null },
+			"ahp-session:/b": { chats: [{ resource: "ahp-chat:/b-main", title: "bmain", status: 1 }] },
+			"ahp-chat:/b-main": { title: "bmain", status: 1, turns: [], activeTurn: null },
+		})),
+		defer: null, // set of channels whose subscribe replies are HELD in flight
+		held: [],    // queued serve() thunks
+	};
+	ws28.replayActions = [];
+	ws28.reconnectResult = null;
+	ws28.dropMidHandshake = false;
+	ws28.unsubs = [];
+	ws28.subscribeCalls = [];
+
+	await plugin.activateAhpView();
+	const view28c = app.workspace.getLeavesOfType("arthur-ahp")[0]?.view;
+	assert(!!view28c, "(28c) AHP view re-attached");
+	findButton(view28c.contentEl, "Refresh")?.handlers.get("click")[0]?.();
+	await sleep(80);
+	const brokerC = ws28.instances[ws28.instances.length - 1];
+	assert(brokerC?.readyState === 1 && view28c.client?.currentState === "ready", "(28c) refreshed to live through the modeled broker");
+	assert(brokerC?.subs.has("ahp-root://"), "(28c) the modeled server tracks the root subscription");
+
+	const cnt = (ch) => ws28.serverModel.counts.get(ch) ?? 0;
+	const serverSubs = () => [...brokerC.subs].sort();
+	const cards28c = () => (view28c.listEl?.children ?? []).filter((c) => c.attributes?.get?.("data-ahp-session"));
+	const chats28c = () => (view28c.detailEl?.children ?? []).filter((c) => c.attributes?.get?.("data-ahp-chat"));
+	const click28c = (r) => cards28c().find((c) => c.attributes.get("data-ahp-session") === r)?.handlers?.get("click")?.[0]?.();
+	const bump28c = (ch) => { const n = (ws28.serverModel.chanSeq.get(ch) ?? 0) + 1; ws28.serverModel.chanSeq.set(ch, n); return n; };
+	const push28c = (ch, action, atSeq) => brokerC.push("action", { channel: ch, action, serverSeq: atSeq, origin: { clientId: "server", clientSeq: 0 } });
+
+	// (q) FIRST selection epoch: subscribe session + both chats, render snapshots.
+	click28c("ahp-session:/a");
+	await sleep(320);
+	assert(view28c.client?.selected === "ahp-session:/a", "(q) session A selected (baseline epoch)");
+	assert(cnt("ahp-session:/a") === 1 && cnt("ahp-chat:/a-main") === 1 && cnt("ahp-chat:/a-sub") === 1,
+		"(q) exactly one subscribe per channel in epoch 1");
+	assert(JSON.stringify(serverSubs()) === '["ahp-chat:/a-main","ahp-chat:/a-sub","ahp-root://","ahp-session:/a"]',
+		"(q) server-side subscription set = root + session + both chats (no duplicates)");
+	assert(chats28c().length === 2 && allText(view28c.detailEl).includes("A-main snapshot content"),
+		"(q) both chat sections render with the first-epoch snapshot content");
+	const liveSeq1 = bump28c("ahp-chat:/a-main");
+	push28c("ahp-chat:/a-main", { type: "chat/turnStarted", turnId: "c-t2", message: { text: "live user msg" } }, liveSeq1);
+	const liveSeq2 = bump28c("ahp-chat:/a-main");
+	push28c("ahp-chat:/a-main", { type: "chat/turnComplete", turnId: "c-t2" }, liveSeq2);
+	await sleep(320);
+	assert(view28c.client?.channelWatermark?.("ahp-chat:/a-main") === 2,
+		"(q) subscribed-epoch envelopes advanced the watermark to 2 (broker counter stays 2 while idle)");
+
+	// (r) IMMEDIATE close-detail -> reselect the SAME session: the regression.
+	ws28.unsubs = [];
+	findButton(view28c.contentEl, "close detail")?.handlers?.get("click")?.[0]?.();
+	await sleep(120);
+	assert(view28c.client?.selected === null, "(r) the immediate close deselects");
+	assert(JSON.stringify(ws28.unsubs.slice().sort()) === '["ahp-chat:/a-main","ahp-chat:/a-sub","ahp-session:/a"]',
+		"(r) close-detail unsubscribed session + both chats");
+	assert(JSON.stringify(serverSubs()) === '["ahp-root://"]',
+		"(r) the modeled server REMOVED the unsubscribed channels");
+	push28c("ahp-chat:/a-main", { type: "chat/turnStarted", turnId: "ghost", message: { text: "GHOST" } }, bump28c("ahp-chat:/a-main"));
+	await sleep(120);
+	assert(view28c.client?.channelWatermark?.("ahp-chat:/a-main") === null,
+		"(r) post-deselect envelopes are never delivered (server-side removal modeled; the watermark died with the epoch)");
+	click28c("ahp-session:/a");
+	await sleep(320);
+	assert(view28c.client?.selected === "ahp-session:/a" && !allText(view28c.detailEl).includes("subscribing chat detail"),
+		"(r) re-selecting the SAME session does NOT strand on 'subscribing chat detail…'");
+	assert(cnt("ahp-session:/a") === 2 && cnt("ahp-chat:/a-main") === 2 && cnt("ahp-chat:/a-sub") === 2,
+		"(r) the SECOND epoch really re-requested session + both chats (counts incremented, not assumed)");
+	assert(JSON.stringify(serverSubs()) === '["ahp-chat:/a-main","ahp-chat:/a-sub","ahp-root://","ahp-session:/a"]',
+		"(r) the server subscription set is complete again (no channel left behind)");
+	assert(chats28c().length === 2 && allText(view28c.detailEl).includes("A-main snapshot content"),
+		"(r) the SECOND-epoch snapshots rendered (fromSeq == previous watermark was not dedupe-skipped)");
+	assert(view28c.client?.channelWatermark?.("ahp-chat:/a-main") === 3,
+		"(r) the fresh snapshot reseeded the watermark to the broker counter (3)");
+
+	// (s) A->B->A round trip: both switches re-unsubscribe exactly the old set.
+	ws28.unsubs = [];
+	click28c("ahp-session:/b");
+	await sleep(320);
+	assert(JSON.stringify(ws28.unsubs.slice().sort()) === '["ahp-chat:/a-main","ahp-chat:/a-sub","ahp-session:/a"]',
+		"(s) the A->B switch unsubscribed exactly A's three channels");
+	ws28.unsubs = [];
+	assert(cnt("ahp-session:/b") === 1 && cnt("ahp-chat:/b-main") === 1, "(s) B + its chat subscribed");
+	assert(allText(view28c.detailEl).includes("bmain") && chats28c().length === 1, "(s) B's chat detail renders");
+	click28c("ahp-session:/a");
+	await sleep(320);	assert(JSON.stringify(ws28.unsubs.slice().sort()) === '["ahp-chat:/b-main","ahp-session:/b"]',
+		"(s) the B->A switch unsubscribed exactly B's two channels");
+	assert(cnt("ahp-session:/a") === 3 && cnt("ahp-chat:/a-main") === 3 && cnt("ahp-chat:/a-sub") === 3,
+		"(s) A->B->A re-requested the SAME channels (third epoch)");
+	assert(JSON.stringify(serverSubs()) === '["ahp-chat:/a-main","ahp-chat:/a-sub","ahp-root://","ahp-session:/a"]',
+		"(s) no duplicate or stale server subscriptions after the round trip");
+	assert(allText(view28c.detailEl).includes("A-main snapshot content") && chats28c().length === 2,
+		"(s) A's snapshots render again after A->B->A");
+
+	// (t) held-reply race: supersede an in-flight session subscribe. The /b
+	//     subscribe reply is HELD while the user switches back to A.
+	ws28.unsubs = [];
+	const bSessBase = cnt("ahp-session:/b");
+	const bMainBase = cnt("ahp-chat:/b-main");
+	const unsubsAtTSwitchStart = 0; // A's deselect-unsubs (below) are expected, nothing more
+	ws28.serverModel.defer = new Set(["ahp-session:/b"]);
+	click28c("ahp-session:/b");
+	await sleep(0); // drain microtasks; the /b reply stays held (in flight)
+	assert(view28c.client?.selected === "ahp-session:/b" && cnt("ahp-session:/b") === bSessBase + 1,
+		"(t) B's selection landed while its subscribe reply is still in flight (subscribe counted)");
+	assert(cnt("ahp-chat:/b-main") === bMainBase, "(t) no child chats subscribed for the uncompleted /b epoch");
+	const unsubsMidFlight = ws28.unsubs.length;
+	click28c("ahp-session:/a");
+	await sleep(320);
+	assert(ws28.unsubs.length === unsubsMidFlight + 1
+			&& JSON.stringify(ws28.unsubs.slice(-1)) === '["ahp-session:/b"]',
+		"(t) the switch sent the unsubscribe for the IN-FLIGHT session channel (no others)");
+	assert(cnt("ahp-session:/a") === 4 && cnt("ahp-chat:/a-main") === 4 && cnt("ahp-chat:/a-sub") === 4,
+		"(t) A re-subscribed cleanly after superseding the in-flight B epoch");
+	assert(JSON.stringify(serverSubs()) === '["ahp-chat:/a-main","ahp-chat:/a-sub","ahp-root://","ahp-session:/a"]',
+		"(t) the mid-flight /b subscribe was removed server-side (no stale channel)");
+	for (const release of ws28.serverModel.held.splice(0)) release();
+	await sleep(320);
+	assert(cnt("ahp-session:/b") === bSessBase + 1 && cnt("ahp-chat:/b-main") === bMainBase,
+		"(t) the STALE /b reply released: no re-entry, no late chat subscriptions, no duplicate channels");
+	assert(view28c.client?.selected === "ahp-session:/a" && chats28c().length === 2,
+		"(t) the held stale reply did not perturb the live A selection");
+	ws28.serverModel.defer = null;
+
+	// (u) reconnect stays correct after all the epochs: no resurrected or
+	//     re-booked stale channels in the reconnect payload; detail survives.
+	const reconnectsBefore = ws28.reconnects.length;
+	brokerC.drop();
+	await sleep(1700);
+	assert(ws28.reconnects.length === reconnectsBefore + 1, "(u) the drop reconnected once");
+	const lastReconnect28c = ws28.reconnects[ws28.reconnects.length - 1];
+	assert(new Set(lastReconnect28c.subscriptions).size === lastReconnect28c.subscriptions.length,
+		"(u) no duplicate channels in the reconnect payload");
+	assert(JSON.stringify([...lastReconnect28c.subscriptions].sort())
+			=== '["ahp-chat:/a-main","ahp-chat:/a-sub","ahp-root://","ahp-session:/a"]',
+		"(u) the reconnect payload carries exactly root + session A + its two chats (no stale /b)");
+	assert(lastReconnect28c.lastSeenServerSeq === 0,
+		"(u) the scalar cursor is the per-channel MIN watermark (epoch-fresh channels count 0)");
+	assert(view28c.client?.currentState === "ready" && chats28c().length === 2
+			&& allText(view28c.detailEl).includes("A-main snapshot content"),
+		"(u) the detail survived the reconnect (state retained, no re-subscribe churn)");
+
+	// (v) close() teardown after the epochs: EVERY live channel unsubscribes
+	//     and the modeled server ends with an empty subscription set.
+	ws28.unsubs = [];
+	await app.workspace.detachLeavesOfType("arthur-ahp");
+	const closeUnsubs28c = ws28.unsubs.slice().sort();
+	assert(JSON.stringify(closeUnsubs28c) === '["ahp-chat:/a-main","ahp-chat:/a-sub","ahp-root://","ahp-session:/a"]',
+		"(v) close() teardown unsubscribed root + session + both chats, each exactly once");
+	assert(ws28.instances[ws28.instances.length - 1].readyState === 3, "(v) the socket closed");
+	ws28.serverModel = null;
+
+	// restore the smoke defaults the other sections assume
+	plugin.settings.ahpEndpoint = "100.75.249.5:4500";
+	plugin.settings.ahpToken = "";
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();
@@ -4086,6 +4815,9 @@ try {
 		/* ignore */
 	}
 	await plugin.onunload();
+	// detach any leftover AHP leaf from section 28 (its client already closed
+	// via onClose; this is the backstop for the reopened leaf in (i)).
+	await app.workspace.detachLeavesOfType("arthur-ahp");
 } finally {
 	fs.rmSync(bundlePath, { force: true }); // dev tree stays pristine
 }
@@ -4094,4 +4826,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks all clean");

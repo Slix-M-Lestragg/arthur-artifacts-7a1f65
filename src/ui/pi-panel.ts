@@ -70,6 +70,9 @@ export interface PiPanelOpts {
 	archivesCollapsed: () => boolean;
 	/** Persist a changed archives-collapse state. */
 	setArchivesCollapsed: (collapsed: boolean) => void;
+	/** Optional 'pi sessions (AHP)' affordance (slice 1 wiring: dashboard-view
+	 *  bridges it to the plugin's open-AHP command/view activation path). */
+	openAhp?: () => void;
 }
 
 export interface PiPanelData {
@@ -399,6 +402,19 @@ export class PiPanel {
 
 	constructor(parent: HTMLElement, private readonly opts: PiPanelOpts) {
 		this.rootEl = parent.createEl("div", { cls: "arthur-pi-block" });
+		// Optional read-only 'pi sessions (AHP)' affordance (a plain callback on
+		// the opts-bag contract — the panel owns no AHP client itself).
+		if (opts.openAhp) {
+			const ahpBtn = document.createElement("button");
+			ahpBtn.addClass("arthur-btn", "arthur-btn--tiny", "arthur-pi-ahp-open");
+			ahpBtn.textContent = "pi sessions (AHP)";
+			ahpBtn.setAttribute("title", "Open the AHP broker session catalogue (read-only view)");
+			ahpBtn.addEventListener("click", (e) => {
+				e?.stopPropagation?.();
+				opts.openAhp?.();
+			});
+			this.rootEl.append(ahpBtn);
+		}
 		this.warningEl = el("p", {
 			cls: "arthur-note arthur-pi-warning",
 			text: "",
