@@ -4141,6 +4141,9 @@ try {
 		// reconnect reply: null = the legacy replay shape (live ws28.replayActions);
 		// 28b overrides it for the multi-channel/Snapshot-mode reconnects.
 		reconnectResult: null,
+		// 28e: listSessions returns ZERO items (the stale-detail regression's
+		// "refresh emptied the catalogue" mode).
+		emptyCatalogue: false,
 	};
 	class MockAhpBroker {
 		constructor(url) {
@@ -4260,6 +4263,11 @@ try {
 				}
 				case "listSessions": {
 					ws28.listCalls.push(frame.params);
+					if (ws28.emptyCatalogue) {
+						// 28e mode: the broker holds NO sessions — a page with NO items.
+						this.serve({ jsonrpc: "2.0", id: frame.id, result: { items: [] } });
+						return;
+					}
 					const cursor = typeof frame.params.cursor === "string" ? Number(frame.params.cursor) : 0;
 					// Controller-created sessions land server-side too (page 1); the
 					// mock models the verified relay-vs-hosted split: provider 'pi' →
@@ -5282,6 +5290,106 @@ try {
 	assert(!contentText().includes("smoke-token"), "(af) the rendered UI never shows the token");
 	await app.workspace.detachLeavesOfType("arthur-ahp");
 
+	// ---- 28e. STALE-DETAIL regression (sandbox-confirmed wedge): an EMPTY ----
+//          catalogue must ALWAYS clear the detail/armed state — the old ---
+//          empty branch returned ABOVE renderDetail, so the previous -----
+//          session's detail/confirm strip survived (a) a server
+//          root/sessionRemoved of the LAST catalogued session and (b) a
+//          manual Refresh whose fresh listSessions came back EMPTY while the
+//          OLD client's detail DOM was still rendered.
+	console.log("== 28e. AHP stale-detail regression (empty catalogue clears detail / refresh-empty) ==");
+
+	plugin.settings.ahpEnableControl = true; // controls must exist so the ARMED strip is provable
+	ws28.roles = ["controller"];
+	ws28.emptyCatalogue = false;
+	ws28.createdSessions = [];
+	ws28.createdCwds = [];
+	ws28.pausedMap = {};
+	ws28.holdMutation = null;
+	ws28.heldMutationReleases = [];
+	ws28.promptDispatches = [];
+	ws28.snapshots = {
+		"ahp-session:/a": { state: { chats: [{ resource: "ahp-chat:/a-main", title: "A main", status: 1 }] }, fromSeq: 900 },
+		"ahp-chat:/a-main": { state: { title: "A main", status: 1, turns: [], activeTurn: null }, fromSeq: 900 },
+	};
+	ws28.unsubs = [];
+	ws28.subscribeCalls = [];
+
+	await plugin.activateAhpView();
+	const viewE = app.workspace.getLeavesOfType("arthur-ahp")[0]?.view;
+	assert(!!viewE, "(ag) the 28e view attached");
+	const cardsE = () => (viewE.listEl?.children ?? []).filter((c) => c.attributes?.get?.("data-ahp-session"));
+	const clickCardE = (res) => cardsE().find((c) => c.attributes.get("data-ahp-session") === res)?.handlers?.get("click")?.[0]?.();
+	const clickRefreshE = async (ms = 90) => {
+		findButton(viewE.contentEl, "Refresh")?.handlers.get("click")[0]?.();
+		await sleep(ms);
+	};
+	const detailHeadE = () => findByClass(viewE.contentEl, "arthur-ahp-detail-head").length;
+	const confirmStripE = () => findByClass(viewE.contentEl, "arthur-ahp-dispose-confirm").length;
+	const clickDisposeE = () => findButton(viewE.contentEl, "dispose")?.handlers.get("click")[0]?.();
+
+	// (ag) setup: live controller connection, catalogue [A, B], A selected with
+	//      its live chat detail rendered, and the dispose ARMED (confirm strip +
+	//      prompt arm state all rendered against A).
+	await clickRefreshE();
+	assert(viewE.client?.currentState === "ready" && cardsE().length === 3, "(ag) the 28e refresh loads the 3-session catalogue");
+	clickCardE("ahp-session:/a");
+	await sleep(320);
+	assert(viewE.client?.selected === "ahp-session:/a" && detailHeadE() === 1
+			&& findByClass(viewE.contentEl, "arthur-ahp-chat").length === 1,
+		"(ag) A's live chat detail renders after the card click");
+	clickDisposeE(); // ARM the inline confirmation — the wedge scenario starts here
+	assert(confirmStripE() === 1 && viewE.disposeArm === "ahp-session:/a", "(ag) the dispose arm + confirm strip are rendered against A");
+
+	// (ag2) server root/sessionRemoved for the LAST session (B first, then the
+	//       SELECTED A): the catalogue empties on a live envelope — the stale
+	//       detail, armed strip and selection must ALL clear (client releases
+	//       the removed selection; the view must not keep its old detail DOM).
+	const brokerE = ws28.instances[ws28.instances.length - 1];
+	brokerE.push("root/sessionRemoved", { channel: "ahp-root://", session: "ahp-session:/b" });
+	brokerE.push("root/sessionRemoved", { channel: "ahp-root://", session: "ahp-session:/c" });
+	brokerE.push("root/sessionRemoved", { channel: "ahp-root://", session: "ahp-session:/a" }); // the SELECTED LAST item
+	await sleep(500); // the coalescing repaint + released-detail repaint settle
+	assert(cardsE().length === 0, "(ag2) root/sessionRemoved for BOTH sessions emptied the catalogue");
+	assert(allText(viewE.listEl).includes("no active pi sessions"), "(ag2) the empty-catalogue message renders");
+	assert(viewE.client?.selected === null, "(ag2) the removed selected session's selection dropped");
+	assert(detailHeadE() === 0 && findByClass(viewE.contentEl, "arthur-ahp-chat").length === 0,
+		"(ag2) NO stale detail DOM survives the emptied catalogue (wedge regression)");
+	assert(confirmStripE() === 0 && viewE.disposeArm === null, "(ag2) the armed dispose strip + arm state cleared with the last session");
+
+	// (ag3) manual Refresh with PREVIOUS DOM: rebuild a catalogue + detail
+	//       (+ armed strip), then click Refresh while the fresh client's
+	//       listSessions returns EMPTY — the stale detail must be gone IMMEDIATELY
+	//       (the same-tick repaint against the new client), and the settled
+	//       view renders an empty detail BEFORE/alongside the empty message.
+	ws28.emptyCatalogue = false;
+	await clickRefreshE();
+	assert(cardsE().length === 3, "(ag3) the catalogue rebuilt for the refresh-empty case");
+	clickCardE("ahp-session:/a");
+	await sleep(320);
+	assert(detailHeadE() === 1, "(ag3) A's detail renders again");
+	clickDisposeE(); // arm the strip — previous DOM the refresh must not preserve
+	assert(confirmStripE() === 1 && viewE.disposeArm === "ahp-session:/a", "(ag3) the armed strip renders against A before the refresh");
+	ws28.emptyCatalogue = true;
+	const prevClientE = viewE.client;
+	findButton(viewE.contentEl, "Refresh")?.handlers.get("click")[0]?.(); // NO settle sleep — the same-tick repaint
+	assert(viewE.client !== null && viewE.client !== prevClientE && detailHeadE() === 0
+			&& findByClass(viewE.contentEl, "arthur-ahp-chat").length === 0 && confirmStripE() === 0
+			&& viewE.disposeArm === null,
+		"(ag3) the SAME-TICK repaint against the fresh client already cleared the stale detail/strip/arm");
+	await sleep(500); // the fresh client's empty listSessions settles
+	assert(viewE.client?.currentState === "ready", "(ag3) the fresh client connected");
+	assert(cardsE().length === 0 && allText(viewE.listEl).includes("no active pi sessions"),
+		"(ag3) the fresh empty catalogue renders its empty message (detail stays cleared)");
+	assert(detailHeadE() === 0 && confirmStripE() === 0 && viewE.client?.selected === null,
+		"(ag3) the settled refresh-empty view has NO stale detail/strip/selection");
+
+	ws28.emptyCatalogue = false;
+	ws28.snapshots = {};
+	plugin.settings.ahpEnableControl = false;
+	ws28.roles = undefined;
+	await app.workspace.detachLeavesOfType("arthur-ahp");
+
 	// restore the smoke defaults the other sections assume
 	plugin.settings.ahpEndpoint = "100.75.249.5:4500";
 	plugin.settings.ahpToken = "";
@@ -5304,4 +5412,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty all clean");

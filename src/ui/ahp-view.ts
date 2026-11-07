@@ -297,6 +297,15 @@ export class AhpView extends ItemView {
 		this.listEl.empty();
 		const sessions = client?.catalogue() ?? [];
 		if (sessions.length === 0) {
+			// An empty catalogue ALWAYS clears the interactive residue BEFORE the
+			// empty message renders: the pre-fix branch returned above renderDetail,
+			// wedging a stale detail/armed strip when a root/sessionRemoved (or a
+			// Refresh whose fresh listSessions came back empty) emptied the list.
+			if (client && client.currentState === "ready" && client.selected) {
+				void client.selectSession(null); // no selection survives a removed resource
+			}
+			this.disposeArm = null;
+			this.renderDetail(); // empties any stale detail DOM (guards: not ready / no selection)
 			if (state === "ready") {
 				this.listEl.append(el("p", { cls: "arthur-note", text: "no active pi sessions" }));
 			} else {
