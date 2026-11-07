@@ -1,7 +1,7 @@
 # Arthur + AHP / obsidian-pi integration — research and delivery plan
 
 - **Date**: 2026-11-07
-- **Status**: **Phase 0 preserved + Phase 1 slice 1 implemented, mock-tested, and sandbox-validated; Phase 2 PLUGIN side implemented and mock-tested** (roles gate + opt-in controls + exact mutation wire, gate green) — **backend roles work lives on a separate remote broker branch (81 tests passing, since superseded: the roles + command gate landed at broker `b6e26148`, 82 tests, DEPLOYED — see §10c; production roll-out EXECUTED, see §11b)**; **live Phase 2 interactive sandbox EXECUTED (linux-obsidian-73323, see Status snapshot / E15) with one BLOCKER found & FIXED (`createSession` `provider:'pi'`) and the focused live retest of the fixed wrapper PASS (`linux-obsidian-74310`, E17 — UI-created HOSTED pi session, `AHP_PHASE2_CREATE_OK`, pause/resume/dispose, 0 plugin errors, cleanup verified)**; **INLINE dispose confirmation hardening implemented + mock-tested (native `window.confirm` removed, E18) — its final focused live sandbox was ABORTED by the harness and cleaned, so the hardened dispose UI stays mock-tested / NOT live-revalidated**; question_user answering remains mock-only; **production role deployment EXECUTED (broker `b6e26148` live, all protocol role probes PASS — see §11b); production UI test IN PROGRESS**; Phases 3–5 still [PROPOSED]
+- **Status**: **Phase 0 preserved + Phase 1 slice 1 implemented, mock-tested, and sandbox-validated; Phase 2 PLUGIN side implemented and mock-tested** (roles gate + opt-in controls + exact mutation wire, gate green) — **backend roles work lives on a separate remote broker branch (81 tests passing, since superseded: the roles + command gate landed at broker `b6e26148`, 82 tests, DEPLOYED — see §10c; production roll-out EXECUTED, see §11b)**; **live Phase 2 interactive sandbox EXECUTED (linux-obsidian-73323, see Status snapshot / E15) with one BLOCKER found & FIXED (`createSession` `provider:'pi'`) and the focused live retest of the fixed wrapper PASS (`linux-obsidian-74310`, E17 — UI-created HOSTED pi session, `AHP_PHASE2_CREATE_OK`, pause/resume/dispose, 0 plugin errors, cleanup verified)**; **INLINE dispose confirmation hardening implemented + mock-tested (native `window.confirm` removed, E18) — its final focused live sandbox was ABORTED by the harness and cleaned, so the hardened dispose UI stays mock-tested / NOT live-revalidated**; question_user answering remains mock-only; **production role deployment EXECUTED and COMPLETE (broker `b6e26148` live, all protocol role probes PASS, ALL clients recovered — see §11b + §11c); interactive production UI validation ATTEMPTED — FAILED at hosted create (server-side `spawn /home/ulysse/.local/bin/pi` ENOENT, zero plugin console errors, no session created; repair + retest IN PROGRESS — see §11c); interactive deployment NOT complete**; Phases 3–5 still [PROPOSED]
 - **Scope**: planning record + delivery evidence for Phase 0 and Phase 1 slice 1. No canonical `docs/PLAN.md`, manifest, or ROADMAP/TESTING changes.
 
 ### Status snapshot (2026-11-07)
@@ -745,13 +745,20 @@ ulysse at record time:
 - **Host agents + Arthur recovered.** The `hostAgent` clients (pi-ahp-client,
   swarm) and the arthur-side clients from arthur (100.90.92.1) reconnected
   to the restarted broker and are recorded healthy.
-- **Voyager / old-ulysse recovery IN PROGRESS.** Client recovery on voyager
-  (100.93.241.75) and the older ulysse-side consumers was still being
-  completed at record time; tracked separately from this record.
-- **Production UI test IN PROGRESS.** The interactive arthur-plugin test
-  against the live roles broker (viewer + controller paths incl. the
-  hardened inline-dispose UI, E18's open item) is running at record time;
-  its result will land as a further evidence row once complete.
+- **Voyager / old-ulysse recovery — RESOLVED COMPLETE (see §11c).** All
+  clients recovered healthy to the restarted broker: voyager
+  (100.93.241.75) recovered via a graceful Obsidian restart; three
+  old-ulysse TTY clients recovered and re-attached with their EXACT
+  transcripts intact; client `1897872` stopped INTENTIONALLY and left
+  offline; pi-voice status PENDING at record time.
+- **Interactive production UI validation — FAILED (see §11c).** The
+  arthur-plugin test against the live roles broker (viewer + controller
+  paths incl. the hardened inline-dispose UI, E18's open item) ran
+  post-restart and FAILED at the hosted-create step: the broker could not
+  spawn the hosted pi binary (`spawn /home/ulysse/.local/bin/pi` ENOENT)
+  — **zero plugin-caused console errors**, **no session created**. Repair
+  and retest are IN PROGRESS; **interactive deployment is NOT complete**
+  and stays that way until the retest passes.
 - **Backup / snapshot paths on ulysse** (all under `/home/ulysse/RnD/AHP/`):
   - `backups/ahp-command-gate-20261107-202018/` — pre-restart `dist`
     snapshot (`dist-pre-restart/`, command-gate build output).
@@ -773,6 +780,45 @@ ulysse at record time:
   broker store; **no temp git test branches** (`AHP` + `AHP-server` branch
   lists checked); untouched: `ahp3`, unrelated `affectionate_tesla`/manager
   sessions.
+
+---
+
+## 11c. Production validation follow-up (2026-11-07)
+
+Docs-only record of the post-restart validation state. Facts verified at
+record time; no plugin/version/release artifacts change with this record.
+
+- **Client recovery — COMPLETE.** Every client of the restarted broker is
+  accounted for:
+  - host agents + arthur-side clients: recovered healthy (recorded in
+    §11b);
+  - **voyager (100.93.241.75): RECOVERED** via a graceful Obsidian
+    restart on the voyager side — clean reconnection to the restarted
+    broker;
+  - **three old-ulysse TTY clients: RECOVERED**, each re-attached with
+    its EXACT transcript preserved (no transcript loss);
+  - **client `1897872`: stopped INTENTIONALLY** and left offline by
+    operator choice (not a casualty of the restart);
+  - **pi-voice: status PENDING** at record time — not yet confirmed
+    recovered or failed.
+- **Interactive production UI validation — FAILED (blocker, repair in
+  progress).** The interactive arthur-plugin run against the live roles
+  broker (viewer + controller paths incl. the hardened inline-dispose
+  UI, E18's open item) FAILED at the **hosted-create** step:
+  - the broker attempt to start the hosted pi backend errored with
+    **`spawn /home/ulysse/.local/bin/pi ENOENT`** — the path to the pi
+    binary on ulysse is wrong/stale in the broker's spawn configuration
+    (server-side defect, NOT a plugin defect);
+  - **zero plugin-caused console errors** — the plugin side behaved
+    correctly end-to-end up to the spawn failure;
+  - **no session created** — the failed spawn left nothing in the broker
+    store (nothing to clean up);
+  - repair of the spawn path + retest of the hosted-create flow are IN
+    PROGRESS; until the retest passes, **the interactive production
+    deployment is NOT complete** — do not treat it as such.
+- **Cleanup — DONE (verified).** No further residue beyond the §11b
+  cleanup record: the failed create left no session, no listener, no
+  temp artifact.
 
 ---
 
@@ -800,5 +846,7 @@ ulysse at record time:
 | E19 | **Role deployment preparation record (2026-11-07, §11)**: pi-ahp-client `a8e5e8212` deployed (71 tests green, hashes recorded); swarm `a0c3625` deployed (9 tests green, backups moved OUTSIDE extensions); arthur `dev` `5b2b05a` (stale-detail fix); broker `b6e26148` deployed (82 tests green, roles + command gate); credential staging/audit GO; **production restart PENDING**; ulysse pi-ahp-client rsync incident — `.git` restored, stale worktree `dev` edits overwritten (known hashes only) | deployment-prep delivery record, recorded in §11 |
 | E18 | **INLINE dispose confirmation hardening (2026-11-07, mock-tested; the final focused live sandbox was ABORTED by the harness and cleaned — NOT live-revalidated)**: native `window.confirm` removed from the dispose flow — `src/ui/ahp-view.ts` now arms an INLINE plain-DOM confirm strip in the selected detail (warning naming the session + `confirm dispose`/`cancel`; busy-disabled while pending; one single `disposeSession` request); `src/api/ahp.ts` `root/sessionRemoved` now ALSO releases a matching selected detail (late reply / stale-detail wedge defense; only the removed session is cleared — never a NEW selection); successful response clears the arm + releases the detail immediately + reloads the catalogue authoritatively; errors restore a safe state. Smoke suite 28d rewritten to the inline flow ((ac)) + new regressions ((ac2) late-reply/new-selection race, `root/sessionRemoved` detail release); gate green — **989 asserted checks**; uncommitted `dev` working tree (no commit/version/deps) | arthur `dev` working tree |
 | E20 | **Production roll-out record (2026-11-07, §11b)**: broker production restart onto `b6e26148` EXECUTED — main PID 175271 live on `0.0.0.0:4500` (started 21:36 CET, `node dist/src/index.js` from `pi-ahp-server-farm-view-wt`; prior run PID 590755 replaced); all protocol role probes PASS (viewer/controller/hostAgent, `-32008` gate + command gate live); host agents + arthur clients recovered; voyager/old-ulysse recovery still in progress; production UI test in progress; backups verified at `/home/ulysse/RnD/AHP/backups/{ahp-command-gate-20261107-202018,arthur-roles-20261107-204020}` (+ `pre-restart-clients.txt`, `README-metadata.txt`, `research.audit-snapshot/`); post-deploy cleanup verified — `/tmp/ahp-final-dispose` + `/tmp/add_tests.py` removed, no `:4600` listener, no test instances, no temp test branches | ulysse live state + backup dirs (delivery record) |
+
+| E21 | **Production validation follow-up (2026-11-07, §11c)**: ALL clients recovered to the restarted broker — voyager recovered via graceful Obsidian restart; three old-ulysse TTY clients recovered with exact transcripts; client `1897872` stopped intentionally (left offline); pi-voice status PENDING. Interactive production UI validation **FAILED at hosted create** — broker error `spawn /home/ulysse/.local/bin/pi ENOENT` (server-side path defect), **zero plugin-caused console errors**, **no session created**; spawn-path repair + retest IN PROGRESS; **interactive deployment NOT complete**; cleanup verified done | ulysse live state + plugin run record (delivery record) |
 
 *End of plan.*
