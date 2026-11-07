@@ -28,14 +28,28 @@ export interface AgentInstance {
 	up: boolean;
 	uptime?: number | null;
 	unit?: string;
+	/** The port answers the probe path with the instance's OWN install
+	 *  (detailed ≤ 0.8.0 endpoints only; summarized on 0.8.1+). Externally
+	 *  started own installs are live-but-unmanaged. */
 	live?: boolean;
+	/** Agent v0.8.1 — three orthogonal observability booleans beside `up`:
+	 *  managed  = the systemd unit is active (even when the port is dead);
+	 *  live     = the port serves the instance's OWN install (an externally
+	 *             started own install is live-but-unmanaged);
+	 *  foreign_occupied = the port answers but belongs to a DIFFERENT install
+	 *             (live stays false) — render a warning chip on the down row.
+	 *  Omitted on ≤ 0.8.0 agents: fall back to `up` for managed-ness. */
+	managed?: boolean;
+	foreign_occupied?: boolean;
 }
 
 /** One registered service with its live instance list. */
 export interface AgentService {
 	id: string;
 	name?: string;
-	/** Service-level state: any instance up. */
+	/** Service-level state: agent v0.8.1 — any instance managed (unit active)
+	 *  OR live (port serves its own install, even externally started).
+	 *  ≤ 0.8.0: any instance up. */
 	active: boolean;
 	multi_instance: boolean;
 	max_instances: number;
@@ -124,7 +138,25 @@ export interface AgentActionResult {
  *  0.7.0: pi observational surface — GET /api/pi/status (pi sessions +
  *  subagent runs per device) and GET /api/pi/sessions/{device}/{id}/tail.
  *  pi is NOT a managed service: no lifecycle endpoints, pure observation. */
-export const AGENT_VERSION = "0.8.0";
+export const AGENT_VERSION = "0.8.1";
+
+/** Instance visibility rule (agent v0.8.1): render an instance row when it
+ *  is managed (even down), live (externally started own install), or its
+ *  port is held by a foreign install. Agents that report NO explicit flags
+ *  (≤ 0.8.0) render every listed instance (legacy semantics). */
+export function instanceRelevant(inst: AgentInstance): boolean {
+	return inst.managed === undefined
+		? true
+		: inst.managed === true || inst.live === true || inst.foreign_occupied === true;
+}
+
+/** True when the instance is lifecycle-managed: the agent reports an explicit
+ *  `managed` flag (v0.8.1), else (≤ 0.8.0) `up` implies the unit was active.
+ *  Never used to DISABLE lifecycle controls — see dashboard-view (an explicit
+ *  false is the only adoption signal). */
+export function instanceManaged(inst: AgentInstance): boolean {
+	return inst.managed ?? inst.up === true;
+}
 
 /** GET /health — unauthenticated {ok:true, version}; distinguishes "agent down" from "bad token". */
 export interface AgentHealth {

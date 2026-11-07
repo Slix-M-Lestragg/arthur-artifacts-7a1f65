@@ -712,7 +712,7 @@ try {
 
 	const jsonBody = (status, body) => ({ status, body });
 	const agentStatusBody = {
-		version: "0.8.0",
+		version: "0.8.1",
 		host_uptime: 123456.7,
 		services: [
 			{
@@ -736,7 +736,7 @@ try {
 	// Default handler: agent handshake + status answer; everything else offline.
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.8.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.8.1" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/comfyui/start")) {
 			return jsonBody(200, { action: "start", result: "started", service: agentStatusBody.services[0] });
@@ -801,7 +801,7 @@ try {
 	StubNotice.reset();
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.8.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.8.1" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/comfyui/instances")) {
 			return jsonBody(201, {
@@ -821,7 +821,7 @@ try {
 	StubNotice.reset();
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.8.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.8.1" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/aitoolkit/instances")) {
 			return jsonBody(409, { error: "single-instance service" });
@@ -844,7 +844,7 @@ try {
 	calls9 = [];
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.8.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.8.1" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/stop")) {
 			return opts.url.includes("force=1")
@@ -946,7 +946,7 @@ try {
 	];
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.8.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.8.1" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/instances/") && opts.url.endsWith("/start")) {
 			return jsonBody(200, { action: "start", result: "started", instance: { id: "comfy-2", up: true, port: 8190 } });
@@ -1005,7 +1005,7 @@ try {
 	calls9 = [];
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.8.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.8.1" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/instances/") && opts.url.endsWith("/forget")) {
 			return jsonBody(409, { error: "instance is running" });
@@ -1033,7 +1033,7 @@ try {
 		.filter((i) => i.id !== "comfy-2");
 	httpResponder = (opts) => {
 		calls9.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.8.0" });
+		if (opts.url.endsWith("/health")) return jsonBody(200, { ok: true, version: "0.8.1" });
 		if (opts.url.endsWith("/api/status")) return jsonBody(200, agentStatusBody);
 		if (opts.method === "POST" && opts.url.includes("/api/services/comfyui/instances/") && opts.url.endsWith("/forget")) {
 			return jsonBody(200, { action: "forget", result: "forgotten", id: "comfy-2" });
@@ -1131,7 +1131,7 @@ try {
 	const json14 = (status, body) => ({ status, body });
 	const calls14 = [];
 	const gridStatusBody = {
-		version: "0.8.0",
+		version: "0.8.1",
 		host_uptime: 123456.7,
 		services: [
 			{
@@ -1177,7 +1177,7 @@ try {
 	];
 	httpResponder = (opts) => {
 		calls14.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return json14(200, { ok: true, version: "0.8.0" });
+		if (opts.url.endsWith("/health")) return json14(200, { ok: true, version: "0.8.1" });
 		if (opts.url.endsWith("/api/status")) return json14(200, gridStatusBody);
 		if (opts.url.endsWith("/api/gpus")) return json14(200, gpusBody);
 		if (opts.url.endsWith("/api/jobs")) return json14(200, aiJobsBody);
@@ -1775,7 +1775,7 @@ try {
 	const json16 = (status, body) => ({ status, body });
 	// Agent status where NO comfy instance is alive (empty instance list).
 	const emptyStatus16 = {
-		version: "0.8.0",
+		version: "0.8.1",
 		host_uptime: 1,
 		services: [
 			{ id: "comfyui", name: "ComfyUI", active: true, multi_instance: true, max_instances: 4, default_port: 8188, unit_template: "comfy@{i}", instances: [] },
@@ -1842,7 +1842,7 @@ try {
 	// (b) agent UP but zero comfy instances + /api/queue broken (500):
 	// job cards must NOT disappear — only the queue toggles are lost
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.8.0" });
+		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.8.1" });
 		if (opts.url.endsWith("/api/status")) return json16(200, emptyStatus16);
 		if (opts.url.endsWith("/api/jobs")) return json16(200, aiJobs16);
 		if (opts.url.endsWith("/api/queue")) return json16(500, { error: "queue endpoint broken" });
@@ -1867,7 +1867,7 @@ try {
 	// (c) /api/jobs broken (500) with zero everything: NO cards + inline error
 	// state — never a fake 'no jobs' note
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.8.0" });
+		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.8.1" });
 		if (opts.url.endsWith("/api/status")) return json16(200, emptyStatus16);
 		if (opts.url.endsWith("/api/jobs")) return json16(500, { error: "jobs endpoint broken" });
 		if (opts.url.endsWith("/api/queue")) return json16(200, { queues: [] });
@@ -1890,7 +1890,7 @@ try {
 
 	// (d) every source answers + zero jobs anywhere → the clear note shows
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.8.0" });
+		if (opts.url.endsWith("/health")) return json16(200, { ok: true, version: "0.8.1" });
 		if (opts.url.endsWith("/api/status")) return json16(200, emptyStatus16);
 		if (opts.url.endsWith("/api/jobs")) return json16(200, { jobs: [] });
 		if (opts.url.endsWith("/api/queue")) return json16(200, { queues: [] });
@@ -1926,7 +1926,7 @@ try {
 
 	const json17 = (status, body) => ({ status, body });
 	const status17 = {
-		version: "0.8.0",
+		version: "0.8.1",
 		host_uptime: 1,
 		services: [
 			{
@@ -2159,9 +2159,9 @@ try {
 	status17.version = "0.5.4";
 	await view17.refreshData();
 	assert(view17.bannerEl._shown === true
-		&& allText(view17.bannerEl).includes("agent version mismatch: server 0.5.4, expected 0.8.0"),
-		"older/newer server versions still trigger the mismatch banner (expected 0.8.0)");
-	status17.version = "0.8.0";
+		&& allText(view17.bannerEl).includes("agent version mismatch: server 0.5.4, expected 0.8.1"),
+		"older/newer server versions still trigger the mismatch banner (expected 0.8.1)");
+	status17.version = "0.8.1";
 
 	httpResponder = null;
 	StubNotice.reset();
@@ -2180,7 +2180,7 @@ try {
 		port, gpu, gpus: gpu != null ? [gpu] : [], up, uptime: up ? 100.0 : null,
 	});
 	const status18 = {
-		version: "0.8.0",
+		version: "0.8.1",
 		host_uptime: 1,
 		services: [
 			{
@@ -2196,7 +2196,7 @@ try {
 		],
 	};
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json18(200, { ok: true, version: "0.8.0" });
+		if (opts.url.endsWith("/health")) return json18(200, { ok: true, version: "0.8.1" });
 		if (opts.url.endsWith("/api/status")) return json18(200, status18);
 		if (opts.url.endsWith("/api/gpus")) return json18(200, { gpus: [
 			{ index: 0, name: "NVIDIA GeForce RTX 3060", mem_total_mb: 12288, mem_used_mb: 1000, util_percent: 0, temp_c: 35 },
@@ -2342,7 +2342,7 @@ try {
 		port, gpu, gpus: gpu != null ? [gpu] : [], up, uptime: up ? 100.0 : null,
 	});
 	const status20 = {
-		version: "0.8.0",
+		version: "0.8.1",
 		host_uptime: 1,
 		services: [
 			{
@@ -2370,7 +2370,7 @@ try {
 		if (opts.method === "POST" && opts.url.endsWith("/api/services/comfyui/start")) {
 			return json20(200, { action: "start", result: "started", instance: { id: "comfy-0", service: "comfyui", port: 8188, up: false } });
 		}
-		if (opts.url.endsWith("/health")) return json20(200, { ok: true, version: "0.8.0" });
+		if (opts.url.endsWith("/health")) return json20(200, { ok: true, version: "0.8.1" });
 		if (opts.url.endsWith("/api/status")) return json20(200, status20);
 		if (opts.url.endsWith("/api/gpus")) return json20(200, gpus20);
 		if (opts.url.endsWith("/api/jobs")) return json20(200, { jobs: [] });
@@ -2643,7 +2643,7 @@ try {
 			"the dropdown data gate accepts single-instance services");
 	}
 
-	// (g) hover-intent persistence — the v0.8.0 device bug (the dropdown hid
+	// (g) hover-intent persistence — the v0.8.1 device bug (the dropdown hid
 	// the moment the mouse left the button, so the checkboxes were unreachable):
 	// open/leave/enter-transit semantics + in-dropdown clicks + exclusivity +
 	// main-button click still spawning while the dropdown is open.
@@ -2744,7 +2744,7 @@ try {
 		port, gpu: gpus.length === 1 ? gpus[0] : null, gpus, up, uptime: up ? 100.0 : null, unit: `comfy@${id.slice(-1)}`,
 	});
 	const status21 = {
-		version: "0.8.0",
+		version: "0.8.1",
 		host_uptime: 1,
 		services: [
 			{
@@ -2781,7 +2781,7 @@ try {
 		],
 	};
 	httpResponder = (opts) => {
-		if (opts.url.endsWith("/health")) return json21(200, { ok: true, version: "0.8.0" });
+		if (opts.url.endsWith("/health")) return json21(200, { ok: true, version: "0.8.1" });
 		if (opts.url.endsWith("/api/status")) return json21(200, status21);
 		if (opts.url.endsWith("/api/gpus")) return json21(200, gpus21);
 		if (opts.url.endsWith("/api/jobs")) return json21(200, jobs21);
@@ -2915,9 +2915,9 @@ try {
 	const calls22 = [];
 	httpResponder = (opts) => {
 		calls22.push({ url: opts.url, method: opts.method ?? "GET" });
-		if (opts.url.endsWith("/health")) return json22(200, { ok: true, version: "0.8.0" });
+		if (opts.url.endsWith("/health")) return json22(200, { ok: true, version: "0.8.1" });
 		if (opts.url.endsWith("/api/status")) return json22(200, {
-			version: "0.8.0", host_uptime: 1,
+			version: "0.8.1", host_uptime: 1,
 			services: [
 				{ id: "comfyui", name: "ComfyUI", active: true, multi_instance: true, max_instances: 4, default_port: 8188, unit_template: "comfy@{i}", instances: [] },
 			],
@@ -3167,7 +3167,7 @@ try {
 	StubNotice.reset();
 	await app.workspace.detachLeavesOfType("arthur-dashboard");
 
-	// ---- 23. pi service button + device/session/directory flow (v0.8.0) ------
+	// ---- 23. pi service button + device/session/directory flow (v0.8.1) ------
 	console.log("== 23. pi service button + device dropdown + directory picker ==");
 	{
 		const json23 = (status, body) => ({ status, body });
@@ -3203,9 +3203,9 @@ try {
 		const spawnBodies23 = [];
 		const piResponder23 = (opts) => {
 			calls23.push({ url: opts.url, method: opts.method ?? "GET", body: opts.body });
-			if (opts.url.endsWith("/health")) return json23(200, { ok: true, version: "0.8.0" });
+			if (opts.url.endsWith("/health")) return json23(200, { ok: true, version: "0.8.1" });
 			if (opts.url.endsWith("/api/status")) return json23(200, {
-				version: "0.8.0", host_uptime: 1,
+				version: "0.8.1", host_uptime: 1,
 				services: [
 					{ id: "comfyui", name: "ComfyUI", active: false, multi_instance: true, max_instances: 4, default_port: 8188, unit_template: "comfy@{i}", instances: [] },
 				],
@@ -3483,9 +3483,9 @@ try {
 		],
 	};
 	const responder24 = (opts) => {
-		if (opts.url.endsWith("/health")) return json24(200, { ok: true, version: "0.8.0" });
+		if (opts.url.endsWith("/health")) return json24(200, { ok: true, version: "0.8.1" });
 		if (opts.url.endsWith("/api/status")) return json24(200, {
-			version: "0.8.0", host_uptime: 1,
+			version: "0.8.1", host_uptime: 1,
 			services: [
 				{ id: "comfyui", name: "ComfyUI", active: true, multi_instance: true, max_instances: 4, default_port: 8188, unit_template: "comfy@{i}", instances: [] },
 			],
@@ -3717,9 +3717,9 @@ try {
 		// counts the /api/jobs + /api/queue calls it never makes.
 		httpResponder = (opts) => {
 			calls25.push({ url: opts.url, method: opts.method ?? "GET" });
-			if (opts.url.endsWith("/health")) return json25(200, { ok: true, version: "0.8.0" });
+			if (opts.url.endsWith("/health")) return json25(200, { ok: true, version: "0.8.1" });
 			if (opts.url.endsWith("/api/status")) return json25(200, {
-				version: "0.8.0", host_uptime: 1,
+				version: "0.8.1", host_uptime: 1,
 				services: [
 					{ id: "comfyui", name: "ComfyUI", active: true, multi_instance: true, max_instances: 4, default_port: 8188, unit_template: "comfy@{i}", instances: [] },
 					{ id: "aitoolkit", name: "AI Toolkit", active: false, multi_instance: false, max_instances: 1, default_port: 8675, unit: "ai-toolkit", instances: [] },
@@ -3772,9 +3772,9 @@ try {
 		// ON but unreachable → the degraded report shows ONCE (folded), still
 		// never duplicated per endpoint
 		httpResponder = (opts) => {
-			if (opts.url.endsWith("/health")) return json25(200, { ok: true, version: "0.8.0" });
+			if (opts.url.endsWith("/health")) return json25(200, { ok: true, version: "0.8.1" });
 			if (opts.url.endsWith("/api/status")) return json25(200, {
-				version: "0.8.0", host_uptime: 1,
+				version: "0.8.1", host_uptime: 1,
 				services: [
 					{ id: "comfyui", name: "ComfyUI", active: true, multi_instance: true, max_instances: 4, default_port: 8188, unit_template: "comfy@{i}", instances: [] },
 				],
@@ -3831,9 +3831,9 @@ try {
 			],
 		};
 		httpResponder = (opts) => {
-			if (opts.url.endsWith("/health")) return json26(200, { ok: true, version: "0.8.0" });
+			if (opts.url.endsWith("/health")) return json26(200, { ok: true, version: "0.8.1" });
 			if (opts.url.endsWith("/api/status")) return json26(200, {
-				version: "0.8.0", host_uptime: 1,
+				version: "0.8.1", host_uptime: 1,
 				services: [
 					{ id: "comfyui", name: "ComfyUI", active: true, multi_instance: true, max_instances: 4, default_port: 8188, unit_template: "comfy@{i}", instances: [] },
 				],
@@ -3906,6 +3906,179 @@ try {
 		await app.workspace.detachLeavesOfType("arthur-dashboard");
 	}
 
+
+	// ---- 27. unmanaged-instance visibility (v0.13.4, agent v0.8.1) ---------
+	// The live-but-unmanaged 8188 instance renders (amber 'live · unmanaged',
+	// disabled lifecycle, generation panel + WS attach); the foreign 8189
+	// squatter renders its down row with the warning chip and is never polled;
+	// the service stays active with only live-unmanaged instances. Plus a
+	// legacy ≤0.8.0 fixture cross-check (no flags → down rows stay enabled).
+	console.log("== 27. unmanaged-visible rows + foreign chip + live-only service ==");
+	const json27 = (status, body) => ({ status, body });
+	const status27 = {
+		version: "0.8.1",
+		host_uptime: 1,
+		services: [
+			{
+				id: "comfyui", name: "ComfyUI", active: true, multi_instance: true,
+				max_instances: 4, default_port: 8188, unit_template: "comfy@{i}",
+				instances: [
+					// the user's manual ComfyUI on 8188: port serves the own
+					// install, systemd unit inactive → live-but-unmanaged
+					{ id: "comfy-0", service: "comfyui", name: "ComfyUI #0", port: 8188, gpu: 0, gpus: [0], managed: false, live: true, foreign_occupied: false, up: false, uptime: null },
+					// a foreign install squatting on 8189 → down row + chip
+					{ id: "comfy-1", service: "comfyui", name: "ComfyUI #1", port: 8189, gpu: 1, gpus: [1], managed: false, live: false, foreign_occupied: true, up: false, uptime: null },
+				],
+			},
+			{
+				id: "aitoolkit", name: "AI Toolkit", active: true, multi_instance: false,
+				max_instances: 1, default_port: 8675, unit: "ai-toolkit.service",
+				instances: [{ id: "aitoolkit", service: "aitoolkit", name: "AI Toolkit", port: 8675, gpu: null, gpus: [], managed: true, live: true, foreign_occupied: false, up: true, uptime: 10.0 }],
+			},
+		],
+	};
+	const polled27 = [];
+	httpResponder = (opts) => {
+		polled27.push(opts.url);
+		if (opts.url.endsWith("/health")) return json27(200, { ok: true, version: "0.8.1" });
+		if (opts.url.endsWith("/api/status")) return json27(200, status27);
+		if (opts.url.endsWith("/api/gpus")) return json27(200, { gpus: [
+			{ index: 0, name: "NVIDIA RTX", mem_total_mb: 12288, mem_used_mb: 5619, util_percent: 0, temp_c: 40 },
+			{ index: 1, name: "NVIDIA RTX", mem_total_mb: 12288, mem_used_mb: 0, util_percent: 0, temp_c: 35 },
+		], count: 2 });
+		if (opts.url.endsWith("/api/jobs")) return json27(200, { jobs: [] });
+		if (opts.url.endsWith("/api/queue")) return json27(200, { queues: [] });
+		for (const port of [8188]) {
+			if (opts.url.startsWith(`http://10.0.0.9:${port}/`)) {
+				return opts.url.endsWith("/system_stats")
+					? json27(200, { system: {}, devices: [{ name: "cuda", type: "cuda", vram_total: 12 * 1024 * 1024, vram_free: 4 * 1024 * 1024 }] })
+					: json27(200, { queue_running: [], queue_pending: [] });
+			}
+		}
+		return null; // the foreign 8189 port is NEVER polled
+	};
+	StubNotice.reset();
+	app.workspace.detachLeavesOfType("arthur-dashboard");
+	let view27;
+	ok = true;
+	try {
+		await plugin.activateView();
+		view27 = app.workspace.getLeavesOfType("arthur-dashboard")[0]?.view;
+		await view27.refreshData();
+	} catch (err) {
+		ok = false;
+		console.error(`    unmanaged-view attach threw: ${err?.stack ?? err}`);
+	}
+	assert(ok, "unmanaged-view attach + refresh did not throw");
+	const rowByKey27 = (instId) => view27.gridEl.children
+		.filter((c) => c.hasClass?.("arthur-grid-row"))
+		.find((c) => c.attributes.get("data-row-key") === `inst:${instId}`) ?? null;
+
+	// (a) live-unmanaged row: amber badge, disabled lifecycle, monitoring works.
+	const unmanagedRow27 = rowByKey27("comfy-0");
+	assert(!!unmanagedRow27, "(a) the live-unmanaged 8188 instance renders a grid row (the v0.7.1 invisibility bug)");
+	assert(findByClass(unmanagedRow27, "arthur-badge--unmanaged").length === 1
+		&& findByClass(unmanagedRow27, "arthur-badge--unmanaged")[0].textContent === "live · unmanaged",
+		"(a) the row carries the amber 'live · unmanaged' badge");
+	assert(findByClass(unmanagedRow27, "arthur-grid-warn").length === 0,
+		"(a) no foreign warning chip on the live-but-own row");
+	assert(view27.panels.get(8188) != null && view27.wss.has(8188),
+		"(a) generation panel + WS attach to the live-unmanaged port (monitoring works immediately)");
+	const start27 = findButton(unmanagedRow27, "Start");
+	assert(!!start27 && start27.disabled === true,
+		"(a) the unmanaged row's Start button renders DISABLED");
+	assert((start27?.getAttribute("title") ?? "").includes("started outside the agent — restart via systemd/launch script to manage it"),
+		"(a) disabled buttons carry the adoption tooltip");
+	assert(findButtons(unmanagedRow27, "Stop").length === 0 && findButtons(unmanagedRow27, "Restart").length === 0,
+		"(a) no enabled stop/restart controls on the unmanaged row");
+
+	// (b) foreign row: down badge + warning chip, never polled, buttons disabled.
+	const foreignRow27 = rowByKey27("comfy-1");
+	assert(!!foreignRow27, "(b) the foreign_occupied 8189 instance renders its down row (the 8189 squatter)");
+	const warnChip27 = findByClass(foreignRow27, "arthur-grid-warn")[0];
+	assert(warnChip27 != null && warnChip27.textContent.includes("port held by another process (foreign install)"),
+		"(b) the down row carries the foreign warning chip");
+	assert(findByClass(foreignRow27, "arthur-badge--down").length === 1,
+		"(b) the foreign row keeps its 'down' badge");
+	assert(view27.panels.get(8189) === undefined && view27.wss.has(8189) === false,
+		"(b) the foreign port gets no generation panel and no WS socket");
+	assert(polled27.every((u) => !u.startsWith("http://10.0.0.9:8189")),
+		"(b) the foreign 8189 port is never polled for HTTP data");
+	const fStart27 = findButton(foreignRow27, "Start");
+	assert(!!fStart27 && fStart27.disabled === true,
+		"(b) the foreign row's Start button is disabled (agent never kills foreign processes)");
+	assert(findButton(foreignRow27, "Remove") === null,
+		"(b) no Remove button on the foreign row (forget would 409 while the port answers)");
+
+	// (c) service stays ACTIVE with only live-unmanaged instances.
+	assert(view27.serviceBar?.buttons.get("comfyui")?.btn.hasClass("arthur-svc-btn--active") === true,
+		"(c) the comfyui service pill stays ACTIVE with only live-unmanaged instances");
+	assert(view27.gridNoteEl._shown !== true
+		&& !allText(view27.gridEl).includes("service stopped"),
+		"(c) no 'service stopped' note — live-unmanaged instances keep the grid alive");
+
+	httpResponder = null;
+	StubNotice.reset();
+	StubModal.reset();
+	await app.workspace.detachLeavesOfType("arthur-dashboard");
+
+	// (d) legacy ≤0.8.0 agent cross-check: no flags at all → down rows stay
+	// rendered with ENABLED Start + Remove (the pre-0.13.4 contract intact).
+	console.log("== 27d. legacy 0.8.0 fixture — down row renders enabled ==");
+	const status27d = {
+		version: "0.8.1",
+		host_uptime: 1,
+		services: [
+			{
+				id: "comfyui", name: "ComfyUI", active: true, multi_instance: true,
+				max_instances: 4, default_port: 8188, unit_template: "comfy@{i}",
+				instances: [
+					{ id: "comfy-0", service: "comfyui", name: "ComfyUI #0", port: 8188, gpu: 0, gpus: [0], up: true, uptime: 100.0 },
+					{ id: "comfy-2", service: "comfyui", name: "ComfyUI #2", port: 8190, gpu: 0, gpus: [0], up: false, uptime: null },
+				],
+			},
+			{
+				id: "aitoolkit", name: "AI Toolkit", active: true, multi_instance: false,
+				max_instances: 1, default_port: 8675, unit: "ai-toolkit.service",
+				instances: [{ id: "aitoolkit", service: "aitoolkit", name: "AI Toolkit", port: 8675, gpu: null, gpus: [], up: true, uptime: 10.0 }],
+			},
+		],
+	};
+	httpResponder = (opts) => {
+		if (opts.url.endsWith("/health")) return json27(200, { ok: true, version: "0.8.1" });
+		if (opts.url.endsWith("/api/status")) return json27(200, status27d);
+		if (opts.url.endsWith("/api/gpus")) return json27(200, { gpus: [], count: 0, error: "nvidia-smi failed" });
+		if (opts.url.endsWith("/api/jobs")) return json27(200, { jobs: [] });
+		if (opts.url.endsWith("/api/queue")) return json27(200, { queues: [] });
+		return null;
+	};
+	let view27d;
+	ok = true;
+	try {
+		await plugin.activateView();
+		view27d = app.workspace.getLeavesOfType("arthur-dashboard")[0]?.view;
+		await view27d.refreshData();
+	} catch (err) {
+		ok = false;
+		console.error(`    legacy-view attach threw: ${err?.stack ?? err}`);
+	}
+	assert(ok, "legacy-fixture view attach + refresh did not throw");
+	const rowByKey27d = (instId) => view27d.gridEl.children
+		.filter((c) => c.hasClass?.("arthur-grid-row"))
+		.find((c) => c.attributes.get("data-row-key") === `inst:${instId}`) ?? null;
+	const legacyRow27d = rowByKey27d("comfy-2");
+	assert(!!legacyRow27d, "(d) the legacy down instance still renders its row");
+	const legacyStart27d = findButton(legacyRow27d, "Start");
+	assert(!!legacyStart27d && !legacyStart27d.disabled,
+		"(d) the legacy down row's Start button is ENABLED (flagless agents keep full lifecycle)");
+	assert(findButton(legacyRow27d, "Remove") != null,
+		"(d) the legacy down row keeps its Remove button");
+
+	httpResponder = null;
+	StubNotice.reset();
+	await app.workspace.detachLeavesOfType("arthur-dashboard");
+
+	// ---- cleanup ----------------------------------------------------------
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();
@@ -3921,4 +4094,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.0-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service all clean");

@@ -50,6 +50,20 @@ API (see server/README-install.md for the full documented surface):
                  the default instance (index 0) is never forgettable)
   GET  /api/log?offset=N                        → JSONL audit tail
 
+(v0.8.1) unmanaged-instance visibility — instance summaries (GET /api/status,
+/api/services*, /api/…/instances… — everywhere instances are listed) gain
+`managed` (systemd unit active), `live` (the instance's probe_path answers
+HTTP 200 on its port AND — when the service config declares `install_dir` —
+the LISTENING process provably runs from that tree; a DIFFERENT install
+squatting on the port answers `foreign_occupied: true` with live false),
+while `up := managed AND live` stays the backward-compat lifecycle truth.
+The top-level service `active` := any instance managed OR live. The roster
+also lists template indexes whose port is OCCUPIED though never spawned
+(external manual starts, foreign squatters). Lifecycle endpoints still target
+the systemd UNIT ONLY — stop/restart on an unmanaged-live instance is a
+no-op / bounded 502 'port still in use'; the agent NEVER kills an external
+or foreign process.
+
 (v0.7.0, Bearer-gated like all /api/*) pi session aggregation: the pi-sync
 mirror repo (~/.pi/agent/pi-sync/repo, env ARTHUR_PI_REPO override) is read
 for per-device pi session status — NOT a systemd-backed service, never in the
@@ -98,7 +112,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-AGENT_VERSION = "0.8.0"
+AGENT_VERSION = "0.8.1"
 
 CONFIG_PATH = os.environ.get("ARTHUR_AGENT_CONFIG", "/etc/arthur-agent/config.json")
 TOKEN_PATH = os.environ.get("ARTHUR_AGENT_TOKEN_FILE", "/etc/arthur-agent/token")
@@ -107,6 +121,7 @@ STATE_PATH = os.environ.get("ARTHUR_AGENT_STATE", "/var/lib/arthur-agent/instanc
 
 HTTP_TIMEOUT = 5          # urllib probe timeout (s)
 CMD_TIMEOUT = 30          # systemctl subprocess timeout (s)
+PROBE_CACHE_TTL = 10      # seconds a port-probe / ownership verdict is trusted
 PORT_COMEUP_WAIT = 90     # max wait for a freshly started instance to serve (s)
 PORT_FREE_WAIT = 30       # max wait for the port to be free after stop (s)
 GPU_CACHE_TTL = 60        # seconds to trust a NUM_GPU detection
@@ -122,6 +137,13 @@ _gpu_lock = threading.Lock()
 _config = None
 _token = None
 _gpu_cache = {"ts": 0.0, "n": None}
+# v0.8.1: liveness + port-ownership caches (keyed (port, probe_path) →
+# (monotonic ts, value)). Summaries are polled every few seconds by the
+# plugin; a fresh HTTP probe per instance per poll would hammer the local
+# ComfyUI installs — 10s-trusted verdicts instead.
+_probe_cache = {}      # (port, path) → (ts, ok bool)
+_own_cache = {}        # (port, path) → (ts, "own" | "foreign" | "unknown")
+_probe_lock = threading.Lock()
 
 
 # --------------------------------------------------------------------------
@@ -142,6 +164,13 @@ def load_config():
           "unit": "ai-toolkit.service", # single only
           "instance_prefix": "comfy",   # multi only; instance id "<prefix>-<i>"
           "probe_path": "/system_stats", # optional, HTTP liveness path (def /)
+          "install_dir": "/mnt/work/00-TOOLS/comfyui",
+          # optional (v0.8.1): absolute on-disk install root of the managed
+          # application. When set, a probe answer on the instance's port only
+          # counts as the instance's own `live` when the LISTENING process is
+          # provably running from this tree (cwd/argv vs /proc) — a DIFFERENT
+          # install squatting on the port is reported as foreign_occupied
+          # instead (live stays false). Absent → any probe answer counts.
 
           # multi only, optional (v0.5.2): named instances BEYOND the spawned
           # range. Ride their own units, are listed like spawned instances
@@ -199,6 +228,14 @@ def load_config():
         if not isinstance(probe, str) or not PROBE_RE.match(probe):
             raise ValueError("bad probe_path for service %r" % svc_id)
         out["probe_path"] = probe
+        # v0.8.1: optional install_dir — the ownership anchor for live probes.
+        install_dir = spec.get("install_dir")
+        if install_dir is not None:
+            if not isinstance(install_dir, str) or not install_dir.startswith("/"):
+                raise ValueError("install_dir for service %r must be an absolute "
+                                 "path" % svc_id)
+            install_dir = os.path.realpath(install_dir)
+        out["install_dir"] = install_dir
         if multi:
             unit_tpl = str(spec["unit_template"])
             prefix = str(spec.get("instance_prefix", svc_id))
@@ -550,6 +587,130 @@ def wait_port_free(port, timeout=PORT_FREE_WAIT):
 
 
 # --------------------------------------------------------------------------
+# liveness + port-ownership (v0.8.1)
+# --------------------------------------------------------------------------
+
+def probe_port_cached(port, path):
+    """probe_port() with a ~10 s per-(port, path) cache: the plugin polls
+    /api/status every few seconds and the instance roster probes up to
+    max_instances ports — fresh HTTP probes per poll would hammer the local
+    installs they measure. The first caller after a cache miss pays it."""
+    now = time.monotonic()
+    cached = _cache_lookup(_probe_cache, (port, path), now)
+    if cached is not None:
+        return cached
+    ok = probe_port(port, path)
+    _cache_store(_probe_cache, (port, path), now, ok)
+    return ok
+
+
+def _cache_lookup(cache, key, now):
+    with _probe_lock:
+        hit = cache.get(key)
+        if hit and now - hit[0] < PROBE_CACHE_TTL:
+            return hit[1]
+    return None
+
+
+def _cache_store(cache, key, now, value):
+    with _probe_lock:
+        cache[key] = (now, value)
+
+
+def _argv_owned_by(port, path, install_dir):
+    """True when the probe body's argv (system.argv of /system_stats) carries
+    an ABSOLUTE element resolving under install_dir. Relative elements
+    ('main.py' — the common invocation) cannot be resolved alone and are
+    ignored. None → inconclusive (body unparseable or no argv at all)."""
+    try:
+        with urllib.request.urlopen(
+            "http://127.0.0.1:%d%s" % (port, path), timeout=HTTP_TIMEOUT
+        ) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+        argv = (data.get("system") or {}).get("argv")
+    except Exception:
+        return None
+    if not isinstance(argv, list):
+        return None
+    for element in argv:
+        if isinstance(element, str) and element.startswith("/"):
+            resolved = os.path.realpath(element)
+            if resolved == install_dir or resolved.startswith(install_dir + "/"):
+                return True
+    return None
+
+
+def _port_owner_pid(port):
+    """PID of the LISTENING process on port via `ss -ltnp` (the agent runs as
+    root, so every socket owner is visible), or None."""
+    rc, out, _err = run_cmd(["ss", "-H", "-ltnp", "sport = :%d" % port],
+                            timeout=10)
+    if rc != 0:
+        return None
+    m = re.search(r"\bpid=(\d+)", out)
+    return int(m.group(1)) if m else None
+
+
+def _pid_owned_by(pid, install_dir):
+    """True when /proc/<pid> proves the process runs from install_dir: its
+    cwd or exe (realpath) is the dir or sits under it, or one of its absolute
+    cmdline elements does. Read failures are inconclusive — never owned."""
+    base = "/proc/%d" % pid
+    for candidate in ("cwd", "exe"):
+        try:
+            resolved = os.path.realpath(os.path.join(base, candidate))
+        except OSError:
+            continue
+        if not resolved.startswith("/"):
+            continue
+        # an unreadable cwd/exe link realpaths to its own /proc… path — skip
+        if resolved.startswith("/proc/"):
+            continue
+        if resolved == install_dir or resolved.startswith(install_dir + "/"):
+            return True
+    try:
+        with open(base + "/cmdline", "rb") as f:
+            parts = f.read().split(b"\0")
+    except OSError:
+        return False
+    for raw in parts:
+        element = raw.decode("utf-8", "replace")
+        if not element.startswith("/"):
+            continue
+        resolved = os.path.realpath(element)
+        if resolved == install_dir or resolved.startswith(install_dir + "/"):
+            return True
+    return False
+
+
+def _own_verdict(port, path, install_dir):
+    """('own' | 'foreign' | 'unknown') — does the process currently answering
+    on port belong to the configured install_dir? Order: the probe body's
+    absolute argv (cheap), then /proc provenance of the listening PID found
+    via ss (authoritative). Inconclusive evidence at every layer (unparseable
+    body, ss missing, /proc unreadable) → 'unknown': the summary treats that
+    as the instance's own (v0.8.0 live semantics) rather than a false foreign
+    accusation — foreign installs like the 8189 squatter ARE detectable
+    (their cwd differs from the managed install tree)."""
+    if _argv_owned_by(port, path, install_dir) is True:
+        return "own"
+    pid = _port_owner_pid(port)
+    if pid is not None:
+        return "own" if _pid_owned_by(pid, install_dir) else "foreign"
+    return "unknown"
+
+
+def _own_verdict_cached(port, path, install_dir):
+    now = time.monotonic()
+    cached = _cache_lookup(_own_cache, (port, path), now)
+    if cached is not None:
+        return cached
+    verdict = _own_verdict(port, path, install_dir)
+    _cache_store(_own_cache, (port, path), now, verdict)
+    return verdict
+
+
+# --------------------------------------------------------------------------
 # per-index GPU drop-ins (v0.6.0)
 # --------------------------------------------------------------------------
 
@@ -744,11 +905,22 @@ def active_indexes(svc):
 def service_instances(svc):
     """Instances worth listing: the default (index 0) plus every active unit
     plus every previously spawned index (state file; shows stopped ones),
-    plus config-declared extra instances (v0.5.2) at the end."""
+    plus config-declared extra instances (v0.5.2) at the end.
+    v0.8.1: template indexes whose port is OCCUPIED (the raw probe answers)
+    also list even when never spawned and the unit is dead — an externally
+    started process (manual systemd start, launch script) must surface as a
+    live-but-unmanaged row, and a FOREIGN install squatting on the port (the
+    8189 case) must surface as a down row marked foreign_occupied instead of
+    rendering the service invisibly down."""
     if not svc["multi_instance"]:
         return [make_instance(svc, 0)]
     known = set(load_state().get(svc["id"], {}))
     idxs = sorted({0} | set(active_indexes(svc)) | known)
+    for i in range(svc["max_instances"]):
+        if i not in idxs and probe_port_cached(svc["default_port"] + i,
+                                               svc["probe_path"]):
+            idxs.append(i)
+    idxs = sorted(idxs)
     return [make_instance(svc, i) for i in idxs] + \
            [make_instance(svc, extra=e)
             for e in svc.get("extra_instances", [])]
@@ -758,9 +930,50 @@ def default_instance(svc):
     return make_instance(svc, 0)
 
 
+def _liveness(inst):
+    """(raw_ok, live, foreign_occupied, managed) for one instance, with the
+    probe + ownership verdicts cached (~10 s).
+      raw_ok            the instance's port answers the service probe path
+      foreign_occupied  raw_ok but the LISTENING process is NOT from the
+                        service's configured install_dir (or another process
+                        squatting evidence) — v0.8.1
+      live              the instance actually serves ITS OWN install:
+                        raw_ok and NOT foreign (services without install_dir:
+                        raw_ok)
+      managed           the systemd unit is active
+    """
+    svc = inst["spec"]
+    path = svc["probe_path"]
+    raw_ok = probe_port_cached(inst["port"], path)
+    if not raw_ok:
+        return False, False, False, unit_is_active(inst["unit"])
+    install_dir = svc.get("install_dir")
+    if install_dir:
+        verdict = _own_verdict_cached(inst["port"], path, install_dir)
+        foreign = verdict == "foreign"
+        if verdict == "unknown":
+            # both provenance signals unavailable → count the answer (v0.8.0
+            # semantics) rather than accuse a possibly-own process
+            return True, True, False, unit_is_active(inst["unit"])
+        return True, not foreign, foreign, unit_is_active(inst["unit"])
+    return True, True, False, unit_is_active(inst["unit"])
+
+
 def instance_summary(inst):
-    unit_up = unit_is_active(inst["unit"])
-    live = probe_port(inst["port"], inst["spec"]["probe_path"])
+    """v0.8.1 fields alongside the classic ones:
+      up                backward-compat lifecycle truth: managed AND live
+                        (unit active AND the port serves the instance's own
+                        install) — unchanged math from v0.8.0 for managed
+                        installs
+      managed           the systemd unit is active (even when the port is
+                        dead)
+      live              the port serves the instance's own install (an
+                        externally started OWN install counts: the user's
+                        manual ComfyUI on 8188 is live-but-unmanaged)
+      foreign_occupied  true when the port answers but belongs to a DIFFERENT
+                        install (the 8189 squatter) — live stays false
+    """
+    raw_ok, live, foreign, managed = _liveness(inst)
     gpus = inst["gpus"]
     return {
         "id": inst["id"],
@@ -769,15 +982,17 @@ def instance_summary(inst):
         "port": inst["port"],
         "gpu": gpus[0] if len(gpus) == 1 else None,
         "gpus": gpus,
-        "up": bool(unit_up and live),
-        "uptime": unit_uptime(inst["unit"]) if unit_up else None,
+        "managed": managed,
+        "live": live,
+        "foreign_occupied": foreign,
+        "up": bool(managed and live),
+        "uptime": unit_uptime(inst["unit"]) if managed else None,
     }
 
 
 def instance_detail(inst):
     d = instance_summary(inst)
     d["unit"] = inst["unit"]
-    d["live"] = probe_port(inst["port"], inst["spec"]["probe_path"])
     return d
 
 
@@ -787,7 +1002,10 @@ def service_summary(svc, detailed=False):
     out = {
         "id": svc["id"],
         "name": svc["name"],
-        "active": any(b["up"] for b in bodies),
+        # v0.8.1: active when ANY instance is managed-active OR live — an
+        # externally started own install (manual systemd, launch script) keeps
+        # the service active/green even though no unit is running.
+        "active": any(b["managed"] or b["live"] for b in bodies),
         "multi_instance": svc["multi_instance"],
         "max_instances": svc["max_instances"],
         "default_port": svc["default_port"],
@@ -830,6 +1048,12 @@ def action_start_instance(inst, ip):
 
 
 def action_stop_instance(inst, force, ip):
+    """Graceful stop via the systemd unit.
+    v0.8.1 safety: an UNMANAGED-LIVE instance (port serving, unit inactive —
+    the user started ComfyUI outside the agent) still stops THE UNIT ONLY:
+    `systemctl stop` on an inactive unit is a no-op and the manual/foreign
+    process on the port is NEVER killed — the instance stays live and the
+    response just records the unit state."""
     svc = inst["spec"]
     running = queue_running_count(inst["port"]) \
         if probe_port(inst["port"], svc["probe_path"]) else None
@@ -851,6 +1075,12 @@ def action_stop_instance(inst, force, ip):
 
 
 def action_restart_instance(inst, force, ip):
+    """Bounded unit-level restart (stop → wait-port-free → start).
+    v0.8.1 safety: for an UNMANAGED-LIVE instance the unit stop is a no-op,
+    the port stays occupied by the process the agent does not own, and the
+    port-free wait ends in a bounded 502 'port still in use' — a manual or
+    foreign process is NEVER killed; restart it via systemd/the launch
+    script instead."""
     svc = inst["spec"]
     if probe_port(inst["port"], svc["probe_path"]):
         running = queue_running_count(inst["port"])

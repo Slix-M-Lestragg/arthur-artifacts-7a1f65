@@ -8,6 +8,7 @@
       "max_instances": 4,
       "multi_instance": true,
       "probe_path": "/system_stats",
+      "install_dir": "/mnt/work/00-TOOLS/comfyui",
       "extra_instances": [
         {
           "id": "comfy-dual",

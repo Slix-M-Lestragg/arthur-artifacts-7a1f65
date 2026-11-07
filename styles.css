@@ -1171,6 +1171,28 @@
 	background: var(--background-modifier-border);
 }
 
+/* v0.13.4: 'live · unmanaged' badge — externally started own install
+   (agent v0.8.1 reports managed:false / live:true); amber warning tone,
+   no error red — the instance is healthy, just outside the agent's control. */
+.arthur-badge--unmanaged {
+	color: var(--text-warning);
+	background: color-mix(in srgb, var(--background-modifier-warning) 55%, var(--background-modifier-border));
+}
+
+/* v0.13.4: foreign_occupied warning chip on a down row — the port answers
+   but is held by another (foreign) install. */
+.arthur-grid-warn {
+	display: inline-block;
+	padding: 0 0.45em;
+	border-radius: var(--radius-s);
+	font-size: var(--font-ui-smaller);
+	font-weight: var(--font-semibold);
+	line-height: 1.5;
+	color: var(--text-warning);
+	background: var(--background-modifier-warning);
+	cursor: help;
+}
+
 /* OPTIMISTIC SPAWN STATE: still-booting or pending instance rows — muted,
    pulsing card + soft accent badge; timeout → dashed red error variant */
 .arthur-grid-row--spawning {

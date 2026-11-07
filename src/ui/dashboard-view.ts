@@ -210,6 +210,12 @@ interface GridRowSpec {
 	gpus: number[];
 	state: "running" | "idle" | "down" | "spawning" | "failed";
 	badge: string;
+	/** Badge class override — default `arthur-badge--${state}`; the amber
+	 *  'live · unmanaged' badge (agent v0.8.1) sets this. */
+	badgeCls?: string | null;
+	/** Optional warning chip text rendered before the badge on the row head
+	 *  (agent v0.8.1: foreign_occupied rows — 'port held by another process'). */
+	warn?: string | null;
 	meta: string;
 	/** Run duration in seconds (running rows; sort input + display). */
 	durationSec: number | null;
@@ -227,6 +233,10 @@ interface GridRowSpec {
 	// lifecycle wiring (instance rows only)
 	svcId: string | null;
 	instId: string | null;
+	/** Agent v0.8.1: false when the instance is externally started (live but
+	 *  unmanaged, or a foreign port squatter) — lifecycle buttons render
+	 *  disabled with an adoption tooltip. Undefined → agent-managed. */
+	managed?: boolean;
 	/** True when this is the agent's default instance (index-0 of a template
 	 *  service / the single-instance service itself) — the agent refuses to
 	 *  forget it (409), so its down rows hide the Remove button. */
@@ -748,8 +758,11 @@ export class ArthurDashboardView extends ItemView {
 	private desiredPorts(): DesiredPort[] {
 		const comfy = this.agentDetail.status?.services.find((s) => s.id === "comfyui");
 		if (this.agentDetail.statusOk === true && comfy) {
+			// v0.13.4 (agent v0.8.1): LIVE instances attach too — an externally
+			// started own install (managed:false, live:true) gets its generation
+			// panel + WS exactly like a managed one; only dead ports stay out.
 			return comfy.instances
-				.filter((i) => i.up === true)
+				.filter((i) => i.up === true || i.live === true)
 				.map((i) => ({
 					port: i.port,
 					label: `${i.id} · :${i.port}`,
@@ -2000,26 +2013,43 @@ export class ArthurDashboardView extends ItemView {
 		};
 
 		for (const inst of comfy?.instances ?? []) {
-			// Service-inactive grid (device report v0.7.0): when the agent reports
-			// the comfyui service INACTIVE (stop-all), its instance rows are
-			// hidden from the grid entirely — the greyed service-bar pill already
-			// represents the stopped service, and the leftover default remains
-			// listed (up:false) but must not render. A merely DOWN instance while
-			// the service is still active keeps its down row (Start + Remove).
+			// v0.13.4 visibility (agent v0.8.1): an instance row exists when it is
+			// MANAGED (even down), LIVE (externally started own install — the
+			// user's manual ComfyUI), or its port is held by a FOREIGN install
+			// (warning chip). The v0.7.0 rule (hide everything when the service is
+			// inactive) survives for the all-invisible case: a stopped service
+			// with nothing live/foreign still shows no rows. ≤ 0.8.0 agents (no
+			// managed/live fields) behave exactly as before.
+			const managedFlag = inst.managed; // boolean | undefined (≤ 0.8.0 agents)
+			const live = inst.live === true;
+			const foreign = inst.foreign_occupied === true;
 			const serviceActive = comfy?.active !== false;
+			// Visibility: agent v0.8.1+ reports the explicit flags → managed (even
+			// port-down), live (external own install) or foreign (squatter chip);
+			// ≤ 0.8.0 agents report no flags — listed instances render (legacy).
+			const visible = managedFlag !== undefined
+				? (managedFlag === true || live || foreign)
+				: true;
 			// Non-GPU instances (e.g. the aitoolkit UI service) are not grid
 			// rows — they live in the service bar.
 			const gpuList = inst.gpus?.length ? inst.gpus : inst.gpu != null ? [inst.gpu] : [];
-			if (!serviceActive || gpuList.length === 0) continue;
+			if (!serviceActive || !visible || gpuList.length === 0) continue;
 			const idx = this.activePorts.findIndex((p) => p.port === inst.port);
 			const detail = idx >= 0 ? this.comfyDetail[idx] ?? null : null;
+			// 'serving': the port answers with the instance's OWN install
+			// (managed+up, or live-unmanaged). Foreign squatters are NOT serving
+			// — their port data belongs to another install and is never polled.
+			const serving = live || inst.up === true;
+			// Legacy fallback: ≤ 0.8.0 agents only ever answered with 'up' — up
+			// rows were managed truth; a false flag never disables lifecycle.
+			const managed = managedFlag ?? inst.up === true;
 			const runningCount =
-				inst.up && Array.isArray(detail?.queue?.queue_running)
+				serving && Array.isArray(detail?.queue?.queue_running)
 					? detail!.queue!.queue_running.length
 					: 0;
 			const running = runningCount > 0;
 			const pendingCount =
-				inst.up && Array.isArray(detail?.queue?.queue_pending)
+				serving && Array.isArray(detail?.queue?.queue_pending)
 					? detail!.queue!.queue_pending.length
 					: 0;
 			const key = `run:${inst.port}`;
@@ -2030,14 +2060,40 @@ export class ArthurDashboardView extends ItemView {
 			// Boot grace: an instance the plugin itself started/spawned within the
 			// last 45s reports up:false while ComfyUI boots — render 'spawning…'
 			// (muted pulsing row) instead of the alarmist 'down'.
-			const booting = !inst.up && this.pluginBootGrace(inst) !== null;
+			const booting = !serving && !foreign && this.pluginBootGrace(inst) !== null;
+			// State labeling (v0.13.4): managed+live → running/idle as before;
+			// live+unmanaged → running/idle with the amber 'live · unmanaged'
+			// badge (adoption — lifecycle buttons render disabled); dead but
+			// managed → down; foreign squatter → down + warning chip.
+			let state: GridRowSpec["state"];
+			let badge: string;
+			let badgeCls: string | null = null;
+			let warn: string | null = null;
+			if (foreign && !serving) {
+				state = "down";
+				badge = "down";
+				warn = "port held by another process (foreign install)";
+			} else if (!serving) {
+				state = booting ? "spawning" : "down";
+				badge = booting ? "spawning…" : "down";
+			} else {
+				state = running ? "running" : "idle";
+				if (!managed) {
+					badge = "live · unmanaged";
+					badgeCls = "arthur-badge--unmanaged";
+				} else {
+					badge = running ? "running" : "idle";
+				}
+			}
 			rows.push({
 				key: `inst:${inst.id}`,
 				kind: "instance",
 				title: inst.name ?? inst.id,
 				gpus: gpuList,
-				state: !inst.up ? (booting ? "spawning" : "down") : running ? "running" : "idle",
-				badge: !inst.up ? (booting ? "spawning…" : "down") : running ? "running" : "idle",
+				state,
+				badge,
+				badgeCls,
+				warn,
 				meta: `:${inst.port} · GPU ${gpuList.join(",")}`,
 				durationSec: effective,
 				prompt: running
@@ -2061,6 +2117,7 @@ export class ArthurDashboardView extends ItemView {
 				// the Remove button. Detection signal: the SERVICE model's
 				// default_port (the default instance is always spawned on it).
 				isDefault: comfy != null && inst.port === comfy.default_port,
+				managed: inst.managed,
 				port: inst.port,
 				unit: inst.unit ?? null,
 			});
@@ -2342,7 +2399,19 @@ export class ArthurDashboardView extends ItemView {
 								attrs: { "aria-label": "run duration" },
 						  })]
 						: []),
-					el("span", { cls: `arthur-badge arthur-badge--${spec.state}`, text: spec.badge }),
+					...(spec.warn
+						? [el("span", {
+								cls: "arthur-grid-warn",
+								text: spec.warn,
+								attrs: { "aria-label": spec.warn, title: spec.warn },
+						  })]
+						: []),
+					el("span", {
+						cls: spec.badgeCls
+							? `arthur-badge ${spec.badgeCls}`
+							: `arthur-badge arthur-badge--${spec.state}`,
+						text: spec.badge,
+					}),
 				],
 			}),
 		);
@@ -2675,6 +2744,23 @@ export class ArthurDashboardView extends ItemView {
 	 *  the existing confirm/force (409) escalation contract. */
 	private gridLifecycleButtons(spec: GridRowSpec): HTMLElement {
 		const instName = spec.title;
+		// v0.13.4 (agent v0.8.1): UNMANAGED instances — live-but-external starts
+		// and foreign port squatters — render every lifecycle button DISABLED
+		// with an adoption tooltip. The agent's own lifecycle endpoints only
+		// target systemd units: acting here would be a no-op (stop) or a 502
+		// (restart: 'port still in use') at best — and the process is never the
+		// agent's to kill. Adopt it by stopping it the way it was started
+		// (systemd / launch script), then the agent manages it again.
+		if (spec.managed === false) {
+			const tip =
+				"started outside the agent — restart via systemd/launch script to manage it";
+			const btnStart = newBtn("Start");
+			btnStart.addClass("arthur-btn--tiny");
+			btnStart.disabled = true;
+			btnStart.setAttribute("title", tip);
+			btnStart.setAttribute("aria-label", tip);
+			return el("div", { cls: "arthur-btn-row", children: [btnStart] });
+		}
 		const op = (action: "start" | "stop" | "restart") =>
 			void this.instanceLifecycle(spec.svcId!, spec.instId!, `${action} ${instName}`, action);
 		const btnStart = newBtn("Start");
@@ -3841,11 +3927,13 @@ export class ArthurDashboardView extends ItemView {
 			list.push(occupant);
 			occupants.set(gpu, list);
 		};
-		// (a) up instances only — a stopped instance the agent still lists must
-		// never make its GPU look busy.
+		// (a) serving instances only — a stopped instance the agent still lists
+		// must never make its GPU look busy. v0.13.4 (agent v0.8.1): LIVE
+		// instances (externally started own installs) DO occupy their GPUs, so
+		// they count; foreign port squatters (live:false) do not.
 		for (const s of status.services) {
 			for (const inst of s.instances) {
-				if (!inst.up) continue;
+				if (inst.up !== true && inst.live !== true) continue;
 				for (const g of inst.gpus?.length ? inst.gpus : inst.gpu != null ? [inst.gpu] : []) {
 					addOccupant(g, {
 						label: `${inst.id} (${inst.name ?? s.name ?? s.id}, :${inst.port})`,

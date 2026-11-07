@@ -2,8 +2,9 @@
 
 `server/` holds the pieces that run on the arthur home server (the machine
 hosting ComfyUI + ai-toolkit), not the Obsidian plugin itself. The agent is
-at **v0.8.0** (GPU-aware spawning + pi session aggregation + the pi device
-registry / SSH dir listing / session spawn endpoints):
+at **v0.8.1** (GPU-aware spawning + pi session aggregation + the pi device
+registry / SSH dir listing / session spawn endpoints + unmanaged-instance
+visibility):
 
 ```json
 {"known": {"comfyui": {"0": null, "2": [1], "3": [0, 1]}}}
@@ -145,7 +146,7 @@ sudo install -m 644 comfy@.service comfy-dual.service arthur-agent.service \
 sudo systemctl daemon-reload
 sudo systemctl enable comfy-dual.service   # enabled but NOT started
 sudo systemctl restart arthur-agent
-curl -s http://127.0.0.1:8766/health   # → {"ok": true, "version": "0.8.0"}
+curl -s http://127.0.0.1:8766/health   # → {"ok": true, "version": "0.8.1"}
 ```
 
 Token lives in `/etc/arthur-agent/token` (root 0600) and `/etc/arthur-agent/env`
@@ -171,6 +172,7 @@ with fatal-config-error strictness like the services registry.
       "max_instances": 4,
       "multi_instance": true,
       "probe_path": "/system_stats",
+      "install_dir": "/mnt/work/00-TOOLS/comfyui",
       "extra_instances": [
         {"id": "comfy-dual", "port": 8190, "gpus": [0, 1],
          "unit": "comfy-dual.service"}
@@ -205,7 +207,39 @@ with fatal-config-error strictness like the services registry.
 
 ---
 
-## API surface (v0.8.0; plugin code targets exactly this)
+## Unmanaged-instance visibility (v0.8.1)
+
+Instance summaries (`/api/status`, `/api/services*`, `/api/services/{svc}/
+instances*` — everywhere instances appear) report THREE orthogonal booleans
+next to the classic `up`:
+
+- `managed` — the systemd unit is active (even when the port is dead).
+- `live` — the instance's `probe_path` answers HTTP 200 on its port AND, when
+  the service config declares `install_dir`, the process listening on the
+  port provably runs from that tree (checked via `/system_stats` argv, then
+  `ss -ltnp` PID → `/proc/<pid>/cwd`|`exe`|absolute cmdline, verdicts cached
+  ~10 s per port). An externally started OWN install (manual systemd start,
+  launch script) is **live but unmanaged** — exactly the case the plugin must
+  still show.
+- `foreign_occupied` — the port ANSWERS but the listener is a DIFFERENT
+  install (cwd differs). `live` stays `false`; the plugin renders the down row
+  with a 'port held by another process' warning chip.
+- `up` — backward-compat lifecycle truth, unchanged math: `managed AND live`.
+
+The top-level service `active` := any instance `managed` OR `live`, so a
+service whose instances are all externally started stays green/active.
+The instance roster additionally lists template indexes whose port is
+OCCUPIED though never spawned (external starts and foreign squatters surface
+instead of rendering the service invisibly down).
+
+**Lifecycle safety:** start/stop/restart still target the systemd UNIT ONLY.
+Stop on an unmanaged-live instance is a no-op (unit already inactive — the
+external process keeps serving); restart ends with a bounded 502 'port still
+in use'. The agent NEVER kills a foreign or manual process. `foreign_occupied`
+rows cannot be forgotten either (the forget endpoint 409s while the port
+answers).
+
+## API surface (v0.8.1; plugin code targets exactly this)
 
 `GET /health` is unauthenticated. **Everything under `/api/` requires
 `Authorization: Bearer <token>`.** All responses are JSON; errors are always
