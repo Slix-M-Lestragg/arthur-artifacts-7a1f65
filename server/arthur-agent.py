@@ -1083,6 +1083,15 @@ PI_SESSIONS_SNDBOX_RE = re.compile(r"^/home/[^/]+/\.pi/agent/sessions/")
 SSH_BATCH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=6",
                   "-o", "StrictHostKeyChecking=accept-new"]
 SSH_TIMEOUT = 20         # every remote ssh subprocess timeout (s)
+# v0.8.1: ssh liveness probing — a stale pi-sync feed alone no longer blocks
+# dirs/spawn on an SSH-reachable device ('online' in the registry stays the
+# feed-freshness signal for the UI; 'reachable' gates dirs/spawn).
+SSH_PROBE_TTL = 60       # cached reachable verdict per ssh target (s)
+SSH_PROBE_TIMEOUT = 10   # whole-probe subprocess timeout (connect is 4 s)
+SSH_PROBE_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=4",
+                  "-o", "StrictHostKeyChecking=accept-new"]
+# ssh target → (monotonic timestamp of the last probe, reachable bool)
+_pi_ssh_probe_cache = {}
 SSH_TARGET_RE = re.compile(r"^[A-Za-z0-9._@-]{1,253}$")  # user@host token only
 PI_LOGIN_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 PI_SPAWN_PREFIX = "pi-arthur-"      # tmux session name prefix
@@ -1299,6 +1308,39 @@ def pi_device_online(spec):
     return spec["self"] and feed_exists
 
 
+def _pi_ssh_reachable(ssh_target):
+    """Cached BatchMode ssh liveness probe for one ssh target: a bare
+    `ssh … true` (4 s connect timeout). The verdict is remembered per target
+    for SSH_PROBE_TTL s so the registry, dirs and spawn calls never hammer
+    the device with a probe per request."""
+    now = time.monotonic()
+    cached = _pi_ssh_probe_cache.get(ssh_target)
+    if cached and now - cached[0] < SSH_PROBE_TTL:
+        return cached[1]
+    rc, _out, _err = run_cmd(["ssh"] + SSH_PROBE_OPTS + [ssh_target, "true"],
+                             timeout=SSH_PROBE_TIMEOUT)
+    ok = rc == 0
+    _pi_ssh_probe_cache[ssh_target] = (now, ok)
+    return ok
+
+
+def pi_device_reachable(spec):
+    """Usable-for-dirs/spawn: feed-fresh (online) OR the agent's own host
+    (local listing/spawn needs no feed) OR — remote devices — a quick
+    BatchMode ssh probe succeeds. 'online' in the registry keeps the
+    feed-freshness semantics (informational UI state); this is the gate
+    dirs/spawn enforce, so a device with a stale feed but working ssh still
+    serves its directories and accepts session spawns."""
+    if pi_device_online(spec):
+        return True
+    if spec["self"]:
+        return True
+    ssh = spec["ssh"]
+    if not ssh:
+        return False
+    return _pi_ssh_reachable(ssh)
+
+
 def pi_devices_registry():
     """GET /api/pi/devices body: the config-declared registry merged with
     live pi-sync-feed freshness. Config is the identity authority (id, self,
@@ -1327,6 +1369,7 @@ def pi_devices_registry():
             "id": dev_id,
             "hostname": hostname,
             "online": pi_device_online(spec),
+            "reachable": pi_device_reachable(spec),
             "self": spec["self"],
             "ssh": spec["ssh"],
             "sessionsActive": sessions_active,
@@ -1491,8 +1534,8 @@ def pi_spawn_session(dev_id, spec, cwd, ip):
     """(code, body) for POST /api/pi/sessions — START a pi session in `cwd`
     on one device. Existence first, then tmux-preferred spawn, then audit +
     201 (or 502 with an stderr preview)."""
-    if not pi_device_online(spec):
-        audit("pi", dev_id, "session-spawn", "refused-offline", ip)
+    if not pi_device_reachable(spec):
+        audit("pi", dev_id, "session-spawn", "refused-unreachable", ip)
         return 503, {"error": "device offline"}
     # existence on the target device (400, not 404: bad request input)
     if spec["self"]:
@@ -1804,7 +1847,7 @@ class Handler(BaseHTTPRequestHandler):
             spec = _config["pi_devices"].get(dev_id)
             if spec is None:
                 return self.respond(404, {"error": "unknown device %r" % dev_id})
-            if not pi_device_online(spec):
+            if not pi_device_reachable(spec):
                 return self.respond(503, {"error": "device offline"})
             norm, msg = pi_path_check(query.get("path", [""])[0], spec)
             if msg:

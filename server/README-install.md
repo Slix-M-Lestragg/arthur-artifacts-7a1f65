@@ -311,23 +311,29 @@ views use — the registry is *config* for identity, the *feed* for liveness.
 The registry merged with live pi-sync-feed freshness (`sessionsActive` /
 `sessionsTotal` from the feed's session data; `online` = feed `updatedAt` ≤
 5 min old **or** (`self` **and** the feed file exists — the agent's own host
-stays online even with a stale-but-present feed)):
+stays online even with a stale-but-present feed)); `reachable` (v0.8.1) adds
+the ssh-liveness verdict: feed-fresh **or** `self` **or** a quick BatchMode
+ssh probe (`ssh -o BatchMode=yes -o ConnectTimeout=4 user@host true`, cached
+per device for 60 s) succeeded.
 
 ```json
 {"devices": [
-   {"id": "Arthur", "hostname": "Arthur", "online": true, "self": true,
-    "ssh": null, "sessionsActive": 1, "sessionsTotal": 3},
+   {"id": "Arthur", "hostname": "Arthur", "online": true, "reachable": true,
+    "self": true, "ssh": null, "sessionsActive": 1, "sessionsTotal": 3},
    {"id": "mac.home", "hostname": "voyager.local", "online": false,
-    "self": false, "ssh": "benjaminmatthys@100.93.241.75",
+    "reachable": true, "self": false, "ssh": "benjaminmatthys@100.93.241.75",
     "sessionsActive": 1, "sessionsTotal": 2},
-   {"id": "ulysse", "hostname": "ulysse", "online": false, "self": false,
-    "ssh": "ulysse@100.75.249.5", "sessionsActive": 0, "sessionsTotal": 0}
+   {"id": "ulysse", "hostname": "ulysse", "online": false, "reachable": false,
+    "self": false, "ssh": "ulysse@100.75.249.5", "sessionsActive": 0,
+    "sessionsTotal": 0}
  ], "generatedAt": "…"}
 ```
 
 Devices without any feed entry (never synced — e.g. `ulysse` above) still
 list, as offline/idle (0 sessions); their `hostname` comes from the
-devices/<Device>.json info file when one exists.
+devices/<Device>.json info file when one exists. `online` stays the
+*feed-freshness* signal (the plugin's informational offline row state);
+`reachable` is what **`dirs`/`spawn` gate on**.
 
 ### GET /api/pi/devices/{device}/dirs?path=<abs>
 Subdirectory names for the plugin's directory browser: **sub**-dirs only,
@@ -342,17 +348,18 @@ Response: `{"device", "path", "dirs": ["name", …], "parent": "<abs\|null>"}`.
   prompts).
 - **Path safety**: request paths are absolute-only, `..` segments rejected,
   and must start with one of the device's config-declared prefixes →
-  otherwise **400**. Unknown device → **404**; a device whose feed is stale
-  (not `online`) → **503** `{"error": "device offline"}` (note: for remote
-  devices that means the dirs listing answers 503 while their feed is stale
-  — dirs come back once the target's pi feed refreshes, within 5 min of
-  activity). A failed remote listing → **502** with the stderr preview.
+  otherwise **400**. Unknown device → **404**; a device that is neither
+  feed-fresh nor ssh-reachable (v0.8.1: `reachable == false` — a stale feed
+  alone no longer refuses; the cached ssh probe rescues a live, ssh-open
+  device) → **503** `{"error": "device offline"}`. A failed remote listing
+  → **502** with the stderr preview.
 
 ### POST /api/pi/sessions  — `{"device": "…", "cwd": "<abs>"}`
 START a pi session in `cwd` on that device. `cwd` is validated exactly like
 the dirs paths (absolute, allowlist-prefixed, → **400** otherwise) and its
 existence is checked on the target first (`self`: `isdir`; remote: ssh
-`test -d` → **400** when missing). Not `online` → **503**.
+`test -d` → **400** when missing). Neither feed-fresh nor ssh-reachable
+(v0.8.1 `reachable`) → **503**.
 
 Spawn semantics, per target environment:
 
