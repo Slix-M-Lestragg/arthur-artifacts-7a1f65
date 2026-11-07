@@ -285,6 +285,26 @@ interface GenProgress {
 	nodeLabel: string;
 }
 
+/** One recent comfortable completion (from GET /history, ≤ 10 min old) —
+ *  renders as a muted 'completed <age> ago' card for runs submitted from
+ *  ANYWHERE (web UI / api / plugin), so an idle-again instance keeps showing
+ *  what just ran. */
+interface CompletedGen {
+	promptId: string;
+	/** Completion wall-clock (ms) — the timestamp of the terminal status
+	 *  message in /history's status.messages. */
+	finishedAtMs: number;
+	/** execution_start → terminal message duration in seconds, when both
+	 *  timestamps exist in the history entry. */
+	durationSec: number | null;
+	nodeCount: number;
+	/** up-to-4 class chain of the graph (display). */
+	classes: string[];
+	/** Submitter hint: extra_data.comfy_usage_source, mapped for display
+	 *  ('comfyui-frontend' → 'web UI'); null when absent. */
+	source: string | null;
+}
+
 /** One comfy port the generation cards are attached to. */
 interface DesiredPort {
 	port: number;
@@ -311,12 +331,22 @@ interface GenPanel {
 	pendingWrap: HTMLElement;
 	pendingLabel: HTMLElement;
 	pendingMeta: HTMLElement;
+	// completed job card (history fallback: ≤ 10 min old completions)
+	completedCard: HTMLElement;
+	completedLabel: HTMLElement;
+	completedMetaEl: HTMLElement;
+	completedStatsEl: HTMLElement;
 	// bookkeeping
+	/** Queue-derived: this port currently has a running prompt (authoritative
+	 *  for non-plugin submissions — WS progress only reaches the submitter). */
+	hasRunning: boolean;
 	progress: GenProgress | null;
 	/** node id → node definition of the running prompt (from /queue). */
 	promptGraph: Record<string, any> | null;
 	runningPromptId: string | null;
 	pendingIds: string[];
+	/** Latest in-window completion from /history (null → no card). */
+	completed: CompletedGen | null;
 	/** Live preview object URLs, newest first (ring buffer, revoked on evict). */
 	previewUrls: string[];
 }
@@ -1551,6 +1581,28 @@ export class ArthurDashboardView extends ItemView {
 
 		btnCancel.addEventListener("click", () => void this.cancelRunning(port));
 
+		// completed card — history fallback (≤ 10 min old completions): shows
+		// what just finished even when the queue is empty again, regardless of
+		// who submitted the run (web UI / api / plugin).
+		const completedLabel = el("span", { cls: "arthur-queue-label", text: p.label });
+		const completedMetaEl = el("span", { cls: "arthur-card-meta" });
+		const completedStatsEl = el("span", { cls: "arthur-card-meta" });
+		const completedCard = el("div", {
+			cls: "arthur-queue-job arthur-queue-job--completed",
+			attrs: { "data-port": String(port) },
+		});
+		completedCard.append(
+			el("div", {
+				cls: "arthur-card-head",
+				children: [
+					completedLabel,
+					completedMetaEl,
+				],
+			}),
+			completedStatsEl,
+		);
+		completedCard.hide();
+
 		this.panels.set(port, {
 			port,
 			runningCard,
@@ -1559,9 +1611,15 @@ export class ArthurDashboardView extends ItemView {
 			progressFill,
 			progressLabel,
 			btnCancel,
+			completedLabel,
 			pendingWrap,
 			pendingLabel,
 			pendingMeta,
+			completedCard,
+			completedMetaEl,
+			completedStatsEl,
+			hasRunning: false,
+			completed: null,
 			previewStrip,
 			progress: null,
 			promptGraph: null,
@@ -2815,6 +2873,23 @@ export class ArthurDashboardView extends ItemView {
 	/** Cap on the ranked-2 "recent stopped/error" training tail. */
 	private static readonly RECENT_TRAINING_CAP = 5;
 
+	/** History-fallback window: completed cards show for this long after a
+	 *  comfy generation lands in /history (device report v0.13.2: an
+	 *  externally-submitted run vanished from the queue the moment it
+	 *  finished — with nothing running, the job card went 'idle' → gone with
+	 *  zero visibility of what just ran). */
+	private static readonly COMPLETED_WINDOW_MS = 10 * 60 * 1000;
+	/** /history fetch size for the completed-card fallback (latest N). */
+	private static readonly HISTORY_FETCH = 6;
+
+	/** In-flight history fetches for the completed-card fallback (one per
+	 *  port at a time — poll ticks re-enter while the request runs). */
+	private readonly completedBusy = new Set<number>();
+	/** True while refreshCompleted's post-fetch renderQueue pass is running —
+	 *  re-entered updateGenEntry calls must not spawn further history fetches
+	 *  (breaks the refresh ↔ render ping-pong between drained ports). */
+	private completedResorting = false;
+
 	private runSortSeconds(key: string): number {
 		return this.gridRowDurations.get(key) ?? 0;
 	}
@@ -2873,6 +2948,16 @@ export class ArthurDashboardView extends ItemView {
 				panel.pendingWrap.hide();
 			}
 			if (counts.running + counts.pending === 0) setAnchor(p.port, null);
+			// completed card (history fallback) — rank 2, newest completion first,
+			// auto-expiring when the ≤ 10 min window passes (see refreshCompleted).
+			if (counts.completed) {
+				entries.push({
+					rank: 2,
+					sort: panel.completed?.finishedAtMs ?? 0,
+					seq: i,
+					nodes: [panel.completedCard],
+				});
+			}
 		});
 
 		// pi active sessions — parent job cards in the RUNNING rank of the
@@ -3013,7 +3098,7 @@ export class ArthurDashboardView extends ItemView {
 	}
 
 	private renderProgress(panel: GenPanel): void {
-		this.paintProgress(panel.progress, panel.progressFill, panel.progressLabel);
+		this.paintRunningProgress(panel);
 	}
 
 	/**
@@ -3106,11 +3191,34 @@ export class ArthurDashboardView extends ItemView {
 	private paintProgress(p: GenProgress | null, fill: HTMLElement, label: HTMLElement): void {
 		if (p && p.max > 0) {
 			fill.style.width = `${Math.min(100, Math.round((100 * p.value) / p.max))}%`;
-			label.setText(`${p.nodeLabel} ${p.value}/${p.max}`);
+			fill.removeClass("arthur-bar-fill--indeterminate");
+			label.setText(`${p.nodeLabel} ${p.value}/${p.max} · ${Math.round((100 * p.value) / p.max)}%`);
 		} else {
 			fill.style.width = "0%";
+			fill.removeClass("arthur-bar-fill--indeterminate");
 			label.setText("idle");
 		}
+	}
+
+	/** Paint the RUNNING queue card's progress widgets. The authoritative state
+	 *  is /queue (queue_running), NOT the WS: progress events reach only the
+	 *  SUBMITTER's socket (comfyui progress.py sends progress_state/executing
+	 *  with the submitting client_id — plugin-submitted runs get live step
+	 *  bars, external (web UI/api) runs get an indeterminate bar + elapsed
+	 *  timer instead of a stale 'idle' label). */
+	private paintRunningProgress(panel: GenPanel): void {
+		if (panel.progress && panel.progress.max > 0) {
+			this.paintProgress(panel.progress, panel.progressFill, panel.progressLabel);
+			return;
+		}
+		if (panel.hasRunning) {
+			panel.progressFill.addClass("arthur-bar-fill--indeterminate");
+			const start = this.runStarts.get(`run:${panel.port}`);
+			const elapsed = start != null ? (Date.now() - start) / 1000 : null;
+			panel.progressLabel.setText(elapsed != null ? `running · ${fmtDuration(elapsed)}` : "running");
+			return;
+		}
+		this.paintProgress(null, panel.progressFill, panel.progressLabel);
 	}
 
 	/** WS tick → repaint the live grid row's progress widgets without a grid
@@ -3125,18 +3233,45 @@ export class ArthurDashboardView extends ItemView {
 		);
 	}
 
+	/** Parse one /queue item tuple `[number, prompt_id, graph, extra_data?, …]`
+	 *  (index 5 is stripped server-side; extra_data is optional). extra_data
+	 *  carries the submitter hint: comfy_usage_source ('comfyui-frontend' =
+	 *  web UI) + client_id for plugin/api submissions. */
+	private parseQueueEntry(entry: unknown): {
+		pid: string | null;
+		graph: Record<string, any> | null;
+		source: string | null;
+	} {
+		if (!Array.isArray(entry)) return { pid: null, graph: null, source: null };
+		const pid = typeof entry[1] === "string" ? entry[1] : null;
+		const graph =
+			entry[2] && typeof entry[2] === "object"
+				? (entry[2] as Record<string, any>)
+				: null;
+		const rawSource =
+			entry[3] && typeof entry[3] === "object"
+				? (entry[3] as any).comfy_usage_source
+				: null;
+		const source =
+			typeof rawSource === "string" && rawSource
+				? (rawSource === "comfyui-frontend" ? "web UI" : rawSource)
+				: null;
+		return { pid, graph, source };
+	}
+
 	/**
 	 * Refresh one comfy port's cached queue cards (inline labels, running
 	 * prompt info, pending rows, cancel enablement, progress bar) against the
-	 * latest poll data, and report its running/pending counts as the sort
-	 * input for the pure job list (idle instances contribute no cards).
+	 * latest poll data, and report its running/pending/completed counts as the
+	 * sort input for the pure job list (idle instances contribute no cards —
+	 * except the ≤ 10 min history-fallback completed card).
 	 */
 	private updateGenEntry(
 		panel: GenPanel,
 		p: DesiredPort,
 		detail: ComfyPortDetail | null,
 		host: string,
-	): { running: number; pending: number } {
+	): { running: number; pending: number; completed: boolean } {
 		const running = Array.isArray(detail?.queue?.queue_running)
 			? (detail!.queue!.queue_running as unknown[])
 			: [];
@@ -3148,25 +3283,35 @@ export class ArthurDashboardView extends ItemView {
 		panel.runLabel.setText(p.label);
 
 		// running prompt info: queue entries are [exec, prompt_id, graph, extra, …]
-		const entry = (running[0] ?? null) as unknown[];
-		const pid = entry && typeof entry[1] === "string" ? entry[1] : null;
-		panel.runningPromptId = pid;
-		panel.promptGraph =
-			entry && entry[2] && typeof entry[2] === "object"
-				? (entry[2] as Record<string, any>)
-				: null;
+		const parsed = this.parseQueueEntry(running[0] ?? null);
+		const pid = panel.runningPromptId = parsed.pid;
+		panel.promptGraph = parsed.graph;
 		const classes = Object.values(panel.promptGraph ?? {})
 			.map((n) => (n as any)?.class_type)
 			.filter((s) => typeof s === "string") as string[];
-		if (running.length > 0) {
+		panel.hasRunning = running.length > 0;
+		if (panel.hasRunning) {
+			// stats line: short id · node count + first-4 node chain · submitter
+			// hint (extra_data.comfy_usage_source — web UI / external sources)
+			const chain = `${classes.slice(0, 4).join(" → ")}${classes.length > 4 ? " → …" : ""}`;
+			const nodesPart = running.length > 1
+				? ` · ${running.length} run`
+				: (classes.length > 0 ? ` · ${classes.length} nodes` : "");
 			panel.runningTextEl.setText(
 				pid
-					? `${truncate(pid, 12)} · ${classes.slice(0, 4).join(" → ")}${classes.length > 4 ? " → …" : ""}`
-					: "running (prompt id unknown)",
+					? `${truncate(pid, 12)}${nodesPart} · ${chain}${parsed.source ? ` · ${parsed.source}` : ""}`
+					: `running${nodesPart}${parsed.source ? ` · ${parsed.source}` : ""} (prompt id unknown)`,
 			);
 			panel.runningTextEl.show();
 		} else {
 			panel.runningTextEl.hide();
+			// Queue drained: refresh the completed-card fallback from /history
+			// (async — lands on this cycle when the fetch answers in time).
+			// Skipped while a completed-initiated re-sort is running (see
+			// refreshCompleted): its fetch's own render would re-spawn the OTHER
+			// drained ports here → fetch/render ping-pong that never settles
+			// (two drained ports = endless /history traffic + a starved loop).
+			if (!this.completedResorting) void this.refreshCompleted(p, online);
 		}
 
 		// pending list (refilled — rows come and go); the card's inline label
@@ -3199,8 +3344,116 @@ export class ArthurDashboardView extends ItemView {
 
 		panel.btnCancel.disabled = !online || running.length === 0;
 
+		// completed card repaint (per tick): visible only while the fallback
+		// window holds AND the queue is idle again — running/pending are
+		// authoritative; the completed card never shadows a live state.
+		const completedVisible =
+			!!panel.completed &&
+			running.length + pending.length === 0 &&
+			Date.now() - panel.completed.finishedAtMs < ArthurDashboardView.COMPLETED_WINDOW_MS;
+		panel.completedLabel.setText(p.label);
+		if (completedVisible && panel.completed) {
+			const c = panel.completed;
+			const age = Math.max(0, Date.now() - c.finishedAtMs) / 1000;
+			panel.completedMetaEl.setText(
+				`completed ${fmtDuration(age)} ago${c.durationSec != null ? ` · took ${fmtDuration(c.durationSec)}` : ""}`,
+			);
+			const chain = `${c.classes.slice(0, 4).join(" → ")}${c.classes.length > 4 ? " → …" : ""}`;
+			panel.completedStatsEl.setText(
+				c.nodeCount > 0
+					? `${truncate(c.promptId, 12)} · ${c.nodeCount} nodes · ${chain}${c.source ? ` · ${c.source}` : ""}`
+					: `${truncate(c.promptId, 12)}${c.source ? ` · ${c.source}` : ""}`,
+			);
+			panel.completedCard.show();
+		} else {
+			panel.completedCard.hide();
+		}
+
 		this.renderProgress(panel);
-		return { running: running.length, pending: pending.length };
+		return { running: running.length, pending: pending.length, completed: completedVisible };
+	}
+
+	/** Poll-triggered history fallback: while the port's queue is idle (no
+	 *  running/pending), fetch the last few /history entries and cache the
+	 *  most recent IN-WINDOW completion for the completed job card. Runs
+	 *  submitted from anywhere (web UI / api / plugin) end up here — the
+	 *  status.messages timestamps give the completion wall-clock and the
+	 *  execution_start → terminal duration. Failures simply clear the card
+	 *  (the banner surfaces the actual error); a busy/in-flight fetch is
+	 *  skipped — the next tick retries. */
+	private async refreshCompleted(p: DesiredPort, online: boolean): Promise<void> {
+		const panel = this.panels.get(p.port);
+		if (!panel) return;
+		if (!online) {
+			panel.completed = null;
+			return;
+		}
+		if (this.completedBusy.has(p.port)) return;
+		this.completedBusy.add(p.port);
+		try {
+			const client = this.clientFor(p.port);
+			if (!client) {
+				panel.completed = null;
+				return;
+			}
+			const history = await client.history(ArthurDashboardView.HISTORY_FETCH);
+			const now = Date.now();
+			let newest: CompletedGen | null = null;
+			for (const [pid, entry] of Object.entries(history ?? {})) {
+				if (typeof pid !== "string" || !entry || typeof entry !== "object") continue;
+				const status = (entry as any).status;
+				if (!status || status.completed !== true) continue;
+				const messages: Array<[string, any]> = Array.isArray(status.messages)
+					? status.messages
+					: [];
+				const tsOf = (event: string): number | null => {
+					for (let i = messages.length - 1; i >= 0; i--) {
+						const msg = messages[i];
+						if (Array.isArray(msg) && msg[0] === event && msg[1] && typeof msg[1].timestamp === "number") {
+							return msg[1].timestamp;
+						}
+					}
+					return null;
+				};
+				const end = tsOf("execution_success") ?? tsOf("execution_error") ?? tsOf("execution_interrupted");
+				if (end == null) continue; // cannot date the completion → cannot age it
+				if (now - end < 0 || now - end >= ArthurDashboardView.COMPLETED_WINDOW_MS) continue;
+				if (newest && end <= newest.finishedAtMs) continue;
+				const promptTuple = Array.isArray((entry as any).prompt) ? (entry as any).prompt : [];
+				const parsedQueue = this.parseQueueEntry(promptTuple);
+				const classes = Object.values(parsedQueue.graph ?? {})
+					.map((n) => (n as any)?.class_type)
+					.filter((s) => typeof s === "string") as string[];
+				const start = tsOf("execution_start");
+				newest = {
+					promptId: pid,
+					finishedAtMs: end,
+					durationSec: start != null && end >= start ? (end - start) / 1000 : null,
+					nodeCount: classes.length,
+					classes,
+					source: parsedQueue.source,
+				};
+			}
+			panel.completed = newest;
+			// Insert/drop the card in the unified queue as soon as the fetch
+			// answers (the same poll cycle — the next tick would also repaint).
+			// The re-sort flag keeps this render from spawning further history
+			// fetches (see the drain-path guard in updateGenEntry) — without it,
+			// each completion's render re-triggers the OTHER drained ports and
+			// the pair ping-pongs forever.
+			if (this.isOpened) {
+				this.completedResorting = true;
+				try {
+					this.renderQueue();
+				} finally {
+					this.completedResorting = false;
+				}
+			}
+		} catch {
+			panel.completed = null;
+		} finally {
+			this.completedBusy.delete(p.port);
+		}
 	}
 
 	/**

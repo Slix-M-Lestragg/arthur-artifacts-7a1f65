@@ -1,7 +1,7 @@
 {
   "id": "arthur",
   "name": "Arthur",
-  "version": "0.13.2",
+  "version": "0.13.3",
   "minAppVersion": "1.5.0",
   "description": "Remotely manage ComfyUI and ai-toolkit instances on the home server",
   "author": "Slix-M-Lestragg",

@@ -930,6 +930,26 @@
 	background: color-mix(in srgb, var(--interactive-accent) 16%, var(--background-primary));
 }
 
+/* history-fallback completed card (≤ 10 min old): muted, clearly done —
+   never confusable with a running/pending job card */
+.arthur-queue-job--completed {
+	border-color: var(--background-modifier-border);
+	background: color-mix(in srgb, var(--color-green, #48b57e) 8%, var(--background-primary));
+}
+
+/* running without WS progress (external submissions): indeterminate bar —
+   the queue state is authoritative, per-step values only reach the submitter */
+.arthur-bar-fill--indeterminate {
+	width: 35%;
+	animation: arthur-bar-indeterminate 1.4s ease-in-out infinite;
+}
+
+@keyframes arthur-bar-indeterminate {
+	0% { margin-left: 0; }
+	50% { margin-left: 45%; }
+	100% { margin-left: 0; }
+}
+
 .arthur-queue-job .arthur-card-head .arthur-btn-row,
 .arthur-queue-job .arthur-actions {
 	margin-inline-start: auto;

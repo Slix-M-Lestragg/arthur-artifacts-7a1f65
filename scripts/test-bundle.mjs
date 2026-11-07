@@ -1149,6 +1149,10 @@ try {
 		8188: { queue_running: [["exec", "prompt-abcdef-1234", { "5": { class_type: "KSampler" } }]], queue_pending: [] },
 		8189: { queue_running: [], queue_pending: [] },
 	};
+	// GET /history per port (v0.13.3 completed-card fallback). Default: empty
+	// history — the (j)/(l) subsections swap in real-shape entries. Matched on
+	// the path only (the client appends ?max_items=6).
+	let comfyHistory = { 8188: {}, 8189: {} };
 	let gpusBody = {
 		gpus: [
 			{ index: 0, name: "NVIDIA GeForce RTX 3060", mem_total_mb: 12288, mem_used_mb: 9420, util_percent: 36, temp_c: 41 },
@@ -1186,16 +1190,20 @@ try {
 		if (opts.url.startsWith("http://10.0.0.9:8188/")) {
 			return opts.url.endsWith("/system_stats")
 				? json14(200, comfyStats)
-				: opts.url.endsWith("/queue")
+				: opts.url.split("?")[0].endsWith("/queue")
 					? json14(200, comfyQueue[8188])
-					: null;
+					: opts.url.split("?")[0].endsWith("/history")
+						? json14(200, comfyHistory[8188])
+						: null;
 		}
 		if (opts.url.startsWith("http://10.0.0.9:8189/")) {
 			return opts.url.endsWith("/system_stats")
 				? json14(200, comfyStats)
-				: opts.url.endsWith("/queue")
+				: opts.url.split("?")[0].endsWith("/queue")
 					? json14(200, comfyQueue[8189])
-					: null;
+					: opts.url.split("?")[0].endsWith("/history")
+						? json14(200, comfyHistory[8189])
+						: null;
 		}
 		return null;
 	};
@@ -1560,6 +1568,127 @@ try {
 		assert(rows.some((r) => r.hasClass("arthur-grid-row--running")), "running grid card variant present");
 		assert(rows.some((r) => r.hasClass("arthur-grid-row--idle")), "idle grid card variant present");
 		assert(rows.some((r) => r.hasClass("arthur-grid-row--down")), "down grid card variant present (comfy-dual)");
+	}
+
+	// (j) v0.13.3 externally-submitted run (device report): the web UI queues a
+	// generation on an instance the plugin never POSTs to — the queue card must
+	// classify RUNNING from /queue alone (WS progress_state only reaches the
+	// SUBMITTER's socket, per comfyui comfy_execution/progress.py) and never
+	// render a stale 'idle' label while the queue says otherwise.
+	const panel8188 = () => view14.panels.get(8188);
+	{
+		const pidExt = "76c21924-35a8-41df-b162-586b0fc94d61";
+		const graphExt = {
+			"155": { inputs: {}, class_type: "UNETLoader" },
+			"156": { inputs: {}, class_type: "CLIPLoader" },
+			"157": { inputs: {}, class_type: "VAELoader" },
+			"200": { inputs: {}, class_type: "KSampler" },
+			"201": { inputs: {}, class_type: "VAEDecode" },
+		};
+		comfyQueue[8188] = {
+			// real live-captured shape: [number, prompt_id, graph, extra_data, outputs]
+			queue_running: [[1, pidExt, graphExt, { comfy_usage_source: "comfyui-frontend", client_id: "webui-main" }, ["197"]]],
+			queue_pending: [],
+		};
+		comfyQueue[8189] = { queue_running: [], queue_pending: [] };
+		// a LEFTOVER WS progress tick from the (h) setup (plugin-visible runs
+		// keep their last progress until a terminal WS event) — the external
+		// scenario has none, so clear it to the fresh-submission state.
+		panel8188().progress = null;
+		view14.runStarts.delete("run:8188");
+		await view14.refreshData();
+		const runCardExt = findById(view14.contentEl, "arthur-queue-8188");
+		assert(!!runCardExt && runCardExt.hasClass("arthur-queue-job--running"),
+			"external submission (no plugin action, no WS yet) renders the card as RUNNING from /queue alone");
+		const runTextExt = allText(runCardExt);
+		assert(runTextExt.includes("76c21924-35"), "running card shows the prompt short id");
+		assert(runTextExt.includes("5 nodes"), "running card shows the node count of the graph");
+		assert(runTextExt.includes("UNETLoader → CLIPLoader → VAELoader → KSampler → …"),
+			"running card shows the node class chain (first 4 + ellipsis)");
+		assert(runTextExt.includes("web UI"), "running card shows the submitter hint (extra_data.comfy_usage_source → web UI)");
+		assert(runTextExt.includes("idle") === false,
+			"BUG REGRESSION: the running card never renders the stale 'idle' label while the queue says running");
+		const fillExt = findByClass(runCardExt, "arthur-bar-fill")[0];
+		assert(!!fillExt && fillExt.hasClass("arthur-bar-fill--indeterminate"),
+			"no WS progress for external submissions → indeterminate progress bar (queue state, not a dead bar)");
+		const metaTexts = () => findByClass(runCardExt, "arthur-card-meta").map((c) => (c.textContent ?? "").trim());
+		assert(metaTexts().some((t) => /^running( · \d+:\d\d)?$/.test(t)),
+			`progress label reads 'running' without an elapsed stamp (got: ${metaTexts().join(" | ")})`);
+		// precise elapsed: local run-start stamp (observed transition / WS tick)
+		view14.runStarts.set("run:8188", Date.now() - 60000);
+		view14.renderQueue();
+		assert(metaTexts().some((t) => /^running · 1:0\d$/.test(t)),
+			`running label gains the elapsed timer (got: ${metaTexts().join(" | ")})`);
+		// (k) WS progress path still wins when the plugin can see the run: the
+		// same card shows node + step/max + percent instead of indeterminate
+		panel8188().progress = { value: 3, max: 20, nodeLabel: "KSampler" };
+		view14.renderQueue();
+		const fillWs = findByClass(runCardExt, "arthur-bar-fill")[0];
+		assert(!!fillWs && fillWs.hasClass("arthur-bar-fill--indeterminate") === false,
+			"WS progress replaces the indeterminate bar");
+		assert((fillWs.style.width ?? "") === "15%", "WS progress fill width = value/max (15%)");
+		assert(metaTexts().some((t) => t.includes("KSampler 3/20 · 15%")),
+			"run stats line shows node + step/max + % for WS-progressed runs");
+		panel8188().progress = null;
+	}
+
+	// (l) history fallback: nothing queued + a RECENT completion in /history →
+	// a completed job card with duration + age (real captured payload shape),
+	// auto-expiring once the ≤ 10 min window passes.
+	{
+		const pidExt = "76c21924-35a8-41df-b162-586b0fc94d61";
+		const graphExt = {
+			"155": { inputs: {}, class_type: "UNETLoader" },
+			"156": { inputs: {}, class_type: "CLIPLoader" },
+			"157": { inputs: {}, class_type: "VAELoader" },
+			"200": { inputs: {}, class_type: "KSampler" },
+			"201": { inputs: {}, class_type: "VAEDecode" },
+		};
+		const histEntry = (endMsAgo, startMsAgo) => ({
+			prompt: [1, pidExt, graphExt, { comfy_usage_source: "comfyui-frontend", client_id: "webui-main" }, ["197"]],
+			outputs: {},
+			status: {
+				status_str: "success",
+				completed: true,
+				messages: [
+					["execution_start", { prompt_id: pidExt, timestamp: Date.now() - startMsAgo }],
+					["execution_cached", { prompt_id: pidExt, timestamp: Date.now() - startMsAgo + 3 }],
+					["execution_success", { prompt_id: pidExt, timestamp: Date.now() - endMsAgo }],
+				],
+			},
+		});
+		comfyQueue[8188] = { queue_running: [], queue_pending: [] };
+		comfyHistory[8188] = { [pidExt]: histEntry(30000, 30000 + 181202) }; // finished 30s ago, ran 181s
+		view14.runStarts.delete("run:8188");
+		await view14.refreshData();
+		{
+			const deadline = Date.now() + 3000;
+			while ((panel8188()?.completed ?? null) == null && Date.now() < deadline) await sleep(50);
+		}
+		const compCard = panel8188().completedCard;
+		assert(!!compCard && compCard.hasClass("arthur-queue-job--completed"),
+			"idle again + recent /history completion → the completed job card renders (history fallback)");
+		assert(compCard.isShown() === true,
+			"the completed card is visible while the queue is empty (the 'run vanished' device report)");
+		const compText = allText(compCard);
+		assert(compText.includes("completed 0:30 ago") && compText.includes("took 3:01"),
+			`completed card shows age + total duration (got: ${compText})`);
+		assert(compText.includes("76c21924-35"), "completed card shows the prompt short id");
+		assert(compText.includes("5 nodes") && compText.includes("UNETLoader"),
+			"completed card shows node count + class chain");
+		assert(compText.includes("web UI"), "completed card shows the submitter hint");
+		assert(findByClass(view14.queueEl, "arthur-queue-job--running").length === 0,
+			"no running card while the queue is empty (a completed card never fakes a live state)");
+		// auto-expiry: completion older than the 10 min window → card gone
+		comfyHistory[8188] = { [pidExt]: histEntry(11 * 60000, 11 * 60000 + 181202) };
+		await view14.refreshData();
+		{
+			const deadline = Date.now() + 2000;
+			while ((panel8188()?.completed ?? null) != null && Date.now() < deadline) await sleep(50);
+		}
+		assert(panel8188().completed == null && panel8188().completedCard.isShown() === false,
+			"out-of-window completion → the completed card auto-expires (hidden + data dropped)");
+		comfyHistory[8188] = {};
 	}
 
 	httpResponder = null;
