@@ -12,6 +12,8 @@
 # (it competes with comfy-0/comfy-1 for GPU memory; enable it so it comes
 # back on boot if it was running).
 #
+# Runs as user slix (User=/Group= below) so generated files stay editable.
+#
 # Deploys to /etc/systemd/system/comfy-dual.service. Needs root:
 #   sudo install -m 644 comfy-dual.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
@@ -29,9 +31,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=slix
+Group=slix
 WorkingDirectory=/mnt/work/00-TOOLS/comfyui
 Environment=GGML_VK_ALLOW_SYSMEM_FALLBACK=1
-ExecStart=/bin/bash -c 'export CUDA_VISIBLE_DEVICES=0,1; source /mnt/work/00-TOOLS/paths.sh; exec venv/bin/python main.py --listen 0.0.0.0 --port 8190 --cuda-device 0,1 --preview-method auto --reserve-vram 2'
+ExecStart=/bin/bash -c 'export CUDA_VISIBLE_DEVICES=0,1; source /mnt/work/00-TOOLS/paths.sh; exec venv/bin/python main.py --listen 0.0.0.0 --port 8190 --enable-manager --cuda-device 0,1 --preview-method auto --reserve-vram 2'
 Restart=on-failure
 RestartSec=5
 

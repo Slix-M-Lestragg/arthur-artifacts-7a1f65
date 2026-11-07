@@ -15,6 +15,8 @@
 #     (indexes relative to the visible devices). A single pinned GPU needs no
 #     --cuda-device: it is the only visible device (cuda:0).
 #
+# Runs as user slix (User=/Group= below) so generated files stay editable.
+#
 # Deploys to /etc/systemd/system/comfy@.service. Needs root:
 #   sudo install -m 644 comfy@.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
@@ -32,9 +34,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=slix
+Group=slix
 WorkingDirectory=/mnt/work/00-TOOLS/comfyui
 Environment=GGML_VK_ALLOW_SYSMEM_FALLBACK=1
-ExecStart=/bin/bash -c 'NGPU=$(nvidia-smi -L 2>/dev/null | grep -c .); NGPU=$((NGPU > 0 ? NGPU : 1)); GPUS="${ARTHUR_GPUS:-$(( %i % NGPU ))}"; export CUDA_VISIBLE_DEVICES=$GPUS; CUDA_ARGS=""; case "$GPUS" in *,*) CUDA_ARGS="--cuda-device 0,1";; esac; source /mnt/work/00-TOOLS/paths.sh; exec venv/bin/python main.py --listen 0.0.0.0 --port $((8188 + %i)) --preview-method auto --reserve-vram 2 $CUDA_ARGS'
+ExecStart=/bin/bash -c 'NGPU=$(nvidia-smi -L 2>/dev/null | grep -c .); NGPU=$((NGPU > 0 ? NGPU : 1)); GPUS="${ARTHUR_GPUS:-$(( %i % NGPU ))}"; export CUDA_VISIBLE_DEVICES=$GPUS; CUDA_ARGS=""; case "$GPUS" in *,*) CUDA_ARGS="--cuda-device 0,1";; esac; source /mnt/work/00-TOOLS/paths.sh; exec venv/bin/python main.py --listen 0.0.0.0 --port $((8188 + %i)) --enable-manager --preview-method auto --reserve-vram 2 $CUDA_ARGS'
 Restart=on-failure
 RestartSec=5
 
