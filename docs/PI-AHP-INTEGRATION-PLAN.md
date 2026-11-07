@@ -1,7 +1,7 @@
 # Arthur + AHP / obsidian-pi integration — research and delivery plan
 
 - **Date**: 2026-11-07
-- **Status**: **Phase 0 preserved + Phase 1 slice 1 implemented, mock-tested, and sandbox-validated; Phase 2 PLUGIN side implemented and mock-tested** (roles gate + opt-in controls + exact mutation wire, gate green) — **backend roles work lives on a separate remote broker branch (81 tests passing, since superseded: the roles + command gate landed at broker `b6e26148`, 82 tests, DEPLOYED — see §10c; production restart still PENDING)**; **live Phase 2 interactive sandbox EXECUTED (linux-obsidian-73323, see Status snapshot / E15) with one BLOCKER found & FIXED (`createSession` `provider:'pi'`) and the focused live retest of the fixed wrapper PASS (`linux-obsidian-74310`, E17 — UI-created HOSTED pi session, `AHP_PHASE2_CREATE_OK`, pause/resume/dispose, 0 plugin errors, cleanup verified)**; **INLINE dispose confirmation hardening implemented + mock-tested (native `window.confirm` removed, E18) — its final focused live sandbox was ABORTED by the harness and cleaned, so the hardened dispose UI stays mock-tested / NOT live-revalidated**; question_user answering remains mock-only; production role deployment still PENDING; Phases 3–5 still [PROPOSED]
+- **Status**: **Phase 0 preserved + Phase 1 slice 1 implemented, mock-tested, and sandbox-validated; Phase 2 PLUGIN side implemented and mock-tested** (roles gate + opt-in controls + exact mutation wire, gate green) — **backend roles work lives on a separate remote broker branch (81 tests passing, since superseded: the roles + command gate landed at broker `b6e26148`, 82 tests, DEPLOYED — see §10c; production roll-out EXECUTED, see §11b)**; **live Phase 2 interactive sandbox EXECUTED (linux-obsidian-73323, see Status snapshot / E15) with one BLOCKER found & FIXED (`createSession` `provider:'pi'`) and the focused live retest of the fixed wrapper PASS (`linux-obsidian-74310`, E17 — UI-created HOSTED pi session, `AHP_PHASE2_CREATE_OK`, pause/resume/dispose, 0 plugin errors, cleanup verified)**; **INLINE dispose confirmation hardening implemented + mock-tested (native `window.confirm` removed, E18) — its final focused live sandbox was ABORTED by the harness and cleaned, so the hardened dispose UI stays mock-tested / NOT live-revalidated**; question_user answering remains mock-only; **production role deployment EXECUTED (broker `b6e26148` live, all protocol role probes PASS — see §11b); production UI test IN PROGRESS**; Phases 3–5 still [PROPOSED]
 - **Scope**: planning record + delivery evidence for Phase 0 and Phase 1 slice 1. No canonical `docs/PLAN.md`, manifest, or ROADMAP/TESTING changes.
 
 ### Status snapshot (2026-11-07)
@@ -717,16 +717,62 @@ it concerns the backend components:
   reconstructible from known hashes only — the uncommitted stale edits are
   NOT recoverable. Recorded as the residual caveat for any later diffing
   against that worktree's pre-incident state.
-- **Production restart — PENDING.** The broker is deployed at `b6e26148` but
-  the running service has not been restarted onto it yet (the Phase 0 "do not
-  restart as part of research" RULE stands; the restart is the explicit
-  production step at rollout). Until that restart, live `initialize` answers
-  still come from the pre-roles build — the plugin's controls stay
-  fail-closed-off in consequence.
+- **Production restart — SUPERSEDED by §11b**: the broker has since been
+  restarted onto `b6e26148` (live main PID 175271, 2026-11-07 21:36 CET) —
+  see §11b for the roll-out record. The remainder of §11 (test counts, hash
+  records, rsync-incident caveat) stands.
 
-Next actions carried from §9 unchanged; the pending production restart is the
-gate for exercising the roles/command-gate surface live (incl. the hardened
-INLINE dispose revalidation still open from the Status snapshot).
+## 11b. Production role deployment — roll-out record (2026-11-07)
+
+Docs-only record of the production roll-out of the role backend (§11); no
+plugin/version/release artifacts change with it. Facts verified live on
+ulysse at record time:
+
+- **PRODUCTION BROKER RUNNING b6e26148.** `pi-ahp-broker.service` (systemd
+  --user, ulysse, `0.0.0.0:4500`) was restarted onto the deployed
+  `b6e26148` build: main PID **175271** (`node dist/src/index.js` from
+  `/home/ulysse/RnD/AHP/pi-ahp-server-farm-view-wt`), started
+  **2026-11-07 21:36:24 CET**. The previous production run (main PID 590755,
+  uptime 77d, pre-restart state captured in
+  `pre-restart-clients.txt`) was replaced; the §11 "PENDING" restart gate is
+  closed. Listener verified live (`ss`: pid 175271, fd 21).
+- **ALL PROTOCOL ROLE PROBES PASS** — the protocol probes for the
+  `viewer` / `controller` / `hostAgent` roles (incl. the server-side
+  `-32008` mutation gate and the command gate) pass against the live
+  production broker; role authorization is now LIVE. The plugin's controls
+  (fail-closed-off until this roll-out) can now be exercised against the
+  real broker per the §Phase-2 env contract.
+- **Host agents + Arthur recovered.** The `hostAgent` clients (pi-ahp-client,
+  swarm) and the arthur-side clients from arthur (100.90.92.1) reconnected
+  to the restarted broker and are recorded healthy.
+- **Voyager / old-ulysse recovery IN PROGRESS.** Client recovery on voyager
+  (100.93.241.75) and the older ulysse-side consumers was still being
+  completed at record time; tracked separately from this record.
+- **Production UI test IN PROGRESS.** The interactive arthur-plugin test
+  against the live roles broker (viewer + controller paths incl. the
+  hardened inline-dispose UI, E18's open item) is running at record time;
+  its result will land as a further evidence row once complete.
+- **Backup / snapshot paths on ulysse** (all under `/home/ulysse/RnD/AHP/`):
+  - `backups/ahp-command-gate-20261107-202018/` — pre-restart `dist`
+    snapshot (`dist-pre-restart/`, command-gate build output).
+  - `backups/arthur-roles-20261107-204020/` — full pre-restart backup:
+    `store/` (live 0.3.0 session store rsync, hot-backup caveats in
+    `README-metadata.txt`), `archive-Ulysse-sessions-ahp-archive/` +
+    `archive-pi-ahp-archive/` (AHP_ARCHIVE_DIR entries),
+    `repo-bundle-all.bundle` (git bundle of `pi-ahp-server-farm-view-wt`,
+    captured at `19306d095dbe…`, tag `ahp-0.3.0-arthur-baseline-1-g19306d09`,
+    clean), `repo/worktree/` (working-tree snapshot),
+    `systemd/pi-ahp-broker.service` (unit copy), and
+    `pre-restart-clients.txt` (active-client recovery snapshot, retry-pass).
+  - `research.audit-snapshot/` — audit snapshot directory (pre-existing
+    research surface).
+- **Post-deploy cleanup (2026-11-07, verified)**: root-owned
+  `/tmp/ahp-final-dispose` (incl. its empty `20261107-193220/` pass dir) and
+  `/tmp/add_tests.py` removed from ulysse; **no `:4600` test listener**
+  remains (full listener table checked); **no test instances** in the
+  broker store; **no temp git test branches** (`AHP` + `AHP-server` branch
+  lists checked); untouched: `ahp3`, unrelated `affectionate_tesla`/manager
+  sessions.
 
 ---
 
@@ -753,5 +799,6 @@ INLINE dispose revalidation still open from the Status snapshot).
 | E17 | **Focused provider:'pi' live retest PASS (2026-11-07, `linux-obsidian-74310`)**: disposable agent-os Linux-Obsidian instance against the live roles broker with the FIXED create wrapper (**deleted after; everyday vault untouched; broker :4500 state + cleanup paths untouched**) — a session created through the plugin's new-session control with `provider:'pi'` materialized as a REAL HOSTED interactive pi session (`AHP_PHASE2_CREATE_OK` in its transcript), pause/resume and dispose exercised live, **0 plugin-caused console errors**, cleanup verified. Residue surfaced: the native `window.confirm` dispose dialog wedged a stale selected detail after the server-side deletion (fixed as E18) | agent-os Linux-Obsidian instance + live roles broker (delivery record) |
 | E19 | **Role deployment preparation record (2026-11-07, §11)**: pi-ahp-client `a8e5e8212` deployed (71 tests green, hashes recorded); swarm `a0c3625` deployed (9 tests green, backups moved OUTSIDE extensions); arthur `dev` `5b2b05a` (stale-detail fix); broker `b6e26148` deployed (82 tests green, roles + command gate); credential staging/audit GO; **production restart PENDING**; ulysse pi-ahp-client rsync incident — `.git` restored, stale worktree `dev` edits overwritten (known hashes only) | deployment-prep delivery record, recorded in §11 |
 | E18 | **INLINE dispose confirmation hardening (2026-11-07, mock-tested; the final focused live sandbox was ABORTED by the harness and cleaned — NOT live-revalidated)**: native `window.confirm` removed from the dispose flow — `src/ui/ahp-view.ts` now arms an INLINE plain-DOM confirm strip in the selected detail (warning naming the session + `confirm dispose`/`cancel`; busy-disabled while pending; one single `disposeSession` request); `src/api/ahp.ts` `root/sessionRemoved` now ALSO releases a matching selected detail (late reply / stale-detail wedge defense; only the removed session is cleared — never a NEW selection); successful response clears the arm + releases the detail immediately + reloads the catalogue authoritatively; errors restore a safe state. Smoke suite 28d rewritten to the inline flow ((ac)) + new regressions ((ac2) late-reply/new-selection race, `root/sessionRemoved` detail release); gate green — **989 asserted checks**; uncommitted `dev` working tree (no commit/version/deps) | arthur `dev` working tree |
+| E20 | **Production roll-out record (2026-11-07, §11b)**: broker production restart onto `b6e26148` EXECUTED — main PID 175271 live on `0.0.0.0:4500` (started 21:36 CET, `node dist/src/index.js` from `pi-ahp-server-farm-view-wt`; prior run PID 590755 replaced); all protocol role probes PASS (viewer/controller/hostAgent, `-32008` gate + command gate live); host agents + arthur clients recovered; voyager/old-ulysse recovery still in progress; production UI test in progress; backups verified at `/home/ulysse/RnD/AHP/backups/{ahp-command-gate-20261107-202018,arthur-roles-20261107-204020}` (+ `pre-restart-clients.txt`, `README-metadata.txt`, `research.audit-snapshot/`); post-deploy cleanup verified — `/tmp/ahp-final-dispose` + `/tmp/add_tests.py` removed, no `:4600` listener, no test instances, no temp test branches | ulysse live state + backup dirs (delivery record) |
 
 *End of plan.*
