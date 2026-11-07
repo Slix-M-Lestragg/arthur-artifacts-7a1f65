@@ -1163,22 +1163,22 @@ try {
 		],
 	};
 	const comfyStats = { system: {}, devices: [{ name: "cuda", type: "cuda", vram_total: 12 * 1024 * 1024, vram_free: 4 * 1024 * 1024 }] };
+	// per-GPU-set training queues: two single-GPU sets (running/paused per
+	// is_running) + one multi-GPU set for jobA's card chip. Mutable: (f3)
+	// flips the multi-GPU set's is_running to exercise the pause path.
+	const aiQueues14 = [
+		{ id: 0, gpu_ids: "0", is_running: true },
+		{ id: 1, gpu_ids: "1", is_running: false },
+		{ id: 2, gpu_ids: "0,1", is_running: false },
+	];
 	httpResponder = (opts) => {
 		calls14.push({ url: opts.url, method: opts.method ?? "GET" });
 		if (opts.url.endsWith("/health")) return json14(200, { ok: true, version: "0.8.0" });
 		if (opts.url.endsWith("/api/status")) return json14(200, gridStatusBody);
 		if (opts.url.endsWith("/api/gpus")) return json14(200, gpusBody);
 		if (opts.url.endsWith("/api/jobs")) return json14(200, aiJobsBody);
-		// per-GPU-set training queues: two single-GPU sets (GPU0 paused… wait,
-		// running/paused per is_running) + one multi-GPU set for jobA's cards
 		if (opts.url.endsWith("/api/queue")) {
-			return json14(200, {
-				queues: [
-					{ id: 0, gpu_ids: "0", is_running: true },
-					{ id: 1, gpu_ids: "1", is_running: false },
-					{ id: 2, gpu_ids: "0,1", is_running: false },
-				],
-			});
+			return json14(200, { queues: aiQueues14 });
 		}
 		if (opts.method === "GET" && /\/api\/queue\/\d+\/(stop|start)$/.test(opts.url)) {
 			return json14(200, { ok: true });
@@ -1354,36 +1354,38 @@ try {
 		comfyQueue[8188] = { queue_running: [["exec", "prompt-abcdef-1234", { "5": { class_type: "KSampler" } }]], queue_pending: [["exec", "prompt-depth-1", { "7": { class_type: "CheckpointLoader" } }]] };
 		await view14.refreshData();
 		assert(allText(rowByKey("inst:comfy-0")).includes("queue 1"), "instance card shows the pending queue depth");
-		// GPU column header queue-toggle chips (single-GPU ai-toolkit sets):
+		// v0.13.2: the per-GPU queue-toggle header chips are GONE — the column
+		// headers are pure collapse toggles now, single-GPU sets included.
 		const gpu0HeadF2 = gridHead14()[0];
 		const gpu1HeadF2 = gridHead14()[1];
-		assert(findByClass(gpu0HeadF2, "arthur-queue-toggle").length === 1,
-			"GPU0 column header chip carries the queue toggle (single-GPU queue set '0')");
-		assert(findByClass(gpu1HeadF2, "arthur-queue-toggle").length === 1,
-			"GPU1 column header chip carries the queue toggle");
+		assert(findByClass(gpu0HeadF2, "arthur-queue-toggle").length === 0
+			&& findByClass(gpu1HeadF2, "arthur-queue-toggle").length === 0,
+			"GPU column headers carry NO queue-toggle chips (single-GPU sets included)");
 	}
 
-	// (f3) queue-toggle chip click: GPU0's queue set is running → the chip
-	// pauses it via /api/queue/0/stop.
+	// (f3) training-card queue-toggle chip, pause path: flip the multi-GPU
+	// set ('0,1') to running → jobA's card chip shows the pause glyph and
+	// clicking it pauses the queue via /api/queue/2/stop (v0.13.2: the
+	// column headers no longer carry chips; the flip is reverted below so
+	// the later (h) resume test sees the paused state again).
 	{
 		calls14.length = 0;
 		StubNotice.reset();
-		const gpu0Toggle = findByClass(gridHead14()[0], "arthur-queue-toggle")[0];
-		assert(gpu0Toggle.textContent === "⏸", "running queue set renders the pause glyph on the GPU0 chip");
-		gpu0Toggle.handlers.get("click")[0]?.();
+		aiQueues14[2].is_running = true;
+		await view14.refreshData();
+		const jobACardF3 = findById(view14.contentEl, "arthur-training-row-jobA");
+		const toggleF3 = findByClass(jobACardF3, "arthur-queue-toggle")[0];
+		assert(toggleF3.textContent === "⏸", "running queue set renders the pause glyph on the training card chip");
+		toggleF3.handlers.get("click")[0]?.();
 		await sleep(30);
-		assert(calls14.some((c) => /\/api\/queue\/0\/stop$/.test(c.url)) === true,
-			"GPU0 chip click pauses the single-GPU training queue");
-		assert(StubNotice.shown.some((m) => m.includes("pause queue GPU0 — done")) === true,
+		assert(calls14.some((c) => /\/api\/queue\/2\/stop$/.test(c.url)) === true,
+			"training card chip click pauses the running training queue");
+		assert(StubNotice.shown.some((m) => m.includes("pause queue GPU0,1 — done")) === true,
 			"queue chip click toasts the result");
-		const gpu1Toggle = findByClass(gridHead14()[1], "arthur-queue-toggle")[0];
-		assert(gpu1Toggle.textContent === "▶", "paused queue set renders the play glyph on the GPU1 chip");
-		calls14.length = 0;
-		StubNotice.reset();
-		gpu1Toggle.handlers.get("click")[0]?.();
-		await sleep(30);
-		assert(calls14.some((c) => /\/api\/queue\/1\/start$/.test(c.url)) === true,
-			"GPU1 chip click resumes the single-GPU training queue");
+		aiQueues14[2].is_running = false;
+		await view14.refreshData();
+		const toggleF3b = findByClass(findById(view14.contentEl, "arthur-training-row-jobA"), "arthur-queue-toggle")[0];
+		assert(toggleF3b.textContent === "▶", "paused queue set renders the play glyph on the training card chip");
 	}
 
 	// (f4) INDEPENDENT GPU-column collapse (v0.11, reworked v0.13.1): clicking
@@ -1427,18 +1429,15 @@ try {
 		assert(findByClass(headsAfter[0], "arthur-grid-col-chevron")[0].tagName === "SPAN",
 			"chevron is an inert title marker span, not a button");
 
-		// interactive-child guard: clicking the GPU1 queue-toggle chip inside
-		// its head must NOT toggle the column collapse (it pauses the queue)
-		const gpu1Chip14 = findByClass(colHeads14()[1], "arthur-queue-toggle")[0];
+		// interactive-child guard (kept for future header children): a click
+		// whose target sits inside an interactive element (closest → button)
+		// must NOT toggle the column collapse
+		const bogusInteractiveChild14 = new StubEl("button");
 		calls14.length = 0;
-		clickHead14(colHeads14()[1], gpu1Chip14);
+		clickHead14(colHeads14()[1], bogusInteractiveChild14);
 		await sleep(30);
 		assert(plugin.settings.gpuCollapsed["1"] === undefined,
-			"a click on the queue-toggle chip inside the header does NOT toggle collapse");
-		gpu1Chip14.handlers.get("click")[0]?.(); // the chip's own handler
-		await sleep(30);
-		assert(calls14.some((c) => /\/api\/queue\/1\/start$/.test(c.url)) === true,
-			"the queue-toggle chip still works (resumes GPU1's queue)");
+			"a click on an interactive child inside the header does NOT toggle collapse");
 		comfyQueue[8189] = { queue_running: [["exec", "prompt-two", { "9": { class_type: "VAEDecode" } }]], queue_pending: [] }; // reset for (h)
 
 		// keyboard: Enter and Space on the focused head toggle collapse
@@ -1519,7 +1518,7 @@ try {
 		assert(findByClass(view14.queueEl, "arthur-queue-head").length === 0,
 			"queue holds NO per-instance group headers (Clear-queue/Free-VRAM moved to the grid cards)");
 		assert(findByClass(view14.queueEl, "arthur-aiqueue").length === 0,
-			"queue holds NO ai-toolkit queue-toggles block (moving to GPU header chips + training cards)");
+			"queue holds NO ai-toolkit queue-toggles block (toggles live on the matching training job cards)");
 		assert(findByClass(view14.queueEl, "arthur-note").length === 0,
 			"queue holds NO 'no jobs — every queue is clear' note");
 		const nonJobEls = view14.queueEl.children.filter(
@@ -1538,6 +1537,7 @@ try {
 		assert(!!a8189 && a8189.hasClass("arthur-queue-job--running"),
 			"anchor arthur-queue-8189 sits on the running card (first job of comfy-1)");
 		// multi-GPU queue set → small toggle chip on the matching training card
+		// (the only queue-toggle surface since the v0.13.1 header chips went away)
 		const jobACard = findById(view14.contentEl, "arthur-training-row-jobA");
 		const chipOnJobA = jobACard ? findByClass(jobACard, "arthur-queue-toggle") : [];
 		assert(chipOnJobA.length === 1,

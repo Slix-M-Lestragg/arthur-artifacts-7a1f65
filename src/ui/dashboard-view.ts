@@ -53,8 +53,7 @@
  *                    Free-VRAM), a
  *                    'view in queue ↓' link for running rows WITH queue jobs
  *                    that scrolls to the matching job-queue anchor below.
- *                    Single-GPU ai-toolkit queue sets surface as tiny
- *                    play/pause chips on their GPU column headers. Idle rows sort first, running
+ *                    Idle rows sort first, running
  *                    rows by run duration (longest first); run starts are
  *                    tracked locally (WS execution_start / queue transition;
  *                    agent uptime as fallback). /api/gpus unreachable →
@@ -66,9 +65,10 @@
  *                    the per-instance group headers, the per-GPU-set queue
  *                    toggles block and the 'no jobs' note are GONE — empty
  *                    queue = no cards at all; the clear-queue/free-VRAM
- *                    actions moved onto the grid cards and the per-GPU-set
- *                    toggles onto GPU column headers / matching training
- *                    cards). Job cards only: the comfy instance's running
+ *                    actions moved onto the grid cards and the multi-GPU
+ *                    queue-set toggles onto matching training job cards —
+ *                    v0.13.2 removed the play/pause chips from the GPU
+ *                    column headers). Job cards only: the comfy instance's running
  *                    generation (inline instance label 'comfy-0 · :8188' +
  *                    live WS progress + cancel + preview strip), pending
  *                    prompts (inline label + per-prompt ✕ delete) and
@@ -2175,12 +2175,14 @@ export class ArthurDashboardView extends ItemView {
 			// Enter/Space while focused), persisted per column
 			// (settings.gpuCollapsed) across ticks and reopens. No dedicated
 			// chevron button anymore — the chevron lives inline in the title.
-			// Interactive children (queue-toggle chips) keep working: clicks on
+			// Interactive children (button, link, …) keep working: clicks on
 			// them never bubble into a collapse toggle.
+			// (v0.13.2: no queue-toggle chips left in the headers — the guard
+			// stays for future-proofing.)
 			head.addEventListener("click", (e: MouseEvent) => {
 				if ((e?.target as HTMLElement | null)?.closest(
 					"button, a, input, select, textarea",
-				)) return; // real interactive child (queue-toggle chip, link, …)
+				)) return; // real interactive child (button, link, …)
 				this.toggleGpuColumn(col.index);
 			});
 			head.addEventListener("keydown", (e: KeyboardEvent) => {
@@ -2206,16 +2208,7 @@ export class ArthurDashboardView extends ItemView {
 					text: parts.join(" · "),
 				}),
 			);
-			// Single-GPU ai-toolkit queue set ('0' → GPU0): a tiny play/pause
-			// chip on that column's header chip (multi-GPU sets live on the
-			// matching training job cards instead).
-			const gpuQueue = this.aiDetail.queues.find(
-				(q) => q.gpu_ids.trim() === String(col.index),
-			);
-			if (this.aiDetail.queuesOk === true && gpuQueue) {
-				head.append(this.queueToggleChip(gpuQueue));
-			}
-			grid.append(head);
+		grid.append(head);
 		});
 
 		// 'gpu stats unavailable' note — the agent answers but its nvidia-smi
@@ -2679,10 +2672,10 @@ export class ArthurDashboardView extends ItemView {
 	}
 
 	/**
-	 * Tiny play/pause chip for an ai-toolkit training queue row — on the GPU
-	 * column header (single-GPU sets) or the matching training job card
-	 * (multi-GPU sets). Starts/pauses the per-GPU-set queue with a toast +
-	 * re-poll, never optimistic.
+	 * Tiny play/pause chip for a multi-GPU ai-toolkit training queue set —
+	 * lives on the matching training job card (the column-header chips of
+	 * v0.6.3–v0.13.1 were removed in v0.13.2): starts/pauses the
+	 * per-GPU-set queue with a toast + re-poll, never optimistic.
 	 */
 	private queueToggleChip(q: AiToolkitQueueRow): HTMLElement {
 		const btn = newBtn(q.is_running ? "⏸" : "▶");
@@ -2812,8 +2805,9 @@ export class ArthurDashboardView extends ItemView {
 	//   2. recent stopped/error training jobs (newest first, cap 5)
 	// NOTHING else renders: no group headers, no queue-toggles block, no
 	// empty-queue note — an empty queue is simply no cards (group-header
-	// actions moved to the grid cards; per-GPU-set toggles on GPU column
-	// headers / matching training cards). The stable anchor id
+	// actions moved to the grid cards; multi-GPU queue-set toggles live on
+	// the matching training job cards — the v0.6.3 column-header chips were
+	// dropped in v0.13.2). The stable anchor id
 	// arthur-queue-<port> sits on the instance's FIRST job card (running,
 	// else pending).
 	// ------------------------------------------------------------------
@@ -3278,8 +3272,8 @@ export class ArthurDashboardView extends ItemView {
 			}),
 		];
 		// Multi-GPU ai-toolkit queue set: a small queue-toggle chip on each
-		// matching training job card (single-GPU sets live on GPU column
-		// headers instead).
+		// matching training job card (the only queue-toggle surface since
+		// v0.13.2 removed the single-GPU column-header chips).
 		const jobGpus = parseGpuIds(job.gpu_ids);
 		if (jobGpus.length > 1 && this.aiDetail.queuesOk === true) {
 			const match = this.aiDetail.queues.find(

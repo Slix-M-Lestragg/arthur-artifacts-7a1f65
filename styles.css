@@ -624,8 +624,8 @@
 	outline-offset: -2px;
 }
 
-/* Collapsed column: title-only row — VRAM bar + stats hidden (the queue
-   toggle chip, if any, stays visible and clickable), tighter padding. */
+/* Collapsed column: title-only row — VRAM bar + stats hidden (v0.13.2:
+   no queue chip left in the header), tighter padding. */
 .arthur-grid-colhead--collapsed {
 	padding: 0.35em 0.5em;
 	gap: 0;
@@ -787,8 +787,9 @@
 	opacity: 0.85;
 }
 
-/* tiny play/pause chip for an ai-toolkit training queue (GPU column header,
-   or the matching training job card for multi-GPU sets) */
+/* tiny play/pause chip for a multi-GPU ai-toolkit training queue set on
+   the matching training job card (v0.13.2: the column-header chips are
+   gone — this class is only used by job-card chips now) */
 .arthur-queue-toggle {
 	flex: none;
 	font-size: var(--font-ui-smaller);
