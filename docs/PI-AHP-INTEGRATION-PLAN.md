@@ -1,7 +1,7 @@
 # Arthur + AHP / obsidian-pi integration — research and delivery plan
 
 - **Date**: 2026-11-07
-- **Status**: **Phase 0 preserved + Phase 1 slice 1 implemented, mock-tested, and sandbox-validated** — read-only controls only; Phases 2–5 still [PROPOSED]
+- **Status**: **Phase 0 preserved + Phase 1 slice 1 implemented, mock-tested, and sandbox-validated; Phase 2 PLUGIN side implemented and mock-tested** (roles gate + opt-in controls + exact mutation wire, gate green) — **backend roles work lives on a separate remote broker branch (81 tests passing, NOT deployed)**; **live Phase 2 interactive sandbox EXECUTED (linux-obsidian-73323, see Status snapshot / E15) with one BLOCKER found & FIXED (`createSession` `provider:'pi'`) and the focused live retest of the fixed wrapper PASS (`linux-obsidian-74310`, E17 — UI-created HOSTED pi session, `AHP_PHASE2_CREATE_OK`, pause/resume/dispose, 0 plugin errors, cleanup verified)**; **INLINE dispose confirmation hardening implemented + mock-tested (native `window.confirm` removed, E18) — its final focused live sandbox was ABORTED by the harness and cleaned, so the hardened dispose UI stays mock-tested / NOT live-revalidated**; question_user answering remains mock-only; production role deployment still PENDING; Phases 3–5 still [PROPOSED]
 - **Scope**: planning record + delivery evidence for Phase 0 and Phase 1 slice 1. No canonical `docs/PLAN.md`, manifest, or ROADMAP/TESTING changes.
 
 ### Status snapshot (2026-11-07)
@@ -25,9 +25,99 @@
     `ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail`, and
     `resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks` suites)
     against the mock/local WS; no private host required for CI.
-  - Read-only controls only: `listSessions` + `subscribe`/`unsubscribe`/`reconnect` + `ping`.
-    **Zero mutating RPC** — no `createSession`/`disposeSession`/`createChat`/`pause`/`resume`/
-    `retryTurn`/`dispatchAction` anywhere in plugin code or tests.
+  - Read-only slice-1 controls only: `listSessions` + `subscribe`/`unsubscribe`/`reconnect` + `ping`.
+  - Phase 2 (below) layered the CONTROLLED mutation surface on top of this client — every
+    mutation is double-gated (plugin setting + broker `controller` role) and never auto-retried.
+- **Phase 2 — plugin side IMPLEMENTED, mock-tested; backend roles branch NOT deployed.**
+  - `src/api/ahp.ts` gained the controller transport (`roles`/`canControl` from the initialize
+    result; `createSession`/`createChat`/`pauseSession`/`resumeSession`/`retryTurn`/
+    `disposeSession` as `{channel,…}` REQUESTS; `prompt` as the `dispatchAction` NOTIFICATION
+    with the exact `chat/turnStarted {turnId, message:{text, origin:{kind:'user'}}}` payload;
+    a LOCAL gate that refuses every mutation without the `controller` role; one-shot sends — no
+    automatic retry of any mutation, pending requests REJECT on drop/timeout) — wire shapes
+    copied verbatim from the verified broker source, nothing invented.
+  - `src/ui/ahp-view.ts` gained the opt-in control UI behind `ahpEnableControl` (default OFF):
+    new-session row (cwd + create), per-session pause/resume/retry/+chat/dispose (with an
+    INLINE armed confirmation strip — no native dialog), per-primary-chat prompt/Answer rows,
+    per-op busy state, and an error line — ALL state rendered from server envelopes only (no
+    optimistic mutation state, no stale-UI races; drafts/caret survive live repaints).
+  - Gate green: `npm run typecheck && npm run build && npm run smoke` — **989 asserted checks**
+    (smoke suites 28/28b/28c read-only preserved untouched + the 28d controller suite: roles
+    gating incl. absent/[]/viewer/hostAgent/controller × setting on/off, exact wire shapes for
+    every mutation (28d now asserts the FIXED hosted-create payload — `createSession` exactly
+    `{channel, provider: 'pi', workingDirectory}` — against the relay-vs-hosted mock model),
+    zero-mutation viewer epochs, busy duplicate-submit protection, the INLINE dispose
+    arm/cancel/confirm flow + late-reply/new-selection race + `root/sessionRemoved` detail
+    release regression, and drop/reconnect NEVER resending any mutation, token only ever in
+    `initialize.params`). No private host required for CI.
+  - **Backend (broker) roles branch**: implemented on a separate remote broker branch with
+    **81 broker tests passing** — NOT deployed to the running broker, NOT merged to the broker
+    baseline. Until it deploys, `initialize` answers carry no roles and the plugin surface
+    stays read-only regardless of the setting (fail-safe both ways). The branch's exact
+    role-token env names are now **VERIFIED** (see the Phase 2 section below).
+  - **Live Phase 2 interactive sandbox — PASS with one blocker found (2026-11-07,
+    `linux-obsidian-73323`).** Disposable agent-os Linux-Obsidian instance against the live
+    roles-broker, then deleted (everyday vault untouched; /tmp cleanup paths and the broker's
+    :4500 state untouched afterward). Results: a viewer token's mutations rejected with the
+    broker's `-32008` forbidden error; a controller token surfaced the full control affordances
+    and exercised: pause/resume (envelope-driven button flips), ONE prompt (`AHP_PHASE2_OK`
+    visible in the hosted session's transcript), retry, second chat (createChat), and dispose —
+    all state moving only on server envelopes; **0 plugin-caused console errors**. The
+    question_user answer path was NOT exercised live (no pending question arose) — it remains
+    mock-only. **BLOCKER found**: the `createSession` wrapper sent `{channel, workingDirectory}`
+    WITHOUT `provider`, so the broker defaulted to `pi-ahp-server` and created an EMPTY RELAY
+    session instead of a hosted interactive pi one.
+  - **BLOCKER fixed (createSession `provider:'pi'`) — mock-tested; focused live retest PASS.**
+    `src/api/ahp.ts` `createSession` now sends exactly `{channel, provider: 'pi',
+    workingDirectory}` (the ONLY hosted interactive backend the broker knows; anything else —
+    including the omitted default — is an empty relay, verified in the broker's
+    `handleCreateSession`). The smoke model broker now distinguishes RELAY vs HOSTED by the sent
+    provider (only `provider === 'pi'` registers `kind: 'hosted'`; anything else projects
+    `kind: 'relay'` + provider `pi-ahp-server`), and suite 28d asserts the exact payload keys
+    `{channel, provider, workingDirectory}`, `provider === 'pi'`, and the created card's
+    `kind: 'hosted'` — the pre-fix build fails these. **Focused LIVE retest of the fixed
+    create wrapper: PASS (2026-11-07, `linux-obsidian-74310`, E17)** — the UI-created session
+    materialized as a HOSTED interactive pi one (`AHP_PHASE2_CREATE_OK`), pause/resume/dispose
+    exercised live, 0 plugin-caused console errors, cleanup verified.
+  - **Focused provider:'pi' live sandbox — PASS (2026-11-07, `linux-obsidian-74310`).**
+    Disposable agent-os Linux-Obsidian instance against the live roles broker with the fixed
+    wrapper, then deleted (everyday vault untouched; broker :4500 state and cleanup paths
+    untouched). Results: a UI-hosted session created through the plugin's new-session control
+    (`provider:'pi'`) rendered as a real hosted interactive pi session (`AHP_PHASE2_CREATE_OK`
+    in its transcript), pause/resume and dispose exercised live, **0 plugin-caused console
+    errors**, and the sandbox cleanup verified. (E17)
+  - **INLINE dispose confirmation hardening (native-dialog wedge fix, 2026-11-07).** The
+    `linux-obsidian-74310` focused run surfaced ONE wedge: disposing through the NATIVE
+    `window.confirm` dialog left the renderer blocked while the server deleted the session —
+    with the catalogue gone, the STALE selected detail remained (a relaunch was needed once).
+    Fixed defensively + simply: the dispose confirmation is now an INLINE plain-DOM strip in
+    the selected detail — first `dispose…` click ARMS it (a warning naming the session + an
+    explicit `confirm dispose` / `cancel` pair; no native dialog anywhere); `confirm dispose`
+    sends exactly ONE `disposeSession` (busy-disabled duplicates; pending state), `cancel`
+    leaves the session/selection untouched. On the successful response the arm is cleared,
+    the disposed session's selection/detail is released immediately, and the catalogue
+    reloads authoritatively (the row itself still disappears only on the server's
+    `root/sessionRemoved` envelope — which NOW ALSO releases a matching selected detail on
+    its own, even when the dispose reply is late; a LATE reply can never clear a NEW
+    selection — only the session actually disposed is released). Errors restore a safe
+    state: the arm resets and the error line reports. Mock-tested in suite 28d
+    ((ac) inline arm/cancel/confirm + sessionRemoved detail-release regression; (ac2)
+    late-reply/new-selection race) — gate green, **989 asserted checks**. The FINAL focused
+    live sandbox covering the hardened dispose flow was ABORTED by the harness and its
+    (temporary) sandbox cleaned — the hardened INLINE dispose UI is mock-tested and
+    NOT live-revalidated (the E17 live dispose evidence predates the hardening that
+    the native-dialog wedge motivated).
+  - **Cosmetic fixes (same pass)**: the tofu-prone control glyphs (＋ / ⏸ / ▸ / ↺ / ● / ✓ / ✕ / ❓/ ⚠) across the AHP control surface, selected-card marker, pending-question banner,
+    turn-state and tool-call lines, and the settings warning were replaced with plain readable
+    text (the CSS classes unchanged); the chat detail meta line no longer renders a raw
+    `status 1` — it derives a state label from the LIVE fields first (pending question_user →
+    "needs input", activeTurn → "running"), then from the VERIFIED broker status bitmask
+    (`getSessionStatusLabel`, pi-ahp-server `src/types.ts` — copied verbatim, no guessed
+    numeric map).
+  - **Final focused sandbox revalidation of the hardened INLINE dispose flow — ABORTED, not
+    done**: the attempt was aborted by the harness and the temporary sandbox cleaned; the
+    hardened arm/cancel/confirm/dispose flow has never been exercised live. Re-run after
+    the roles deployment, exercising arm/cancel/confirm/dispose end-to-end live.
 - **Sandbox validation — PASS (2026-11-07).** The current uncommitted build was exercised end-to-end
   in a disposable Linux-Obsidian instance (`arthur-ahp-slice1-test`, agent-os), then the instance
   was deleted; the everyday vault was untouched and the build artifacts were MD5-verified after
@@ -65,8 +155,9 @@
   optional — §2.2 note unchanged, §6 still applies); `listSessions` on `ahp-root://` with
   `limit: 1` returned a page of 1 item; the socket closed cleanly. Metadata only — no
   prompt/chat content read or printed, no create/control RPC.
-- **Phases 2–5 remain [PROPOSED]** — nothing in this status touches arthur-agent, the 0.4 line,
-  or any mutating behavior.
+- **Phases 2 backend + live interactive validation and Phases 3–5 remain open** — the Phase 2
+  status above touches ONLY the plugin; arthur-agent, the 0.4 line, and the running broker
+  deploy are untouched.
 
 This plan describes how the **arthur** Obsidian plugin could integrate with the
 **AHP broker** (pi-ahp-server on ulysse) for remote pi session visibility and —
@@ -337,26 +428,66 @@ remain [PROPOSED] until landed. Phase 1 beyond slice 1 is still [PROPOSED].
 archive terminal, no vault/note context, no swarm, no arthur-agent changes,
 no 0.4 work.
 
-### Phase 2 — Broker security & opt-in interaction — **still [PROPOSED]**
+### Phase 2 — Broker security & opt-in interaction — **plugin side IMPLEMENTED + mock-tested; broker roles branch IMPLEMENTED (81 tests) but NOT deployed**
 
-Goal: mutating RPCs become safe to expose. **Server-side work on the AHP
-broker, not the plugin**, lands first.
+Goal: mutating RPCs become safe to expose. **Server-side work on the AHP broker, not the plugin**, landed
+first on the backend branch — but is **NOT deployed**; the plugin half is implemented and mock-tested below.
 
-1. **Broker roles [PROPOSED broker change]**: introduce `viewer` / `controller`
-   / `hostAgent` credentials with **server-side authorization of mutating
-   RPCs**; `controller` required for any mutation. The token mechanism stays
-   `initialize.params.token` (multi-role tokens reuse the same param).
-2. **Plugin interactions [PROPOSED, gated behind plugin setting
-   `enableControl = false` by default]**:
-   - `createSession` with validated `cwd`; prompt flow copied **exactly**
-     from the legacy plugin's actual `dispatchAction` contract (copy the real
-     payload shapes from source — do not invent).
-   - `createChat`; `question_user` response; `pauseSession`/`resumeSession`/
-     `retryTurn`/`disposeSession` with confirmations.
-3. **Tests**: role denial (viewer cannot mutate), cancellation/retry of a
-   turn, `reconnect` does not duplicate prompts. **No automatic retry of
-   non-idempotent RPCs** [RULE].
-4. `hostAgent.*` is **not used** for normal session controls [RULE].
+1. **Broker roles — implemented on a separate remote broker branch (81 tests passing), NOT deployed.**
+   `viewer` / `controller` / `hostAgent` credentials with **server-side authorization of mutating
+   RPCs** (`controller` required for any mutation; server error code `-32008`). The token mechanism
+   stays `initialize.params.token` (multi-role tokens reuse the same param).
+   - **Backend env contract — VERIFIED** (2026-11-07, on the roles checkout): the role tokens are
+     configured via exactly `AHP_VIEWER_TOKEN` / `AHP_CONTROLLER_TOKEN` / `AHP_HOST_AGENT_TOKEN`.
+     Token VALUES are never recorded in this repo or here.
+2. **Plugin interactions — IMPLEMENTED + mock-tested, gated behind plugin setting
+   `ahpEnableControl = false` by default** (stored in vault data.json; both gates AND'd):
+   - **Gate (fail-safe both ways)**: controls render only when the plugin setting is ON **AND** the
+     live connection's negotiated `initialize` result grants the `controller` role
+     (`canControl === true`). A roles-field-ABSENT or `roles: []` (legacy/anonymous) answer, a
+     `hostAgent`-only or `viewer`-only grant, and ANY non-controller state render NO controls — and
+     the local gate refuses every mutation call BEFORE a frame leaves (a viewer connection can
+     never spray mutations the broker merely ignores). A later connection downgrade (refresh)
+     removes the controls again.
+   - **Mutation wire (as implemented, verbatim 0.3.0 shapes)**:
+     - `createSession` REQUEST `{channel, provider: 'pi', workingDirectory}` — `channel` is minted
+       client-side (`ahp-session:/arthur-…`) and **`provider: 'pi'` is ALWAYS sent**: the broker
+       DEFAULTS the provider to `pi-ahp-server`, which would create an empty RELAY session instead
+       of the hosted interactive pi session (live-sandbox-confirmed, fixed; the mock broker now
+       models the relay-vs-hosted split and 28d asserts it). Reply `null`; the view then reloads
+       the catalogue AUTHORITATIVELY (fresh paged `listSessions`) and auto-selects the session
+       only once the catalogue contains it.
+     - `createChat` REQUEST `{channel, chat}` — client-minted `ahp-chat:/arthur-…`; the new chat
+       renders only via the server's `session/chatAdded` envelope (no optimistic row).
+     - `prompt` — the `dispatchAction` NOTIFICATION `{channel, clientSeq, action}`, action
+       `{type:'chat/turnStarted', turnId, message:{text, origin:{kind:'user'}}}`; `clientSeq`
+       monotonic per client+channel; `turnId` unique per send; NO invented question RPC — the
+       pending `question_user` toolCall flips the chat row into Answer mode and answers ride the
+       same prompt notification.
+     - `pauseSession`/`resumeSession`/`retryTurn`/`disposeSession {channel}` REQUESTS resolving
+       `null`; the button state follows the `root/sessionSummaryChanged {paused}` envelope, never
+       an optimistic flip.
+     - **No automatic retry of non-idempotent RPCs** [RULE — enforced]: prompts/mutations are sent
+       exactly once; a drop/timeout REJECTS the pending request into the view's error line and
+       reconnect NEVER re-sends create/prompt/dispose — the read-only reconnect cursor carries only
+       subscriptions + watermarks. Smoke suite 28d holds a reply, drops the socket, reconnects, and
+       asserts one frame ever + the rejection surfaced without token leakage.
+   - **Safety**: all control text renders via `textContent` (server strings can never become HTML);
+     errors are capped-truncated and never include the token (asserted for every wire frame and
+     every error line); `dispose` arms an INLINE plain-DOM confirmation strip in the selected
+     detail — a warning naming the session + explicit `confirm dispose`/`cancel` buttons, NO
+     native `window.confirm` anywhere in the flow.
+3. **Tests — IMPLEMENTED** (smoke suite 28d on the extended model broker; read-only suites 28/28b/28c
+   preserved untouched): role denial (viewer/anonymous/hostAgent × setting on/off, ZERO mutation
+   frames), exact wire shapes for every mutation, duplicate-submit protection while pending,
+   create→authoritative-reload→select, prompt/Answer + clientSeq monotonicity + unique turnIds,
+   dispose cancel/confirm, and `reconnect` never duplicating prompts/dispose.
+  - **Live interactive sandbox for Phase 2** — EXECUTED (2026-11-07, `linux-obsidian-73323`):
+    role gating live (viewer → `-32008`), controller controls + prompts + pause/resume + retry +
+    createChat + dispose all PASS, 0 plugin console errors. RESIDUE: the fixed
+    `provider:'pi'` create wrapper needs one focused live retest; the question_user answer path
+    remains mock-only (never live-exercised).
+5. `hostAgent.*` is **not used** for normal session controls [RULE].
 
 ### Phase 3 — arthur-agent gateway: evaluation, not automatic implementation — **still [PROPOSED]**
 
@@ -572,5 +703,10 @@ sandbox-validated in the final focused revalidation (E13, `linux-obsidian-70047`
 | E11 | **Live probe PASS**: WS connect to `ws://100.75.249.5:4500`; `initialize` `protocolVersions ["0.3.0"]`, no token → accepted, result `protocolVersion: "0.3.0"`; `listSessions` (`ahp-root://`, `limit 1`) → page of 1 item; clean close; metadata only, no prompt/chat content | ephemeral probe script from arthur, 2026-11-07 |
 | E12 | **Sandbox validation PASS (2026-11-07)**: current uncommitted build run in disposable Linux-Obsidian instance `arthur-ahp-slice1-test` (deleted after; MD5-verified artifact transfer; everyday vault untouched). Against live `100.75.249.5:4500`, blank token: open command launched the view; Refresh reached live; real catalogue rendered; two session selections rendered detail; close/reopen socket sequence 1→0→1; zero console errors; no control RPC. Screenshots: `/tmp/agent-os-shots/arthur-ahp-slice1-test-*.png` (detail `…3958975-19.png`, reopen `…4084044-30.png`). Follow-up UX issues §10b `ahp-ux-1…4` | agent-os Linux-Obsidian instance + live ulysse broker (delivery record) |
 | E13 | **Final focused revalidation PASS (2026-11-07)**: current production build root `main.js` md5 `6ecc318489a79ababbb0b88f8a60711b` (build deterministic) run in disposable agent-os instance `linux-obsidian-70047` (**deleted after; everyday vault untouched**) against live `100.75.249.5:4500` — close→same-session reselect **twice PASS**, A→B→A **and third switch PASS**; detail-first layout, `live · 0.3.0` protocol badge, stable catalogue order, and the selected-row styling PASS; **no plugin-caused console errors** (two sandbox-only `@electron/remote` "AppImage temp dir" exceptions excluded — agent-os AppImage environment noise, unrelated to plugin code). Screenshots `/tmp/agent-os-shots/linux-obsidian-70047-*.png` (`…1794070424037-30.png` reselect, `…1794070960456-55.png` A→B→A). Resolves §10b `ahp-resub-1` + `ahp-ux-1…4` | agent-os Linux-Obsidian instance + live ulysse broker (delivery record) |
+| E14 | **Phase 2 plugin gate PASS (2026-11-07)**: `typecheck` + `build` + `smoke` green — the Phase-1/2 smoke suites (28/28b/28c/28d) green, with suite 28d now additionally asserting the fixed hosted-create payload `createSession {channel, provider:'pi', workingDirectory}` and the mock broker's relay-vs-hosted split; uncommitted `dev` working tree (no commit) | arthur `dev` working tree (mock, no private host) |
+| E15 | **Phase 2 live interactive sandbox PASS-with-blocker (2026-11-07)**: disposable agent-os Linux-Obsidian instance `linux-obsidian-73323` (**deleted after; everyday vault untouched; cleanup paths + broker :4500 state untouched**) against the live roles-broker: viewer token mutations rejected with the broker's forbidden `-32008`; controller token surfaced the control affordances and exercised pause/resume, ONE prompt (`AHP_PHASE2_OK` in the hosted session transcript), retry, a second chat, and dispose — all off server envelopes; **0 plugin-caused console errors**. Residue recorded: `createSession` sent no `provider` → the broker created an empty RELAY (blocker, since fixed & mock-tested, E16); question_user answering stayed mock-only; the focused live retest of the fixed wrapper is pending | agent-os Linux-Obsidian instance + live roles broker (delivery record) |
+| E16 | **Blocker fix + cosmetic pass (2026-11-07)**: `src/api/ahp.ts` `createSession` now sends exactly `{channel, provider: 'pi', workingDirectory}` (hosted backend; the omitted provider defaults to `pi-ahp-server` = empty relay, verified in the broker's `handleCreateSession`); smoke suite 28d asserts the exact payload keys, `provider === 'pi'`, and the created card's `kind: 'hosted'` from the mock model's relay-vs-hosted split (provider-missing now projects `kind 'relay'`), so the pre-fix build fails the regression. Cosmetic: tofu-prone glyphs (＋/⏸/▸/↺/●/✓/✕/❓/⚠ in the AHP surface incl. the settings warning) → plain readable text; chat detail meta no longer renders raw `status 1` — it derives from live activeTurn/pending-question fields, then the VERIFIED broker status bitmask (`getSessionStatusLabel`, verbatim). | arthur `dev` working tree (mock; no private host) |
+| E17 | **Focused provider:'pi' live retest PASS (2026-11-07, `linux-obsidian-74310`)**: disposable agent-os Linux-Obsidian instance against the live roles broker with the FIXED create wrapper (**deleted after; everyday vault untouched; broker :4500 state + cleanup paths untouched**) — a session created through the plugin's new-session control with `provider:'pi'` materialized as a REAL HOSTED interactive pi session (`AHP_PHASE2_CREATE_OK` in its transcript), pause/resume and dispose exercised live, **0 plugin-caused console errors**, cleanup verified. Residue surfaced: the native `window.confirm` dispose dialog wedged a stale selected detail after the server-side deletion (fixed as E18) | agent-os Linux-Obsidian instance + live roles broker (delivery record) |
+| E18 | **INLINE dispose confirmation hardening (2026-11-07, mock-tested; the final focused live sandbox was ABORTED by the harness and cleaned — NOT live-revalidated)**: native `window.confirm` removed from the dispose flow — `src/ui/ahp-view.ts` now arms an INLINE plain-DOM confirm strip in the selected detail (warning naming the session + `confirm dispose`/`cancel`; busy-disabled while pending; one single `disposeSession` request); `src/api/ahp.ts` `root/sessionRemoved` now ALSO releases a matching selected detail (late reply / stale-detail wedge defense; only the removed session is cleared — never a NEW selection); successful response clears the arm + releases the detail immediately + reloads the catalogue authoritatively; errors restore a safe state. Smoke suite 28d rewritten to the inline flow ((ac)) + new regressions ((ac2) late-reply/new-selection race, `root/sessionRemoved` detail release); gate green — **989 asserted checks**; uncommitted `dev` working tree (no commit/version/deps) | arthur `dev` working tree |
 
 *End of plan.*

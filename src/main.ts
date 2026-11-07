@@ -103,6 +103,13 @@ export interface ArthurSettings {
 	 *  WS (never a URL/query/header, never logged). Plaintext in data.json —
 	 *  an existing, documented reality (PI-AHP-INTEGRATION-PLAN §6). */
 	ahpToken: string;
+	/** AHP interactive controls (create/prompt/pause/resume/retry/dispose in
+	 *  the pi-sessions view). DEFAULT OFF — read-only unless the user opts in.
+	 *  Even when on, a connection only gets controls if the broker assigned it
+	 *  the controller role (the client's live canControl), never for
+	 *  roles[]/anonymous connections. Opting in assumes a token that grants
+	 *  control, which is stored PLAINTEXT in data.json like the read token. */
+	ahpEnableControl: boolean;
 }
 
 /** Clients built from the active profile — rebuilt when settings change. */
@@ -147,6 +154,7 @@ const DEFAULT_SETTINGS: ArthurSettings = {
 	piArchivesCollapsed: true,
 	ahpEndpoint: "100.75.249.5:4500",
 	ahpToken: "",
+	ahpEnableControl: false,
 };
 
 /** Parse a bounded positive int; invalid/missing → fallback. */
@@ -358,6 +366,17 @@ class ArthurSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				});
 			});
+		new Setting(containerEl)
+			.setName("AHP session controls")
+			.setDesc(
+				"WARNING: Controls (create / prompt / pause / resume / retry / dispose) in the pi-sessions view. Default OFF = read-only. When on, controls still appear ONLY if the negotiated connection holds the broker's controller role (canControl); anonymous connections never get them. Prompts act on real pi sessions, disposal stops a session irreversibly, and the enabling broker token is stored PLAINTEXT in this vault's data.json.",
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(settings.ahpEnableControl).onChange(async (value) => {
+					settings.ahpEnableControl = value;
+					await this.plugin.saveSettings();
+				}),
+			);
 
 		const s = this.plugin.settings;
 		containerEl.createEl("h3", { text: "Dashboard display" });
@@ -769,6 +788,9 @@ export default class ArthurPlugin extends Plugin {
 					? data.ahpEndpoint.trim()
 					: DEFAULT_SETTINGS.ahpEndpoint,
 			ahpToken: typeof data?.ahpToken === "string" ? data.ahpToken : "",
+			// Off unless explicitly true — legacy data.json without the key stays
+			// read-only.
+			ahpEnableControl: data?.ahpEnableControl === true,
 		};
 	}
 

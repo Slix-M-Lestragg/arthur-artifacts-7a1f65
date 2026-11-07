@@ -1,7 +1,9 @@
 /**
- * AhpClient — READ-ONLY WebSocket client for the AHP broker (pi-ahp-server,
- * canonical target ulysse:4500, protocol 0.3.0). Direct plugin→broker transport
- * per docs/PI-AHP-INTEGRATION-PLAN.md Phase 1 (the "direct read-only slice").
+ * AhpClient — WebSocket client for the AHP broker (pi-ahp-server, canonical
+ * target ulysse:4500, protocol 0.3.0). Phase 1 was the direct read-only slice;
+ * Phase 2 adds the controller surface (roles, createSession/createChat/prompt,
+ * pause/resume/retry/dispose) with a client-side local gate — the broker stays
+ * the authority.
  *
  * Wire contract copied from the VERIFIED 0.3.0 server source
  * (pi-ahp-server-farm-view-wt src/server.ts + src/types.ts) — shapes are not
@@ -39,6 +41,25 @@
  *     `serverSeq <= last observed` is skipped; `origin.clientSeq` tags
  *     client-originated actions only and is NOT a dedupe key.
  *
+ * Controller slice wire shapes (verbatim from the broker source):
+ *   - `initialize` result carries `roles: AhpRole[]` (additive; absent or
+ *     unknown roles → [] — control stays gated).
+ *   - Mutations are REQUESTS: `createSession {channel, provider: 'pi',
+ *     workingDirectory}` — the client mints the `ahp-session:/` URI and MUST
+ *     ask for the hosted pi backend (`provider: 'pi'`; the broker DEFAULTS
+ *     the provider to `pi-ahp-server`, which creates an empty RELAY session
+ *     instead of an interactive pi one — live-sandbox-confirmed);
+ *     `createChat {channel, chat}`
+ *     — client-minted `ahp-chat:/`; `pauseSession`/`resumeSession`/
+ *     `retryTurn`/`disposeSession {channel}`. All resolve `null`.
+ *   - `prompt` is the dispatchAction NOTIFICATION `{channel, clientSeq,
+ *     action: {type:'chat/turnStarted', turnId, message: {text,
+ *     origin: {kind:'user'}}}}` — clientSeq monotonic per channel, turnId
+ *     unique per send. No reply; rejection arrives via the echoed envelope.
+ *   - Mutations are gated CLIENT-SIDE on the `controller` role and sent
+ *     exactly once — no automatic retry on timeout/drop/reconnect (pending
+ *     requests reject; the caller decides). No question RPC is invented.
+ *
  * Deliberately separate from the ComfyUI WsConnection (src/connection.ts):
  * JSON-RPC framing, backoff state and cleanup lifecycles differ enough that
  * sharing would couple two unrelated protocols. This client is also purely
@@ -54,6 +75,16 @@ export const AHP_ROOT_CHANNEL = "ahp-root://";
 /** Reserved error codes of the 0.3.0 broker. */
 export const AHP_ERROR_AUTH_REQUIRED = -32007;
 export const AHP_ERROR_UNSUPPORTED_PROTOCOL = -32005;
+/** A non-controller token calling a mutating method (role-gated broker). */
+export const AHP_ERROR_FORBIDDEN = -32008;
+
+/** Connection roles granted by initialize (roles server, types.ts AHPRole).
+ *  `viewer` = read-only methods; `controller` = viewer + mutating;
+ *  `hostAgent` = hostAgent.* only — it implies NOTHING about control. */
+export type AhpRole = "viewer" | "controller" | "hostAgent";
+
+/** Stable wire order the roles server reports initialize result `roles` in. */
+const AHP_ROLE_ORDER: readonly AhpRole[] = ["viewer", "controller", "hostAgent"];
 
 /** One ActionEnvelope (broker types.ts, verbatim shape). */
 export interface AhpActionEnvelope {
@@ -258,6 +289,15 @@ export class AhpClient {
 	/** The protocolVersion the broker negotiated at initialize — null until a
 	 *  handshake succeeded (never implies a connection before initialize). */
 	private negotiatedProtocol: string | null = null;
+	/** Roles granted by the last successful initialize (empty = none known).
+	 *  Read ONLY from an initialize result — a reconnect reply carries no
+	 *  roles and must not clobber them. Anonymous legacy mode also answers
+	 *  roles: [] with an UNGATED wire, but this client still gates locally so
+	 *  a viewer token can never spray mutations. */
+	private roleSet = new Set<AhpRole>();
+	/** dispatchAction clientSeq counter, per channel (monotonic per client
+	 *  and channel — the roles-server dispatchAction wire contract). */
+	private readonly clientSeqs = new Map<string, number>();
 
 	private nextId = 1;
 	private readonly pending = new Map<number, AhpPending>();
@@ -325,6 +365,17 @@ export class AhpClient {
 	 *  view surfaces it as a `live · 0.3.0` badge in the ready state only). */
 	get negotiatedVersion(): string | null {
 		return this.negotiatedProtocol;
+	}
+
+	/** Roles granted by initialize, in the broker's stable wire order. */
+	get roles(): readonly AhpRole[] {
+		return AHP_ROLE_ORDER.filter((r) => this.roleSet.has(r));
+	}
+
+	/** True only when the connection holds the `controller` role — the local
+	 *  gate for every mutation below. viewer/hostAgent never imply it. */
+	get canControl(): boolean {
+		return this.roleSet.has("controller");
 	}
 
 	/** The catalogue snapshot in STABLE order: the order a full listSessions
@@ -557,6 +608,14 @@ export class AhpClient {
 				return;
 			}
 			this.negotiatedProtocol = String(version);
+			// Roles are additive 0.3.0: read the granted list, tolerate servers
+			// without the field (→ roles stay empty → controller-gated surface
+			// stays rejected). Filter to the known vocabulary; unknown → dropped.
+			this.roleSet = new Set(
+				(Array.isArray(res.roles) ? res.roles : [])
+					.map(String)
+					.filter((r): r is AhpRole => (AHP_ROLE_ORDER as readonly string[]).includes(r)),
+			);
 			if (typeof res.serverSeq === "number" && Number.isFinite(res.serverSeq)) {
 				this.bumpWatermark(AHP_ROOT_CHANNEL, res.serverSeq);
 			}
@@ -619,6 +678,127 @@ export class AhpClient {
 		} while (cursor !== null);
 		this.catalogueMap = fresh; // listSessions is the authoritative catalogue
 		this.callbacks.onCatalogue?.();
+	}
+
+	// ------------------------------------------------------------- controller
+
+	/** Local gate for EVERY mutation: ready connection + controller role.
+	 *  The broker remains the authority (its role-token error surfaces raw
+	 *  through the request rejection); this gate keeps a viewer connection
+	 *  from spraying mutations whose only server reply is silent-ignored. */
+	private assertCanControl(op: string): void {
+		if (this.state !== "ready") throw new Error("not connected");
+		if (!this.canControl) {
+			throw new Error(
+				`AHP: ${op} requires the controller role (granted: ${this.roles.join(", ") || "none"})`,
+			);
+		}
+	}
+
+	/** Next clientSeq for one channel (monotonic per client + channel). */
+	private nextClientSeq(channel: string): number {
+		const seq = (this.clientSeqs.get(channel) ?? 0) + 1;
+		this.clientSeqs.set(channel, seq);
+		return seq;
+	}
+
+	/** Fresh unique ahp-session:/ id (client-minted; the broker rejects
+	 *  collisions — that rejection surfaces through the request promise). */
+	private freshSessionUri(): string {
+		return `ahp-session:/${this.clientId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+	}
+
+	/** The only provider the controller wrapper creates: `pi` = the broker's
+	 *  HOSTED interactive backend. Omitted (or any other value) makes the
+	 *  broker DEFAULT to `pi-ahp-server` — an empty RELAY session that never
+	 *  hosts a turn (live-sandbox-confirmed; server.ts handleCreateSession). */
+	private static readonly AHP_HOSTED_PROVIDER = "pi";
+
+	/**
+	 * Create a HOSTED pi session with its working directory set. The session URI
+	 * is minted client-side (the broker's createSession contract) and returned
+	 * as the Promise<string> so callers can subscribe/select it right away —
+	 * `provider: 'pi'` is ALWAYS sent: without it the broker defaults to the
+	 * empty-relay `pi-ahp-server` provider (no hosted session at all).
+	 */
+	async createSession(cwd: string): Promise<string> {
+		this.assertCanControl("createSession");
+		const channel = this.freshSessionUri();
+		await this.request("createSession", {
+			channel,
+			provider: AhpClient.AHP_HOSTED_PROVIDER,
+			workingDirectory: String(cwd ?? "") || undefined,
+		});
+		return channel;
+	}
+
+	/** Create a fresh child chat under a session; resolves the chat URI. */
+	async createChat(session: string): Promise<string> {
+		this.assertCanControl("createChat");
+		const channel = String(session ?? "");
+		if (!channel.startsWith("ahp-session:/")) throw new Error("createChat: an ahp-session:/ URI is required");
+		const chat = `ahp-chat:/${this.clientId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+		await this.request("createChat", { channel, chat });
+		return chat;
+	}
+
+	/**
+	 * Prompt one chat: the dispatchAction NOTIFICATION carrying the exact
+	 * roles-server chat/turnStarted wire shape — a unique turnId plus
+	 * `message: {text, origin: {kind: "user"}}`. No invented question RPC and
+	 * no promise on a server reply (dispatchAction is fire-and-forget; the
+	 * server either echoes the action back or attaches a rejectionReason to
+	 * the echo — both arrive through the subscribed chat channel):
+	 * resolves once the frame is on the wire.
+	 */
+	async prompt(chat: string, text: string): Promise<void> {
+		this.assertCanControl("prompt");
+		const channel = String(chat ?? "");
+		if (!channel.startsWith("ahp-chat:/")) throw new Error("prompt: an ahp-chat:/ URI is required");
+		const body = String(text ?? "");
+		if (!body.trim()) throw new Error("prompt: an empty prompt is rejected");
+		const action = {
+			type: "chat/turnStarted" as const,
+			turnId: `arthur-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+			message: { text: body, origin: { kind: "user" as const } },
+		};
+		this.sendNotification("dispatchAction", { channel, clientSeq: this.nextClientSeq(channel), action });
+	}
+
+	/** Pause a hosted session (external sessions are rejected by the broker). */
+	async pauseSession(resource: string): Promise<void> {
+		this.assertCanControl("pauseSession");
+		await this.request("pauseSession", { channel: resource });
+	}
+
+	/** Resume a paused hosted session. */
+	async resumeSession(resource: string): Promise<void> {
+		this.assertCanControl("resumeSession");
+		await this.request("resumeSession", { channel: resource });
+	}
+
+	/** Replay the hosted session's last turn on its default chat. */
+	async retryTurn(resource: string): Promise<void> {
+		this.assertCanControl("retryTurn");
+		await this.request("retryTurn", { channel: resource });
+	}
+
+	/** Dispose (and unpersist) a session owned by this connection. */
+	async disposeSession(resource: string): Promise<void> {
+		this.assertCanControl("disposeSession");
+		await this.request("disposeSession", { channel: resource });
+	}
+
+	/** Send one JSON-RPC NOTIFICATION (no id, no reply expected) — the exact
+	 *  teardown/unsubscribe fire-and-forget shape, reused for dispatchAction. */
+	private sendNotification(method: string, params: Record<string, unknown>): void {
+		const ws = this.ws;
+		if (!ws || ws.readyState !== 1) throw new Error("not connected");
+		try {
+			ws.send(JSON.stringify({ jsonrpc: "2.0", method, params }));
+		} catch (err) {
+			throw new Error(err instanceof Error ? err.message : "send failed");
+		}
 	}
 
 	/** Send one JSON-RPC request; resolves its result / rejects its error. */
@@ -710,7 +890,21 @@ export class AhpClient {
 			}
 			case "root/sessionRemoved": {
 				const target = typeof params.session === "string" ? params.session : "";
-				if (target && this.catalogueMap.delete(target)) this.callbacks.onCatalogue?.();
+				if (!target) return;
+				const dropped = this.catalogueMap.delete(target);
+				// A removed SELECTED session (the disposeSession flow: the server
+				// deletes the session and pushes sessionRemoved, possibly BEFORE
+				// the dispose reply lands) releases its selected detail here too —
+				// no stale detail can wedge on an already-gone session. Only the
+				// session that actually went away is cleared: a NEW selection made
+				// while the reply was in flight must never be cleared by someone
+				// else's removal notice.
+				if (target === this.selectedResource) {
+					this.releaseDetailState();
+					if (this.pendingSessionSub === target) this.pendingSessionSub = null;
+					this.callbacks.onDetail?.();
+				}
+				if (dropped) this.callbacks.onCatalogue?.();
 				return;
 			}
 			default:
@@ -766,6 +960,7 @@ export class AhpClient {
 		this.closeSocket();
 		this.everConnected = false;
 		this.negotiatedProtocol = null; // subscription trust is gone — re-negotiate
+		this.roleSet = new Set<AhpRole>();
 		this.seqWatermarks.clear();
 		this.releaseDetailState();
 		this.setState("error", message);
@@ -1055,9 +1250,13 @@ export class AhpClient {
 	}
 
 	/** Delete one or more channels' serverSeq watermarks (see
-	 *  releaseDetailState — a watermark never survives an unsubscribe). */
+	 *  releaseDetailState — a watermark never survives an unsubscribe).
+	 *  The per-channel clientSeq counters die with the subscription too. */
 	private dropWatermarks(channels: Iterable<string>): void {
-		for (const channel of channels) this.seqWatermarks.delete(channel);
+		for (const channel of channels) {
+			this.seqWatermarks.delete(channel);
+			this.clientSeqs.delete(channel);
+		}
 	}
 
 	/**
@@ -1119,7 +1318,9 @@ export class AhpClient {
 						toolName: typeof action.toolName === "string" ? action.toolName : toolCallId,
 						displayName: typeof action.displayName === "string" ? action.displayName : undefined,
 						status: "streaming", // the server reducer's initial state
-						partialInput: "",
+						// question_user prompts surface here too: a partialInput carried
+						// by chat/toolCallStart renders in the pending-question banner.
+						partialInput: typeof action.partialInput === "string" ? action.partialInput : "",
 						resultText: "",
 					},
 				});

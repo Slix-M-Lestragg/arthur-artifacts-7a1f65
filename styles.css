@@ -2127,3 +2127,78 @@
 .arthur-ahp-part--question {
 	color: var(--text-warning, var(--text-normal));
 }
+
+/* --- AHP interactive controls (Phase 2) ------------------------------------
+   Rendered only when the plugin setting is on AND the connection negotiated
+   the controller role; the containers are empty (hidden) otherwise. */
+
+.arthur-ahp-controls:empty {
+	display: none;
+}
+
+.arthur-ahp-controls-row {
+	display: flex;
+	gap: 0.4em;
+	align-items: center;
+	margin-bottom: 0.5em;
+}
+
+.arthur-ahp-cwd-input {
+	flex: 1;
+	min-width: 10em;
+}
+
+/* selected-session control buttons (pause/resume/retry/+chat/dispose) */
+.arthur-ahp-session-controls {
+	display: flex;
+	gap: 0.4em;
+	flex-wrap: wrap;
+	margin: 0.3em 0 0.2em;
+}
+
+.arthur-ahp-control:disabled {
+	opacity: 0.55;
+	cursor: default;
+}
+
+.arthur-ahp-control--danger {
+	color: var(--text-error);
+}
+
+/* inline dispose confirmation strip (armed inside the selected detail): the
+   warning line + confirm/cancel pair — NO native dialog in the dispose flow */
+.arthur-ahp-dispose-confirm {
+	margin: 0.3em 0 0.2em;
+	padding: 0.5em;
+	border: 1px solid var(--background-modifier-error-border, var(--background-modifier-border));
+	border-radius: 6px;
+}
+
+.arthur-ahp-dispose-warning {
+	margin: 0 0 0.4em;
+}
+
+.arthur-ahp-dispose-confirm .arthur-ahp-control + .arthur-ahp-control {
+	margin-left: 0.4em;
+}
+
+/* per-chat prompt row: textarea + Send/Answer, dashed-separated like turns */
+.arthur-ahp-prompt-row {
+	display: flex;
+	gap: 0.4em;
+	align-items: flex-end;
+	margin-top: 0.5em;
+	padding-top: 0.4em;
+	border-top: 1px dashed var(--background-modifier-border);
+}
+
+.arthur-ahp-prompt-input {
+	flex: 1;
+	min-height: 2.6em;
+	resize: vertical;
+	font-size: var(--font-ui-small);
+}
+
+.arthur-ahp-control-send {
+	flex-shrink: 0;
+}

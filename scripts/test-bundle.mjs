@@ -81,6 +81,25 @@ class StubEl extends StubNode {
 	appendChild(node) { this.append(node); return node; }
 	insertBefore(node, ref) { const i = this.children.indexOf(ref); this.children.splice(i < 0 ? this.children.length : i, 0, node); node._parent = this; return node; }
 	remove() { this._parent?.children && (this._parent.children = this._parent.children.filter((c) => c !== this)); }
+	// Minimal focus: the view's focus-capture reads document.activeElement.
+	focus() { document.activeElement = this; this._focused = true; }
+	blur() { if (document.activeElement === this) document.activeElement = null; }
+	// Minimal descendant attribute selector: '[attr="value"]' only — the exact
+	// shape the AHP view's focus restore uses ([data-ahp-prompt="..."]).
+	querySelector(sel) {
+		const m = /^\[([\w-]+)="([^"]*)"\]$/.exec(String(sel).trim());
+		if (!m) return null;
+		const find = (node) => {
+			for (const c of node.children ?? []) {
+				if (typeof c === "string") continue;
+				if (c.getAttribute?.(m[1]) === m[2]) return c;
+				const hit = find(c);
+				if (hit) return hit;
+			}
+			return null;
+		};
+		return find(this);
+	}
 	// Ancestor walk ('button'/'a', comma lists OK) mirroring Element.closest —
 	// the view's click guards use it to ignore clicks on buttons/links.
 	closest(sel) {
@@ -121,6 +140,7 @@ class StubFragment extends StubNode {
 }
 
 const fakeDocument = {
+	activeElement: null, // tests may point this at a stub input to simulate focus
 	createElement: (tag) => new StubEl(tag),
 	createElementNS: (_ns, tag) => new StubEl(tag),
 	createTextNode: (text) => new StubText(String(text)),
@@ -4098,6 +4118,19 @@ try {
 		initCount: 0,
 		initializeFrame: null,
 		listCalls: [],
+		promptDispatches: [], // dispatchAction NOTIFICATIONS (exact wire params)
+		mutCalls: { createSession: [], createChat: [], pauseSession: [], resumeSession: [], retryTurn: [], disposeSession: [] },
+	createdProviders: [], // per createdSession: the sent provider (mock models relay vs hosted)
+		roles: undefined, // initialize result roles (undefined = legacy answer without the field)
+		// sessions created by controller createSession (server-side model, page 1
+		// of listSessions); disposeSession prunes (the session is really gone).
+		createdSessions: [],
+		createdCwds: [],
+		pausedMap: {}, // channel → paused (the client only reads state via envelopes)
+		// held mutation replies (an in-flight server reply): heldMutation = method
+		// name, heldMutationReleases = queued serve() thunks for them.
+		holdMutation: null,
+		heldMutationReleases: [],
 		reconnects: [],
 		replayActions: [],
 		mismatch: false,
@@ -4135,6 +4168,30 @@ try {
 				this.serve({ jsonrpc: "2.0", id: frame.id, result: { protocolVersion: "0.4.0", serverSeq: 1, snapshots: [] } });
 				return;
 			}
+			if (frame.method && !("id" in frame)) {
+				// NOTIFICATION — no reply, exactly like the broker.
+				if (frame.method === "dispatchAction") ws28.promptDispatches.push(frame.params);
+				else if (frame.method === "unsubscribe") {
+					ws28.unsubs.push(frame.params?.channel);
+					if (this.subs) this.subs.delete(frame.params.channel); // removal is REAL
+				}
+				return;
+			}
+			if (frame.method && ws28.holdMutation === frame.method) {
+				// Held mutation reply: the request IS accepted (bookkeeping below)
+				// but its reply stays IN FLIGHT — duplicate-submit / pending-drop tests.
+				ws28.mutCalls[frame.method]?.push(frame.params);
+				if (frame.method === "createSession") {
+					ws28.createdSessions.push(frame.params.channel);
+					ws28.createdCwds.push(frame.params.workingDirectory ?? "/tmp/held");
+					ws28.createdProviders.push(frame.params.provider ?? null);
+				} else if (frame.method === "disposeSession") {
+					const hi = ws28.createdSessions.indexOf(frame.params.channel);
+					if (hi !== -1) { ws28.createdSessions.splice(hi, 1); ws28.createdCwds.splice(hi, 1); ws28.createdProviders.splice(hi, 1); }
+				}
+				ws28.heldMutationReleases.push(() => this.serve({ jsonrpc: "2.0", id: frame.id, result: null }));
+				return;
+			}
 			switch (frame.method) {
 				case "initialize": {
 					ws28.initCount++;
@@ -4150,17 +4207,79 @@ try {
 					this.serve({
 						jsonrpc: "2.0",
 						id: frame.id,
-						result: { protocolVersion: "0.3.0", serverSeq: 40, snapshots: [], defaultDirectory: "file:///srv" },
+						// roles: Phase 2 additive field — undefined = a legacy broker
+						// answer WITHOUT the field (roleSet stays empty → gated).
+						result: {
+							protocolVersion: "0.3.0", serverSeq: 40, snapshots: [], defaultDirectory: "file:///srv",
+							...(ws28.roles !== undefined ? { roles: ws28.roles } : {}),
+						},
 					});
+					return;
+				}
+				case "createSession": {
+					ws28.mutCalls.createSession.push(frame.params);
+					ws28.createdSessions.push(frame.params.channel);
+					ws28.createdCwds.push(frame.params.workingDirectory ?? "/tmp/unset");
+					// Relay-vs-HOSTED model (the verified handleCreateSession): the
+					// broker DEFAULTS provider to 'pi-ahp-server' (an empty RELAY
+					// session) and creates a hosted interactive pi session ONLY for
+					// provider 'pi'. The listSessions projection below mirrors this
+					// so the smoke regression PROVES the client sent provider:'pi'.
+					ws28.createdProviders.push(typeof frame.params.provider === "string" ? frame.params.provider : null);
+					this.serve({ jsonrpc: "2.0", id: frame.id, result: null });
+					return;
+				}
+				case "createChat": {
+					ws28.mutCalls.createChat.push(frame.params);
+					this.serve({ jsonrpc: "2.0", id: frame.id, result: null });
+					return;
+				}
+				case "pauseSession": {
+					ws28.mutCalls.pauseSession.push(frame.params);
+					ws28.pausedMap[frame.params.channel] = true;
+					this.serve({ jsonrpc: "2.0", id: frame.id, result: null });
+					return;
+				}
+				case "resumeSession": {
+					ws28.mutCalls.resumeSession.push(frame.params);
+					ws28.pausedMap[frame.params.channel] = false;
+					this.serve({ jsonrpc: "2.0", id: frame.id, result: null });
+					return;
+				}
+				case "retryTurn": {
+					ws28.mutCalls.retryTurn.push(frame.params);
+					this.serve({ jsonrpc: "2.0", id: frame.id, result: null });
+					return;
+				}
+				case "disposeSession": {
+					ws28.mutCalls.disposeSession.push(frame.params);
+					const di = ws28.createdSessions.indexOf(frame.params.channel);
+					if (di !== -1) { ws28.createdSessions.splice(di, 1); ws28.createdCwds.splice(di, 1); ws28.createdProviders.splice(di, 1); }
+					this.serve({ jsonrpc: "2.0", id: frame.id, result: null });
 					return;
 				}
 				case "listSessions": {
 					ws28.listCalls.push(frame.params);
 					const cursor = typeof frame.params.cursor === "string" ? Number(frame.params.cursor) : 0;
+					// Controller-created sessions land server-side too (page 1); the
+					// mock models the verified relay-vs-hosted split: provider 'pi' →
+					// hosted backend, anything else (incl. the broker DEFAULT) → relay.
+					const created = (ws28.createdSessions ?? []).map((ch, i) => {
+						const p = (ws28.createdProviders ?? [])[i] ?? "";
+						const hosted = p === "pi";
+						return {
+							resource: ch, title: "created via smoke",
+							provider: hosted ? "pi" : p || "pi-ahp-server",
+							workingDirectory: (ws28.createdCwds ?? [])[i] ?? "/tmp/smoke",
+							kind: hosted ? "hosted" : "relay",
+							...(ws28.pausedMap[ch] === true ? { paused: true } : {}),
+						};
+					});
 					if (cursor === 0) {
 						this.serve({ jsonrpc: "2.0", id: frame.id, result: { items: [
 							{ resource: "ahp-session:/a", title: "session A", provider: "pi", model: "glm-5", tokensIn: 1200, tokensOut: 300, cost: 0.02, childChatCount: 2, waitingOnCount: 1, kind: "hosted", modifiedAt: "2026-11-07T10:00:00Z" },
 							{ resource: "ahp-session:/b", title: "session B", provider: "pi", model: "mimo", tokensIn: 10, tokensOut: 2, cost: 0.0002, childChatCount: 0, kind: "hosted", modifiedAt: "2026-11-07T09:00:00Z" },
+							...created,
 						], nextCursor: "2" } });
 					} else {
 						this.serve({ jsonrpc: "2.0", id: frame.id, result: {
@@ -4219,6 +4338,7 @@ try {
 		serve(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
 		push(method, params) {
 			if (method === "action" && this.subs && !this.subs.has(params.channel)) return; // unsubscribe removal is REAL
+			if (method === "dispatchAction") ws28.promptDispatches.push(params); // broker-side echo record
 			this.onmessage?.({ data: JSON.stringify({ jsonrpc: "2.0", method, params }) });
 		}
 		close() { this.readyState = 3; }
@@ -4482,10 +4602,10 @@ try {
 	pushChat("ahp-chat:/not-selected", { type: "chat/turnStarted", turnId: "x", message: { text: "ignored" } }); // unrelated → ignored
 	await sleep(320);
 	const mainSection = detailSections().find((c) => c.attributes.get("data-ahp-chat") === "ahp-chat:/a-main");
-	assert(mainSection && allText(mainSection).includes("● running"), "(k) the in-flight turn renders as running");
+	assert(mainSection && allText(mainSection).includes("running"), "(k) the in-flight turn renders as running (readable label, never a glyph)");
 	assert(allText(mainSection).includes("second user msg"), "(k) chat/turnStarted message.text renders");
 	assert(allText(mainSection).includes("streaming output"), "(k) chat/delta content renders");
-	assert(allText(mainSection).includes("❓"), "(k) in-flight question_user toolCall (status streaming) surfaces the input banner");
+	assert(allText(mainSection).includes("pi needs input"), "(k) in-flight question_user toolCall (status streaming) surfaces the input banner");
 	assert(allText(mainSection).includes("mimo") && !allText(mainSection).includes("STALE-MODEL"),
 		"(k) the stale-seq (≤ watermark) usage was deduped per channel; the fresh one applied");
 	// toolCall-part count asserted on CLIENT state (allText double-counts;
@@ -4493,7 +4613,7 @@ try {
 	const tcPartCount = () => ([ahpView4.client?.selectedChats?.find((c) => c.resource === "ahp-chat:/a-main")?.activeTurn].filter((t) => !!t))
 		.flatMap((t) => t.parts)
 		.filter((p) => !!p.toolCall).length;
-	assert(allText(mainSection).split("▸").length - 1 >= 1, "(k) a tool-call part renders");
+	assert(allText(mainSection).includes("question_user (running…"), "(k) a tool-call part renders (readable name + status)");
 	assert(tcPartCount() === 1, "(k) exactly ONE toolCall part client-side (the duplicate toolCallId folded)");
 	assert(ahpView4.client?.channelWatermark?.("ahp-chat:/a-main") === 105,
 		"(k) per-channel watermark advanced to 105 (dup id tolerated, stale seq skipped)");
@@ -4505,10 +4625,10 @@ try {
 	await sleep(320);
 	const mainSection2 = detailSections().find((c) => c.attributes.get("data-ahp-chat") === "ahp-chat:/a-main");
 	const mainChat2 = ahpView4.client?.selectedChats?.find((c) => c.resource === "ahp-chat:/a-main");
-	assert(!allText(mainSection2).includes("❓") && !allText(mainSection2).includes("● running"), "(k2) no pending input after the answer + completion");
+	assert(!allText(mainSection2).includes("pi needs input") && !allText(mainSection2).includes("running"), "(k2) no pending input after the answer + completion");
 	assert(allText(mainSection2).includes("question_user answered"), "(k2) chat/toolCallComplete result.pastTenseMessage renders");
 	assert(mainChat2?.activeTurn === null, "(k2) chat/turnComplete folded the active turn into the bounded history");
-	assert(allText(mainSection2).includes("✓"), "(k2) the completed turn renders the ✓ state");
+	assert(allText(mainSection2).includes("done"), "(k2) the completed turn renders the readable 'done' state");
 	assert((mainChat2?.turns ?? []).length === 2, "(k2) both turns kept (t1 snapshot + t2 live) in the bounded history");
 
 	// (k3) subagent churn: session/chatAdded subscribes + renders the new chat;
@@ -4804,6 +4924,364 @@ try {
 	assert(ws28.instances[ws28.instances.length - 1].readyState === 3, "(v) the socket closed");
 	ws28.serverModel = null;
 
+	// ---- 28d. AHP Phase 2 CONTROLLER slice: roles gate + opt-in controls, ----
+	//          exact mutation wire shapes (createSession/createChat/prompt ----
+	//          dispatchAction/pause/resume/retry/dispose), zero mutations for
+	//          viewer/anonymous, busy duplicate-submit protection, dispose
+	//          confirm flows, and drop/reconnect NEVER auto-repeating any
+	//          mutation (non-idempotent RPC rule).
+	console.log("== 28d. AHP Phase 2 controller (roles gate / opt-in controls / exact mutation wire / no auto-repeat) ==");
+
+	plugin.settings.ahpEndpoint = "100.75.249.5:4500";
+	plugin.settings.ahpToken = "smoke-token";
+	plugin.settings.ahpEnableControl = false; // the plugin DEFAULT — off until proven otherwise
+	ws28.roles = undefined; // legacy broker answer WITHOUT a roles field
+	ws28.createdSessions = [];
+	ws28.createdCwds = [];
+	ws28.pausedMap = {};
+	ws28.holdMutation = null;
+	ws28.heldMutationReleases = [];
+	ws28.promptDispatches = [];
+	for (const k of Object.keys(ws28.mutCalls)) ws28.mutCalls[k] = [];
+	ws28.snapshots = {
+		"ahp-session:/ctl": { state: { chats: [{ resource: "ahp-chat:/ctl-main", title: "ctl main", status: 1 }] }, fromSeq: 400 },
+		"ahp-chat:/ctl-main": { state: { title: "ctl main", status: 1, turns: [], activeTurn: null }, fromSeq: 400 },
+	};
+	ws28.unsubs = [];
+	ws28.subscribeCalls = [];
+
+	const MUT_METHODS = ["createSession", "createChat", "pauseSession", "resumeSession", "retryTurn", "disposeSession", "dispatchAction"];
+	const mutationFrames = () => ws28.instances.flatMap((i) => i.sent).filter((f) => MUT_METHODS.includes(f.method));
+	let brokerPushD = ws28.instances[ws28.instances.length - 1];
+
+	await plugin.activateAhpView();
+	const viewD = app.workspace.getLeavesOfType("arthur-ahp")[0]?.view;
+	const controlsRow = () => viewD.controlsEl?.children ?? [];
+	const contentText = () => allText(viewD.contentEl);
+	const clickRefresh = async (ms = 90) => {
+		findButton(viewD.contentEl, "Refresh")?.handlers.get("click")[0]?.();
+		await sleep(ms);
+	};
+
+	// (w) DEFAULT gating: ahpEnableControl default OFF + roles absent → the
+	//     control surface NEVER renders and ZERO mutation frames ever leave.
+	await clickRefresh();
+	assert(viewD.client?.currentState === "ready", "(w) refreshing to live works with the default setting");
+	assert(viewD.client?.canControl === false, "(w) legacy (roles field ABSENT) → canControl stays false (gated)");
+	assert(controlsRow().length === 0, "(w) NO control rows with the default OFF setting + no roles");
+
+	ws28.roles = [];
+	await clickRefresh();
+	assert(viewD.client?.canControl === false, "(w) roles [] (anonymous) → canControl false");
+	assert(controlsRow().length === 0, "(w) roles [] renders no controls (absent === [] === viewer)");
+
+	ws28.roles = ["hostAgent"];
+	await clickRefresh();
+	assert(viewD.client?.canControl === false, "(w) hostAgent does NOT imply control (never elevates)");
+	assert(controlsRow().length === 0, "(w) hostAgent-only renders no controls");
+
+	ws28.roles = ["viewer"];
+	await clickRefresh();
+	assert(viewD.client?.roles?.length === 1 && viewD.client.roles[0] === "viewer", "(w) the granted viewer role surfaces in stable order");
+	assert(viewD.client?.canControl === false && controlsRow().length === 0, "(w) viewer-only → no controls");
+
+	// The local gate is also enforceable DIRECTLY: a viewer connection must
+	// refuse every mutation WITHOUT putting a frame on the wire.
+	let viewerGateError = null;
+	try {
+		await viewD.client.createChat("ahp-session:/ctl");
+	} catch (err) { viewerGateError = err instanceof Error ? err.message : String(err); }
+	assert(viewerGateError !== null && viewerGateError.includes("controller role"), "(w) direct createChat on viewer rejects with a clear role error");
+	try { await viewD.client.prompt("ahp-chat:/ctl-main", "x"); } catch { /* same gate */ }
+	try { await viewD.client.createSession("/tmp/forbidden"); } catch { /* same gate */ }
+	assert(mutationFrames().length === 0, "(w) viewer connection put ZERO mutation frames on the wire (local gate fired before send)");
+
+	// (w2) controller role with the SETTING STILL OFF → still NO controls
+	//      (BOTH the setting and the live role are required).
+	ws28.roles = ["viewer", "controller"];
+	await clickRefresh();
+	assert(viewD.client?.canControl === true, "(w2) controller role → client canControl true");
+	assert(JSON.stringify(viewD.client.roles) === '["viewer","controller"]', "(w2) roles surface in broker wire order (viewer, controller)");
+	assert(controlsRow().length === 0, "(w2) the setting is STILL required — no controls while ahpEnableControl is off");
+
+	// (w3) BOTH on → the control rows render (new-session row) and the API
+	//      surface exposes every mutation method.
+	plugin.settings.ahpEnableControl = true;
+	await clickRefresh();
+	assert(controlsRow().length > 0, "(w3) setting ON + controller role → the new-session control row renders");
+	assert(contentText().includes("new session"), "(w3) the create control is visible with both gates satisfied");
+	assert(typeof viewD.client.createSession === "function" && typeof viewD.client.prompt === "function"
+			&& typeof viewD.client.createChat === "function" && typeof viewD.client.pauseSession === "function"
+			&& typeof viewD.client.resumeSession === "function" && typeof viewD.client.retryTurn === "function"
+			&& typeof viewD.client.disposeSession === "function", "(w3) the full mutation transport surface is feature-present");
+
+	// (x) createSession: EXACT wire frame {channel, workingDirectory} only;
+	//     the reply is client-minted; held-reply duplicate-submit protection;
+	//     then an AUTHORITATIVE reload + auto-select of the created session.
+	const cwdInput = findByClass(viewD.contentEl, "arthur-ahp-cwd-input")[0];
+	assert(!!cwdInput, "(x) the new-session cwd input renders");
+	cwdInput.value = "/tmp/pi-smoke";
+	cwdInput.handlers.get("input")[0]?.();
+	const listCallsBeforeX = ws28.listCalls.length;
+	ws28.holdMutation = "createSession"; // hold the reply in flight
+	findButton(viewD.contentEl, "new session")?.handlers.get("click")[0]?.();
+	findButton(viewD.contentEl, "new session")?.handlers.get("click")[0]?.(); // dup click while busy
+	assert(ws28.mutCalls.createSession.length === 1, "(x) duplicate submit while pending → still exactly ONE createSession frame");
+	assert(findByClass(viewD.contentEl, "arthur-ahp-cwd-input")[0]?.disabled === true, "(x) the cwd input is disabled while the op is pending (busy state)");
+	const createFrame = ws28.mutCalls.createSession[0];
+	assert(JSON.stringify(Object.keys(createFrame).sort()) === '["channel","provider","workingDirectory"]', "(x) createSession carries EXACTLY {channel, provider, workingDirectory}");
+	assert(createFrame.channel.startsWith("ahp-session:/arthur-"), "(x) the session channel is minted client-side (ahp-session:/arthur-…)");
+	assert(createFrame.provider === "pi", "(x) createSession requests the HOSTED pi backend (provider:'pi' — without it the broker defaults to an empty relay)");
+	assert(createFrame.workingDirectory === "/tmp/pi-smoke", "(x) the workingDirectory matches the entered cwd");
+	for (const release of ws28.heldMutationReleases.splice(0)) release(); // release the held reply
+	ws28.holdMutation = null;
+	await sleep(650);
+	assert(ws28.listCalls.length >= listCallsBeforeX + 2, "(x) after creation the view reloaded the catalogue AUTHORITATIVELY (re-paged listSessions)");
+	assert(ws28.promptDispatches.length === 0, "(x) creating a session dispatches no actions (create is a REQUEST, not a notification)");
+	assert(viewD.client?.catalogue()?.some((s) => s.resource === createFrame.channel), "(x) the created session is in the authoritative catalogue");
+	assert(contentText().includes("created via smoke"), "(x) the created session card renders (server-side projection)");
+	assert(viewD.client?.catalogue()?.find((s) => s.resource === createFrame.channel)?.kind === "hosted",
+		"(x) the mock model registered the created session HOSTED (kind 'hosted', provider 'pi') — the relay-vs-hosted split proves provider:'pi' (a missing/wrong provider would show kind 'relay')");
+	assert(viewD.client?.selected === createFrame.channel, "(x) the created session auto-selected (only AFTER the catalogue knew it)");
+
+	// (y) prompt: the EXACT dispatchAction NOTIFICATION wire shape, draft
+	//     clearing, clientSeq monotonicity, unique turnIds, dup-submit guard.
+	brokerPushD = ws28.instances[ws28.instances.length - 1];
+	brokerPushD.push("root/sessionAdded", { channel: "ahp-root://", summary: { resource: "ahp-session:/ctl", title: "control session", provider: "pi" } });
+	await sleep(300);
+	const clickCtl = () => (viewD.listEl?.children ?? []).find((c) => c.attributes?.get?.("data-ahp-session") === "ahp-session:/ctl")?.handlers?.get("click")?.[0]?.();
+	clickCtl();
+	await sleep(320);
+	assert(viewD.client?.selected === "ahp-session:/ctl", "(y) the control-session card selects for the prompt flow");
+	const promptRowsD = () => findByClass(viewD.contentEl, "arthur-ahp-prompt-input");
+	assert(promptRowsD().length === 1, "(y) the primary chat renders its prompt row");
+	const ta = promptRowsD()[0];
+	ta.value = "smoke prompt text";
+	ta.handlers.get("input")[0]?.();
+	let sendBtn = findButton(viewD.contentEl, "Send");
+	assert(!!sendBtn && sendBtn.disabled === false, "(y) the Send button enables when a draft exists (input event, no repaint needed)");
+	sendBtn.handlers.get("click")[0]?.(); // synchronous pending window
+	sendBtn = findButton(viewD.contentEl, "Send");
+	assert(sendBtn?.disabled === true, "(y) Send disables while its op is pending (busy state, same tick)");
+	sendBtn.handlers.get("click")[0]?.(); // duplicate submit while pending
+	assert(ws28.promptDispatches.length === 1, "(y) duplicate submit while pending → still ONE dispatchAction");
+	await sleep(50);
+	sendBtn = findButton(viewD.contentEl, "Send");
+	assert(sendBtn?.disabled === true || sendBtn === null, "(y) the empty draft re-disables Send after success");
+	assert(!(promptRowsD()[0]?.value), "(y) the draft cleared after a successful send (no phantom re-send source)");
+	const dWireFrames = ws28.instances[ws28.instances.length - 1].sent.filter((f) => f.method === "dispatchAction");
+	assert(dWireFrames.length === 1 && !("id" in dWireFrames[0]),
+		"(y) prompt is a JSON-RPC NOTIFICATION on the wire (no id, no reply expected)");
+	const d1 = ws28.promptDispatches[0];
+	assert(JSON.stringify(Object.keys(d1).sort()) === '["action","channel","clientSeq"]', "(y) dispatchAction carries EXACTLY {channel, clientSeq, action}");
+	assert(d1.channel === "ahp-chat:/ctl-main" && d1.clientSeq === 1, "(y) the prompt targets the chat channel with clientSeq 1");
+	assert(JSON.stringify(Object.keys(d1.action).sort()) === '["message","turnId","type"]', "(y) the action carries EXACTLY {type, turnId, message}");
+	assert(d1.action.type === "chat/turnStarted", "(y) the action type is the exact chat/turnStarted");
+	assert(JSON.stringify(d1.action.message) === JSON.stringify({ text: "smoke prompt text", origin: { kind: "user" } }),
+		"(y) message = {text, origin:{kind:'user'}} — the exact legacy dispatchAction payload");
+	assert(typeof d1.action.turnId === "string" && d1.action.turnId.length > 0, "(y) turnId is a unique non-empty id");
+	// (y2) second prompt: clientSeq must advance; turnIds must never repeat.
+	const ta2 = promptRowsD()[0];
+	ta2.value = "second smoke prompt";
+	ta2.handlers.get("input")[0]?.();
+	findButton(viewD.contentEl, "Send")?.handlers.get("click")[0]?.();
+	await sleep(50);
+	const d2 = ws28.promptDispatches[1];
+	assert(d2?.clientSeq === 2 && d2.channel === "ahp-chat:/ctl-main", "(y2) the second prompt advances the per-channel clientSeq to 2");
+	assert(d2.action.turnId !== d1.action.turnId, "(y2) turnIds never repeat across prompts");
+	assert(ws28.promptDispatches.slice(-1)[0].action.message.text === "second smoke prompt", "(y2) the second prompt carries its own text");
+
+	// (z) question_user Answer path: the pending question flips the row into
+	//     answer mode; answers STILL go through the prompt notification
+	//     (no invented question RPC on the wire).
+	let seqD = 400; // the /ctl-main watermark is 400 post-snapshot
+	const pushChatD = (channel, action, atSeq = ++seqD) => {
+		ws28.instances[ws28.instances.length - 1].push("action", { channel, action, serverSeq: atSeq, origin: { clientId: "server", clientSeq: 0 } });
+		return atSeq;
+	};
+	pushChatD("ahp-chat:/ctl-main", { type: "chat/turnStarted", turnId: "tq", message: { text: "q turn", origin: { kind: "user" } } });
+	pushChatD("ahp-chat:/ctl-main", { type: "chat/toolCallStart", turnId: "tq", toolCallId: "tcq", toolName: "question_user", displayName: "question_user", partialInput: "continue?" });
+	await sleep(320);
+	assert(contentText().includes("pi needs input"), "(z) the pending question_user banner renders");
+	const answerBtn = findButton(viewD.contentEl, "Answer");
+	assert(!!answerBtn, "(z) the prompt row flipped into Answer mode while a question is pending");
+	assert(contentText().includes("answer pi's pending question") || contentText().includes("continue?"),
+		"(z) the answer affordance names the pending question (placeholder / banner)");
+	const taAnswer = promptRowsD()[0];
+	taAnswer.value = "the answer is x";
+	taAnswer.handlers.get("input")[0]?.();
+	answerBtn.handlers.get("click")[0]?.();
+	await sleep(50);
+	const dAnswer = ws28.promptDispatches[ws28.promptDispatches.length - 1];
+	assert(dAnswer.channel === "ahp-chat:/ctl-main" && dAnswer.action.message.text === "the answer is x"
+			&& dAnswer.action.message.origin?.kind === "user", "(z) the Answer path uses the SAME prompt notification (no invented method)");
+	pushChatD("ahp-chat:/ctl-main", { type: "chat/toolCallComplete", turnId: "tq", toolCallId: "tcq", result: { success: true, pastTenseMessage: "answered by smoke" } });
+	await sleep(320);
+	assert(!contentText().includes("pi needs input"), "(z) the banner clears once pi answers/continues (toolCallComplete)");
+
+	// (aa) pause/resume driven by the LIVE paused flag: exact {channel} wire,
+	//      button state NEVER flips optimistically — only on the envelope.
+	const pauseBtn0 = findButton(viewD.contentEl, "pause");
+	assert(!!pauseBtn0, "(aa) the pause button renders on the controller surface (resume button absent)");
+	assert(findButton(viewD.contentEl, "resume") === null, "(aa) the resume button does NOT render while not paused");
+	pauseBtn0.handlers.get("click")[0]?.();
+	assert(JSON.stringify(ws28.mutCalls.pauseSession[0]) === JSON.stringify({ channel: "ahp-session:/ctl" }), "(aa) pauseSession carries EXACTLY {channel}");
+	assert(!!findButton(viewD.contentEl, "pause"), "(aa) the button did NOT optimistically flip to resume (envelope-driven only)");
+	brokerPushD.push("root/sessionSummaryChanged", { channel: "ahp-root://", session: "ahp-session:/ctl", changes: { paused: true } });
+	await sleep(300);
+	assert(!!findButton(viewD.contentEl, "resume"), "(aa) root/sessionSummaryChanged {paused:true} flips the control row to resume");
+	assert(findButton(viewD.contentEl, "pause") === null, "(aa) pause is gone while paused");
+	const resumeBtn = findButton(viewD.contentEl, "resume");
+	resumeBtn.handlers.get("click")[0]?.();
+	assert(JSON.stringify(ws28.mutCalls.resumeSession?.[0]) === JSON.stringify({ channel: "ahp-session:/ctl" }), "(aa) resumeSession carries EXACTLY {channel}");
+	brokerPushD.push("root/sessionSummaryChanged", { channel: "ahp-root://", session: "ahp-session:/ctl", changes: { paused: false } });
+	await sleep(300);
+	assert(!!findButton(viewD.contentEl, "pause") && findButton(viewD.contentEl, "resume") === null, "(aa) resuming restores the pause button from the envelope");
+
+	// (ab) retry + create chat: exact wire frames; the new chat renders via
+	//      the server envelope only (no optimistic chat row).
+	findButton(viewD.contentEl, "retry turn")?.handlers.get("click")[0]?.();
+	await sleep(50);
+	assert(JSON.stringify(ws28.mutCalls.retryTurn[0]) === JSON.stringify({ channel: "ahp-session:/ctl" }), "(ab) retryTurn carries EXACTLY {channel}");
+	findButton(viewD.contentEl, "new chat")?.handlers.get("click")[0]?.();
+	await sleep(50);
+	const chatFrame = ws28.mutCalls.createChat[0];
+	assert(JSON.stringify(Object.keys(chatFrame).sort()) === '["channel","chat"]', "(ab) createChat carries EXACTLY {channel, chat}");
+	assert(chatFrame.channel === "ahp-session:/ctl" && chatFrame.chat.startsWith("ahp-chat:/arthur-"), "(ab) createChat targets the session with a client-minted chat URI");
+	const chatSectionsBefore = findByClass(viewD.contentEl, "arthur-ahp-chat").length;
+	assert(chatSectionsBefore === 1, "(ab) NO optimistic chat row after createChat (envelope decides)");
+	brokerPushD.push("action", { channel: "ahp-session:/ctl", action: { type: "session/chatAdded", summary: { resource: "ahp-chat:/ctl-2", title: "second chat", status: 1 } }, serverSeq: 500, origin: { clientId: "server", clientSeq: 0 } });
+	await sleep(320);
+	assert(findByClass(viewD.contentEl, "arthur-ahp-chat").length === 2, "(ab) the session/chatAdded envelope renders the new chat section");
+	assert(ws28.subscribeCalls.includes("ahp-chat:/ctl-2"), "(ab) the new chat channel got its live subscription");
+
+	// (ac) dispose INLINE confirmation (NO native window.confirm anywhere):
+	//      arm → warning strip in the detail → cancel sends NO frame;
+	//      re-arm → `confirm dispose` sends the EXACT {channel} frame once;
+	//      the row disappears ONLY via root/sessionRemoved, which must ALSO
+	//      release the disposed session's selected detail (stale-detail wedge
+	//      regression: server deletes session + catalogue empty + detail gone).
+	findButton(viewD.contentEl, "dispose")?.handlers.get("click")[0]?.(); // ARM only
+	assert(findButton(viewD.contentEl, "confirm dispose") !== null, "(ac) the FIRST dispose click renders the inline confirm strip (no native dialog)");
+	assert(findByClass(viewD.contentEl, "arthur-ahp-dispose-warning")[0]?.textContent?.includes("control session") === true, "(ac) the inline warning names the session title");
+	assert(/cannot be undone/.test(findByClass(viewD.contentEl, "arthur-ahp-dispose-warning")[0]?.textContent ?? ""), "(ac) the inline warning states the action is irreversible");
+	assert(ws28.mutCalls.disposeSession.length === 0, "(ac) ARMING sends NO disposeSession frame");
+	findButton(viewD.contentEl, "cancel")?.handlers.get("click")[0]?.(); // CANCEL
+	assert(findButton(viewD.contentEl, "confirm dispose") === null, "(ac) CANCEL removes the confirm strip");
+	assert(viewD.client?.selected === "ahp-session:/ctl", "(ac) CANCEL keeps the selection");
+	assert(ws28.mutCalls.disposeSession.length === 0, "(ac) CANCELLED dispose sends NO disposeSession frame");
+	findButton(viewD.contentEl, "dispose")?.handlers.get("click")[0]?.(); // re-arm
+	assert(findButton(viewD.contentEl, "confirm dispose") !== null, "(ac) the dispose control re-arms");
+	findButton(viewD.contentEl, "confirm dispose")?.handlers.get("click")[0]?.(); // CONFIRM
+	assert(ws28.mutCalls.disposeSession.length === 1, "(ac) CONFIRMED dispose sends the disposeSession request");
+	assert(JSON.stringify(ws28.mutCalls.disposeSession[0]) === JSON.stringify({ channel: "ahp-session:/ctl" }), "(ac) disposeSession carries EXACTLY {channel}");
+	assert(findButton(viewD.contentEl, "confirm dispose")?.disabled === true, "(ac) the confirm button busy-disables while the dispose is pending");
+	// The server deletes the session FIRST — root/sessionRemoved (not the
+	// dispose reply) must clear the catalogue row AND the selected detail.
+	brokerPushD.push("root/sessionRemoved", { channel: "ahp-root://", session: "ahp-session:/ctl" });
+	await sleep(650); // the (possibly late) dispose reply lands + the authoritative reload settles
+	assert(!viewD.client?.catalogue()?.some((s) => s.resource === "ahp-session:/ctl"), "(ac) root/sessionRemoved cleared the disposed session");
+	assert(viewD.client?.selected === null, "(ac) the disposed session's selection dropped (sessionRemoved releases the detail even with a late reply)");
+	assert(findByClass(viewD.contentEl, "arthur-ahp-detail-head").length === 0, "(ac) NO stale detail remains for a disposed session (wedge regression)");
+	assert(findByClass(viewD.contentEl, "arthur-ahp-dispose-confirm").length === 0, "(ac) the confirmation state cleared with the session (no phantom strip)");
+	assert(contentText().includes("no active pi sessions") === false || viewD.client?.catalogue().length > 0, "(ac) the catalogue rebuilt after the reload (created session still listed)");
+
+	// (ac2) LATE-REPLY vs NEW-SELECTION race: hold the dispose reply, confirm
+	//       the dispose of A, select a DIFFERENT session B, then A's reply and
+	//       A's sessionRemoved land — B's selection/detail must NEVER clear.
+	brokerPushD.push("root/sessionAdded", { channel: "ahp-root://", summary: { resource: "ahp-session:/ctl", title: "control session", provider: "pi" } });
+	await sleep(300);
+	clickCtl();
+	await sleep(320);
+	assert(viewD.client?.selected === "ahp-session:/ctl", "(ac2) the control session is selected again for the race");
+	ws28.holdMutation = "disposeSession"; // hold A's dispose reply IN FLIGHT
+	const disposeBaseRace = ws28.mutCalls.disposeSession.length;
+	const holdsBeforeRace = ws28.heldMutationReleases.length;
+	findButton(viewD.contentEl, "dispose")?.handlers.get("click")[0]?.(); // arm
+	findButton(viewD.contentEl, "confirm dispose")?.handlers.get("click")[0]?.(); // confirm — reply held
+	assert(ws28.mutCalls.disposeSession.length === disposeBaseRace + 1
+			&& ws28.heldMutationReleases.length === holdsBeforeRace + 1,
+		"(ac2) the raced dispose is on the wire once, with its reply still in flight");
+	// select the OTHER live session while the reply is late
+	const clickOther = () => (viewD.listEl?.children ?? []).find((c) => c.attributes?.get?.("data-ahp-session") === createFrame.channel)?.handlers?.get("click")?.[0]?.();
+	clickOther();
+	await sleep(320);
+	assert(viewD.client?.selected === createFrame.channel, "(ac2) the NEW selection took over while the dispose reply is late");
+	for (const release of ws28.heldMutationReleases.splice(0)) release(); // A's reply lands NOW
+	ws28.holdMutation = null;
+	await sleep(650); // the late success path settles (repaint + reload)
+	assert(viewD.client?.selected === createFrame.channel, "(ac2) the LATE dispose reply did NOT clear the NEW selection");
+	assert(findByClass(viewD.contentEl, "arthur-ahp-detail-head").length === 1
+			&& (findByClass(viewD.contentEl, "arthur-ahp-detail-head")[0]?.textContent ?? "").includes("created via smoke"),
+		"(ac2) the NEW selection's own detail renders (not a stale detail)");
+	assert(viewD.controlError === null, "(ac2) the late SUCCESS reply raised no error");
+	brokerPushD.push("root/sessionRemoved", { channel: "ahp-root://", session: "ahp-session:/ctl" });
+	await sleep(320);
+	assert(viewD.client?.selected === createFrame.channel, "(ac2) A's sessionRemoved never clears ANOTHER session's selection");
+	assert(findByClass(viewD.contentEl, "arthur-ahp-detail-head").length === 1, "(ac2) the NEW selection's detail survives A's removal notice");
+
+	// (ad) reconnect/drop NEVER auto-repeat mutations: hold a dispose reply,
+	//      drop the socket, reconnect — exactly one frame, EVER; the pending
+	//      request rejects into the control error line (never into a resend).
+	ws28.promptDispatches = []; // isolate the drop window
+	// fresh created session for the held-dispose victim
+	const cwdInput2 = findByClass(viewD.contentEl, "arthur-ahp-cwd-input")[0];
+	cwdInput2.value = "/tmp/pi-second";
+	cwdInput2.handlers.get("input")[0]?.();
+	findButton(viewD.contentEl, "new session")?.handlers.get("click")[0]?.();
+	await sleep(650);
+	const victim = viewD.client?.selected;
+	assert(!!victim && victim.startsWith("ahp-session:/arthur-"), "(ad) a fresh created session is selected as the held-dispose victim");
+	ws28.holdMutation = "disposeSession";
+	const disposeBaseD = ws28.mutCalls.disposeSession.length; // (ac)'s dispose was already counted
+	const holdsBefore = ws28.heldMutationReleases.length;
+	findButton(viewD.contentEl, "dispose")?.handlers.get("click")[0]?.(); // arm the inline confirmation
+	findButton(viewD.contentEl, "confirm dispose")?.handlers.get("click")[0]?.(); // confirm — reply still held
+	assert(ws28.heldMutationReleases.length === holdsBefore + 1
+			&& ws28.mutCalls.disposeSession.length === disposeBaseD + 1,
+		"(ad) the held dispose is ON THE WIRE (one frame) with its reply still in flight");
+	ws28.promptDispatches = []; // isolate the drop window
+	brokerPushD.drop();
+	await sleep(1750); // 1s backoff + reconnect + refresh
+	assert(viewD.client?.currentState === "ready", "(ad) the connection recovered after the drop");
+	assert(ws28.promptDispatches.length === 0, "(ad) reconnect re-sent ZERO dispatchActions (prompts are never auto-repeated)");
+	const disposeFramesAfterDrop = mutationFrames().filter((f) => f.method === "disposeSession");
+	assert(disposeFramesAfterDrop.length === disposeBaseD + 1,
+		"(ad) reconnect re-sent ZERO disposeSession frames (never auto-repeat, pending REJECTED)");
+	assert(!!viewD.controlError && viewD.controlError.includes("connection lost"), "(ad) the pending dispose surfaced its rejection in the control error line");
+	assert(!(viewD.controlError ?? "").includes("smoke-token"), "(ad) the error line never carries the broker token");
+	for (const release of ws28.heldMutationReleases.splice(0)) release(); // late reply → dead socket, harmless
+	await sleep(120);
+	assert(mutationFrames().filter((f) => f.method === "disposeSession").length === disposeBaseD + 1,
+		"(ad) the late held reply produced no resend either");
+	ws28.holdMutation = null;
+
+	// (ae) role downgrade AFTER controller work: refresh as viewer — controls
+	//      vanish, every direct mutation gate fires before any wire frame.
+	ws28.roles = ["viewer"];
+	await clickRefresh();
+	assert(controlsRow().length === 0 && viewD.client?.canControl === false, "(ae) a downgraded connection loses the control surface");
+	let downgradError = null;
+	try { await viewD.client.prompt(victim?.replace("ahp-session:", "ahp-chat:") + "-main", "nope"); } catch (err) { downgradError = err?.message ?? ""; }
+	assert(downgradError !== null && downgradError.includes("controller role"), "(ae) prompt on the downgraded connection rejects with the role error");
+
+	// (af) TOKEN SAFETY across the WHOLE section: the token exists ONLY inside
+	//      initialize params and NEVER in a URL, a mutation frame, the UI,
+	//      or any error line.
+	assert(ws28.instances.every((i) => !i.url.includes("smoke-token")), "(af) no WS URL ever carries the token");
+	for (const inst of ws28.instances) {
+		const dirty = inst.sent.find((f) => f.method !== "initialize" && JSON.stringify(f).includes("smoke-token"));
+		assert(!dirty, "(af) no non-initialize frame ever carries the token");
+		const init = inst.sent.find((f) => f.method === "initialize");
+		// Fresh sockets initialize WITH the token; reconnect sockets resume via
+		// the cursor WITHOUT ever re-sending it (the token travels once).
+		const isReconnectSocket = init === undefined && inst.sent.some((f) => f.method === "reconnect");
+		assert((init && init.params?.token === "smoke-token") || isReconnectSocket,
+			"(af) per socket: a tokened initialize or a tokenfree reconnect continuation");
+	}
+	assert(!contentText().includes("smoke-token"), "(af) the rendered UI never shows the token");
+	await app.workspace.detachLeavesOfType("arthur-ahp");
+
 	// restore the smoke defaults the other sections assume
 	plugin.settings.ahpEndpoint = "100.75.249.5:4500";
 	plugin.settings.ahpToken = "";
@@ -4826,4 +5304,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat all clean");

@@ -11,8 +11,17 @@
  * activity (question_user pending = an in-flight status-'streaming'
  * question_user toolCall; subagent = origin.kind 'tool' chats).
  *
- * ZERO mutating RPC: no createSession/dispose/createChat/pause/resume —
- * read-only UI is not a security boundary, it is simply out of slice scope.
+ * Phase 2 (interactive slice): control affordances are LAYERED over the
+ * read-only catalogue/detail and rendered only when BOTH the plugin setting
+ * (`ahpEnableControl`) AND the live client's negotiated `canControl` (the
+ * controller role from the broker's initialize result) hold — roles[]/anonymous
+ * connections get none. Every mutation is user-click-driven, never
+ * auto-retried, and NO optimistic state is rendered: prompts / create /
+ * dispose wait for the server envelopes (or an explicit Refresh) before the
+ * transcript or catalogue move. The control transport methods are
+ * FEATURE-DETECTED off the live client (this slice builds against the in-
+ * flight transport contract), so a client without them simply renders
+ * read-only.
  *
  * Connection is LAZY (only on the Refresh button — a user action): an offline
  * environment or a blank endpoint must never open a malformed URL, and the
@@ -51,6 +60,64 @@ const MAX_PARTS_PER_TURN = 24;
 const MAX_RESULT_TEXT = 240;
 const MAX_PART_PREVIEW = 400;
 
+// ---------------------------------------------------------------------------
+// Interactive control surface (Phase 2). The transport contract (createSession/
+// createChat/prompt/pauseSession/resumeSession/retryTurn/disposeSession +
+// roles/canControl) is being added to AhpClient concurrently; the view
+// feature-detects it instead of assuming it — every control checks
+// `typeof fn === "function"` before it renders/sends, a non-controller
+// connection renders nothing mutable, and unknown reply shapes coerce to safe
+// strings only.
+// ---------------------------------------------------------------------------
+
+/** The subset of the live client's surface the controls need (feature-kept
+ *  optional until the transport slice lands; never invented here). */
+interface AhpControlSurface {
+	/** Broker-assigned roles of this connection (controller / anonymous / …). */
+	roles?: unknown;
+	/** True only for a controller connection (computed from roles server-side). */
+	canControl?: boolean;
+	createSession?: (cwd: string) => Promise<unknown>;
+	createChat?: (session: string) => Promise<unknown>;
+	prompt?: (chatResource: string, text: string) => Promise<unknown>;
+	/** Distinct question-answer transport, when the client carries one; the
+	 *  same prompt() path answers otherwise (never an invented method). */
+	answerQuestion?: (chatResource: string, text: string) => Promise<unknown>;
+	pauseSession?: (session: string) => Promise<unknown>;
+	resumeSession?: (session: string) => Promise<unknown>;
+	retryTurn?: (session: string) => Promise<unknown>;
+	disposeSession?: (session: string) => Promise<unknown>;
+}
+
+/** The control surface for this connection, or null: gate = plugin setting ON
+ *  AND live client `canControl === true` AND (when roles are exposed and
+ *  populated) an actual 'controller' role AND the mutation methods present. */
+function controlSurface(client: AhpClient | null, enabled: boolean): AhpControlSurface | null {
+	const surface = client as unknown as AhpControlSurface | null;
+	if (!surface || !enabled || surface.canControl !== true) return null;
+	if (Array.isArray(surface.roles) && surface.roles.length > 0 && !surface.roles.some((r) => String(r) === "controller")) {
+		return null;
+	}
+	if (
+		typeof surface.createSession !== "function" ||
+		typeof surface.prompt !== "function"
+	) {
+		return null;
+	}
+	return surface;
+}
+
+/** Coerce a create* reply into a resource id: a plain string per contract, or
+ *  an object with a `resource` field (tolerated forward compat); else "". */
+function coerceResource(reply: unknown): string {
+	if (typeof reply === "string" && reply.trim()) return reply.trim();
+	if (reply && typeof reply === "object") {
+		const r = (reply as Record<string, unknown>).resource;
+		if (typeof r === "string" && r.trim()) return r.trim();
+	}
+	return "";
+}
+
 export class AhpView extends ItemView {
 	private listEl: HTMLElement | null = null;
 	private stateEl: HTMLElement | null = null;
@@ -62,6 +129,18 @@ export class AhpView extends ItemView {
 	private loading = false;
 	/** Coalescing repaint timer — catalogue bursts render once. */
 	private repaintTimer: number | null = null;
+
+	// Interactive controls (Phase 2): per-op pending keys, one shared error
+	// line, and prompt drafts in view state (live-envelope repaints must never
+	// erase what the user is typing). All DOM text goes through textContent.
+	private readonly pendingOps = new Set<string>();
+	private controlError: string | null = null;
+	/** The session armed for dispose — the INLINE confirmation state (the
+	 *  armed warning strip renders inside the selected detail; null = un-armed). */
+	private disposeArm: string | null = null;
+	private readonly promptDrafts = new Map<string, string>();
+	private newSessionCwd = "";
+	private controlsEl: HTMLElement | null = null;
 
 	constructor(leaf: WorkspaceLeaf, private readonly plugin: ArthurPlugin) {
 		super(leaf);
@@ -94,8 +173,14 @@ export class AhpView extends ItemView {
 		this.client = null;
 		this.loading = false;
 		this.listEl = null;
+		this.controlsEl = null;
 		this.stateEl = null;
 		this.detailEl = null;
+		this.pendingOps.clear();
+		this.promptDrafts.clear();
+		this.controlError = null;
+		this.disposeArm = null;
+		this.newSessionCwd = "";
 		this.contentEl.empty();
 	}
 
@@ -116,6 +201,9 @@ export class AhpView extends ItemView {
 	private buildSkeleton(): void {
 		this.contentEl.empty();
 		this.stateEl = this.contentEl.createEl("div", { cls: "arthur-ahp-state arthur-note" });
+		// Interactive controls render here (empty + CSS-hidden unless BOTH the
+		// setting and a live controller connection hold).
+		this.controlsEl = this.contentEl.createEl("div", { cls: "arthur-ahp-controls" });
 		// Detail-FIRST (directly below the controls): the selected session's
 		// live chats render above the long capped catalogue so selecting a
 		// session never demands a 2400px scroll; the empty panel hides in CSS.
@@ -161,9 +249,16 @@ export class AhpView extends ItemView {
 
 	private repaint(): void {
 		if (!this.listEl || !this.stateEl) return;
+		// Caret/draft focus of whichever prompt input the user is in — a live
+		// repaint must not steal it; restored at every exit below.
+		const focus = this.captureControlFocus();
 		const client = this.client;
 		const state = client?.currentState ?? "idle";
 		const busy = this.loading;
+		// A dispose arm whose session is no longer the selection (deselected,
+		// swapped, or removed via root/sessionRemoved) dies here — never a
+		// phantom confirmation strip against the wrong detail.
+		if (this.disposeArm !== null && client?.selected !== this.disposeArm) this.disposeArm = null;
 		this.stateEl.empty();
 
 		// State line + refresh affordance.
@@ -196,6 +291,7 @@ export class AhpView extends ItemView {
 		refreshBtn.addEventListener("click", () => this.onRefresh());
 		stateLine.append(refreshBtn);
 		this.stateEl.append(stateLine);
+		this.renderControls(client);
 
 		// The catalogue: incremental rows, capped (never load-all by design).
 		this.listEl.empty();
@@ -208,6 +304,7 @@ export class AhpView extends ItemView {
 					el("p", { cls: "arthur-note", text: "not connected — press Refresh to load the catalogue" }),
 				);
 			}
+			this.restoreControlFocus(focus);
 			return;
 		}
 		const shown = sessions.slice(0, MAX_CARDS);
@@ -231,6 +328,7 @@ export class AhpView extends ItemView {
 
 		// The selected session's live detail (bounded chats/turns/parts).
 		this.renderDetail();
+		this.restoreControlFocus(focus);
 	}
 
 	/** The selected session's live chats (bounded chats/turns/parts), DETAIL-
@@ -256,7 +354,7 @@ export class AhpView extends ItemView {
 		);
 		const closeBtn = document.createElement("button");
 		closeBtn.addClass("arthur-btn", "arthur-btn--tiny", "arthur-ahp-close");
-		closeBtn.textContent = "✕ close detail";
+		closeBtn.textContent = "close detail";
 		closeBtn.setAttribute("title", "Deselect the session and close the live chat detail");
 		closeBtn.addEventListener("click", () => {
 			if (this.client && this.client.currentState === "ready") void this.client.selectSession(null);
@@ -272,13 +370,29 @@ export class AhpView extends ItemView {
 				}),
 			);
 		}
+		const surface = controlSurface(client, this.plugin.settings.ahpEnableControl);
+		if (surface) {
+			detailEl.append(this.sessionControlsRow(surface));
+			// The armed INLINE dispose confirmation renders inside the selected
+			// detail itself — no native dialog anywhere in the flow.
+			if (this.disposeArm === client.selected) {
+				detailEl.append(this.disposeConfirmRow(surface, client.selected));
+			}
+			if (this.controlError) {
+				detailEl.append(el("p", { cls: "arthur-note arthur-ahp-error", text: this.controlError }));
+			}
+		}
 		const chats = client.selectedChats;
 		if (chats.length === 0) {
 			detailEl.append(el("p", { cls: "arthur-note", text: "subscribing chat detail…" }));
 			return;
 		}
 		for (const chat of chats.slice(0, MAX_CHAT_SECTIONS)) {
-			detailEl.append(chatSection(chat));
+			// Prompt rows go to PRIMARY chats only — origin.kind 'tool' marks a
+			// subagent chat that user prompts never address.
+			detailEl.append(
+				chatSection(chat, surface && chat.originKind !== "tool" ? this.promptControlsFor(surface, chat) : null),
+			);
 		}
 		if (chats.length > MAX_CHAT_SECTIONS) {
 			detailEl.append(
@@ -287,6 +401,365 @@ export class AhpView extends ItemView {
 					text: `+${chats.length - MAX_CHAT_SECTIONS} more chats not rendered`,
 				}),
 			);
+		}
+	}
+
+	// ------------------------------------------------- interactive controls
+
+	/** The new-session row (cwd input + create), rendered only when the setting
+	 *  is on AND the live connection is a controller. */
+	private renderControls(client: AhpClient | null): void {
+		if (!this.controlsEl) return;
+		this.controlsEl.empty();
+		const surface = controlSurface(client, this.plugin.settings.ahpEnableControl);
+		if (!surface || client?.currentState !== "ready") return;
+		const row = el("div", { cls: "arthur-ahp-controls-row" });
+		const cwd = document.createElement("input");
+		cwd.type = "text";
+		cwd.addClass("arthur-ahp-cwd-input");
+		cwd.placeholder = "working directory for a new pi session";
+		cwd.setAttribute("data-ahp-prompt", "");
+		cwd.setAttribute("title", "Create a new pi session in this directory (controller connection)");
+		cwd.value = this.newSessionCwd;
+		if (this.pendingOps.size > 0) cwd.disabled = true;
+		cwd.addEventListener("input", () => {
+			this.newSessionCwd = cwd.value;
+		});
+		cwd.addEventListener("keydown", (ev: KeyboardEvent) => {
+			if (ev.key === "Enter") {
+				ev.preventDefault();
+				this.onCreateSession(surface);
+			}
+		});
+		row.append(cwd);
+		const createBtn = this.controlButton("create", "new session", "Create a new pi session in the entered working directory");
+		createBtn.addEventListener("click", () => this.onCreateSession(surface));
+		row.append(createBtn);
+		this.controlsEl.append(row);
+		if (this.controlError) {
+			this.controlsEl.append(el("p", { cls: "arthur-note arthur-ahp-error", text: this.controlError }));
+		}
+	}
+
+	/** Session-level controls for the selected session: pause/resume (per its
+	 *  LIVE paused flag), retry last turn, + chat, dispose (confirmable). */
+	private sessionControlsRow(surface: AhpControlSurface): HTMLElement {
+		const client = this.client;
+		const resource = client?.selected ?? "";
+		const paused = client?.selectedSummary?.paused === true;
+		const row = el("div", { cls: "arthur-ahp-session-controls" });
+		if (typeof (paused ? surface.resumeSession : surface.pauseSession) === "function") {
+			const btn = this.controlButton(
+				paused ? `resume:${resource}` : `pause:${resource}`,
+				paused ? "resume" : "pause",
+				paused ? "Resume this pi session" : "Pause this pi session",
+			);
+			btn.addEventListener("click", () => this.onPauseResume(surface, resource, paused));
+			row.append(btn);
+		}
+		if (typeof surface.retryTurn === "function") {
+			const btn = this.controlButton(`retry:${resource}`, "retry turn", "Re-send this session's last user turn");
+			btn.addEventListener("click", () => this.onRetryTurn(surface, resource));
+			row.append(btn);
+		}
+		if (typeof surface.createChat === "function") {
+			const btn = this.controlButton(
+				`new-chat:${resource}`,
+				"new chat",
+				"Append a new chat to this session — it renders when the server's chatAdded envelope arrives",
+			);
+			btn.addEventListener("click", () => this.onCreateChat(surface, resource));
+			row.append(btn);
+		}
+		if (typeof surface.disposeSession === "function") {
+			const btn = this.controlButton(
+				`dispose:${resource}`,
+				"dispose…",
+				"Dispose (stop + remove) this pi session — asks for confirmation first",
+			);
+			btn.addClass("arthur-ahp-control--danger");
+			btn.addEventListener("click", () => this.onDisposeSelected(surface, resource));
+			row.append(btn);
+		}
+		return row;
+	}
+
+	/** The prompt row of one PRIMARY chat: textarea + send (or Answer while a
+	 *  question_user call is pending). Drafts live in view state so live
+	 *  envelope repaints never erase what the user is typing. */
+	private promptControlsFor(surface: AhpControlSurface, chat: AhpChatDetailView): HTMLElement | null {
+		const answering = pendingQuestionCall(chat) !== null;
+		// Answer via the distinct transport method ONLY when the client actually
+		// exposes one; otherwise the plain chat prompt carries the answer — no
+		// answering mechanism is invented here.
+		const method =
+			answering && typeof surface.answerQuestion === "function" ? surface.answerQuestion : surface.prompt;
+		if (typeof method !== "function") return null;
+		const key = `prompt:${chat.resource}`;
+		const row = el("div", { cls: "arthur-ahp-prompt-row" });
+		const textarea = document.createElement("textarea");
+		textarea.addClass("arthur-ahp-prompt-input");
+		textarea.rows = 2;
+		textarea.setAttribute("data-ahp-prompt", chat.resource);
+		textarea.placeholder = answering ? "answer pi's pending question…" : "send a prompt to this chat…";
+		textarea.value = this.promptDrafts.get(chat.resource) ?? "";
+		if (this.pendingOps.size > 0) textarea.disabled = true;
+		textarea.addEventListener("input", () => {
+			if (textarea.value) this.promptDrafts.set(chat.resource, textarea.value);
+			else this.promptDrafts.delete(chat.resource);
+			// Live enable/disable of the send button WITHOUT a full repaint: with
+			// only draft-in-state the button would stay stale until the next
+			// envelope-driven repaint (typed but never sendable).
+			send.disabled = this.pendingOps.size > 0 || !(this.promptDrafts.get(chat.resource) ?? "").trim();
+		});
+		textarea.addEventListener("keydown", (ev: KeyboardEvent) => {
+			if (ev.key === "Enter" && !ev.shiftKey) {
+				ev.preventDefault();
+				this.onSendPrompt(surface, chat.resource, answering);
+			}
+		});
+		row.append(textarea);
+		const send = this.controlButton(
+			key,
+			answering ? "Answer" : "Send",
+			answering ? "Answer pi's pending question" : `Send a prompt to ${truncate(chat.title, 40)}`,
+		);
+		send.addClass("arthur-ahp-control-send");
+		send.disabled = this.pendingOps.size > 0 || !(this.promptDrafts.get(chat.resource) ?? "").trim();
+		send.addEventListener("click", () => this.onSendPrompt(surface, chat.resource, answering));
+		row.append(send);
+		return row;
+	}
+
+	/** One control button; disabled while ANY control op is pending (busy —
+	 *  no interleaved mutations); handlers additionally dedupe per op key. */
+	private controlButton(key: string, label: string, title: string): HTMLButtonElement {
+		const btn = document.createElement("button");
+		btn.addClass("arthur-btn", "arthur-btn--tiny", "arthur-ahp-control");
+		btn.textContent = label; // textContent — DOM-safe against any server text
+		btn.setAttribute("title", title);
+		btn.disabled = this.pendingOps.size > 0;
+		return btn;
+	}
+
+	/** One control mutation: dedupe (per key), busy repaint, DOM-safe error
+	 *  report (textContent only, capped). NEVER retried automatically. */
+	private runControl(key: string, action: () => Promise<void>): void {
+		if (this.pendingOps.has(key)) return;
+		const client = this.client;
+		if (!client || client.currentState !== "ready") {
+			this.controlError = "connection is not live — press Refresh first";
+			this.repaint();
+			return;
+		}
+		this.pendingOps.add(key);
+		this.controlError = null;
+		this.repaint();
+		action()
+			.catch((err) => {
+				this.controlError = truncate(err instanceof Error ? err.message : String(err ?? "control failed"), 200);
+			})
+			.finally(() => {
+				this.pendingOps.delete(key);
+				this.repaint();
+			});
+	}
+
+	private onSendPrompt(surface: AhpControlSurface, chatResource: string, answering: boolean): void {
+		const key = `prompt:${chatResource}`;
+		if (this.pendingOps.has(key)) return;
+		const text = (this.promptDrafts.get(chatResource) ?? "").trim();
+		if (!text) return;
+		const target =
+			answering && typeof surface.answerQuestion === "function" ? surface.answerQuestion : surface.prompt!;
+		this.runControl(key, async () => {
+			await target.call(surface, chatResource, text);
+			// Success = submission accepted; the transcript moves on envelopes
+			// only (no optimistic turn render). The draft clears on success.
+			this.promptDrafts.delete(chatResource);
+		});
+	}
+
+	private onCreateSession(surface: AhpControlSurface): void {
+		if (this.pendingOps.has("create-session")) return;
+		const cwd = this.newSessionCwd.trim();
+		if (!cwd) {
+			this.controlError = "enter a working directory to create a pi session";
+			this.repaint();
+			return;
+		}
+		this.runControl("create-session", async () => {
+			const resource = coerceResource(await surface.createSession!(cwd));
+			if (!resource) throw new Error("createSession returned no session resource"); // no optimistic row
+			// Refresh re-establishes the authoritative catalogue, then the
+			// returned session is selected only where the catalogue knows it.
+			const client = this.client;
+			try {
+				await client?.load();
+			} catch {
+				// the state line shows the error; live envelopes may still land
+			}
+			if (
+				client &&
+				client.currentState === "ready" &&
+				client.catalogue().some((s) => s.resource === resource)
+			) {
+				void client.selectSession(resource);
+			}
+		});
+	}
+
+	private onCreateChat(surface: AhpControlSurface, session: string): void {
+		if (this.pendingOps.has(`new-chat:${session}`)) return;
+		this.runControl(`new-chat:${session}`, async () => {
+			await surface.createChat!(session);
+			// session/chatAdded (the server envelope) subscribes + renders the
+			// new chat; nothing optimistic is inserted here.
+		});
+	}
+
+	private onPauseResume(surface: AhpControlSurface, session: string, paused: boolean): void {
+		const key = `${paused ? "resume" : "pause"}:${session}`;
+		if (this.pendingOps.has(key)) return;
+		this.runControl(key, async () => {
+			await (paused ? surface.resumeSession!(session) : surface.pauseSession!(session));
+			// The card's paused badge updates on the sessionSummaryChanged
+			// envelope; the button does not flip optimistically.
+		});
+	}
+
+	private onRetryTurn(surface: AhpControlSurface, session: string): void {
+		const key = `retry:${session}`;
+		if (this.pendingOps.has(key)) return;
+		this.runControl(key, async () => {
+			await surface.retryTurn!(session);
+		});
+	}
+
+	/** The dispose control: the FIRST click ARMS an inline plain-DOM
+	 *  confirmation inside the selected detail — NEVER a native window.confirm
+	 *  (the observed wedge: the native modal blocked the renderer while the
+	 *  broker deleted the session and the root/sessionRemoved envelope cleared
+	 *  the catalogue, leaving a stale detail that survived until relaunch).
+	 *  arming alone mutates nothing; only the strip's `confirm dispose` acts. */
+	private onDisposeSelected(surface: AhpControlSurface, session: string): void {
+		if (this.pendingOps.has(`dispose:${session}`)) return;
+		if (this.disposeArm !== session) this.disposeArm = session;
+		this.repaint();
+	}
+
+	/** The armed inline confirmation strip: a warning naming the session plus
+	 *  an explicit `confirm dispose` / `cancel` pair — both busy-disabled while
+	 *  any control op is pending (no interleaved mutations). */
+	private disposeConfirmRow(surface: AhpControlSurface, session: string): HTMLElement {
+		const title = (this.client?.selectedSummary?.title ?? "").trim() || session;
+		const row = el("div", { cls: "arthur-ahp-dispose-confirm" });
+		row.append(
+			el("p", {
+				cls: "arthur-note arthur-ahp-dispose-warning",
+				text: `Dispose pi session “${title}”? Its processes stop and the session cannot be reused. This cannot be undone.`,
+			}),
+		);
+		const confirmBtn = this.controlButton(
+			`dispose:${session}`,
+			"confirm dispose",
+			"Dispose the session now — it cannot be undone",
+		);
+		confirmBtn.addClass("arthur-ahp-control--danger");
+		confirmBtn.addEventListener("click", () => this.onDisposeConfirmed(surface, session));
+		const cancelBtn = this.controlButton(
+			`cancel-dispose:${session}`,
+			"cancel",
+			"Keep this session and leave the confirmation",
+		);
+		cancelBtn.addEventListener("click", () => {
+			if (this.disposeArm === session) this.disposeArm = null;
+			this.repaint();
+		});
+		row.append(confirmBtn, cancelBtn);
+		return row;
+	}
+
+	/** The CONFIRMED dispose: exactly one disposeSession request (dedupe +
+	 *  busy-disable via runControl/pendingOps). NOTHING is deleted
+	 *  optimistically: on the successful response the arm is spent, the
+	 *  disposed session's selection/detail is released immediately, and the
+	 *  catalogue reloads AUTHORITATIVELY (the row itself disappears on the
+	 *  server's root/sessionRemoved envelope — which ALSO releases a matching
+	 *  selected detail on its own, belt and braces when the reply is late).
+	 *  A LATE reply can therefore never clear a NEW selection: the release is
+	 *  guarded to the session actually disposed (and only if still selected).
+	 *  Errors restore a safe state: the arm resets, the error line reports. */
+	private onDisposeConfirmed(surface: AhpControlSurface, session: string): void {
+		if (this.pendingOps.has(`dispose:${session}`)) return;
+		if (this.disposeArm !== session) {
+			// The arm was lost before the confirm (selection changed mid-flow) —
+			// never dispose without an explicit armed confirmation; re-arm.
+			this.disposeArm = session;
+			this.repaint();
+			return;
+		}
+		this.runControl(`dispose:${session}`, async () => {
+			try {
+				await surface.disposeSession!(session);
+			} catch (err) {
+				if (this.disposeArm === session) this.disposeArm = null; // safe state: re-armable
+				throw err;
+			}
+			this.disposeArm = null; // the arm is spent
+			const client = this.client;
+			// Release the disposed session's selection ONLY if it is STILL the
+			// selection (a selection made while the reply was in flight wins).
+			if (this.client?.selected === session) void this.client.selectSession(null);
+			this.repaint();
+			try {
+				await client?.load(); // reload the AUTHORITATIVE catalogue
+			} catch {
+				// the state line already shows the error; envelopes may still land
+			}
+		});
+	}
+
+	/** The prompt/cwd input holding focus + its caret, so an envelope-driven
+	 *  repaint restores typing position (draft text lives in view state).
+	 *  No HTMLInputElement/HTMLTextAreaElement globals: the smoke harness (and
+	 *  any non-DOM environment) has none — tagName matching is the safe check. */
+	private captureControlFocus(): { key: string; caret: number } | null {
+		const active = document.activeElement as
+			| { tagName?: unknown; getAttribute?: (k: string) => string | null; value?: unknown; selectionStart?: unknown }
+			| null
+			| undefined;
+		if (!active) return null;
+		const tag = typeof active.tagName === "string" ? active.tagName : "";
+		if (tag !== "INPUT" && tag !== "TEXTAREA") return null;
+		const key = active.getAttribute?.("data-ahp-prompt") ?? null;
+		if (key === null) return null;
+		const value = typeof active.value === "string" ? active.value : "";
+		let caret = value.length;
+		if (typeof active.selectionStart === "number" && active.selectionStart >= 0) caret = active.selectionStart;
+		return { key, caret: Math.min(caret, value.length) };
+	}
+
+	private restoreControlFocus(focus: { key: string; caret: number } | null): void {
+		if (!focus) return;
+		if (typeof this.contentEl.querySelector !== "function") return;
+		const esc =
+			typeof CSS !== "undefined" && typeof CSS.escape === "function"
+				? CSS.escape(focus.key)
+				: focus.key.replace(/[\\"\]]/g, "\\$&");
+		const target = (this.contentEl as unknown as {
+			querySelector: (sel: string) =>
+				| (HTMLElement & { focus: () => void; value?: string; setSelectionRange?: (a: number, b: number) => void })
+				| null;
+		}).querySelector(`[data-ahp-prompt="${esc}"]`);
+		if (!target) return;
+		target.focus();
+		try {
+			const len = typeof target.value === "string" ? target.value.length : 0;
+			const pos = Math.min(focus.caret, len);
+			target.setSelectionRange?.(pos, pos);
+		} catch {
+			// input types without a caret
 		}
 	}
 }
@@ -357,8 +830,9 @@ function sessionCard(summary: AhpSessionSummary, selected = false): HTMLElement 
 
 	const badges = el("span", { cls: "arthur-ahp-badges" });
 	if (selected) {
-		// Persistent selection marker — unmistakable next to any hover tint.
-		badges.append(el("span", { cls: "arthur-ahp-card--selected-marker", text: "▸ selected" }));
+		// Persistent selection marker — plain TEXT (tofu-prone glyphs dropped);
+		// the CSS class keeps it unmistakable next to any hover tint.
+		badges.append(el("span", { cls: "arthur-ahp-card--selected-marker", text: "selected" }));
 	}
 	if (summary.paused === true) {
 		badges.append(el("span", { cls: "arthur-badge arthur-badge--down arthur-ahp-badge", text: "paused" }));
@@ -388,9 +862,63 @@ function toolStatusText(status: string): string {
 	}
 }
 
+/** Readable state label of one live chat (cosmetic fix): the LIVING detail
+ *  fields win — a pending question_user call means input is needed, an
+ *  activeTurn means a turn is running — then the VERIFIED 0.3.0 status
+ *  bitmask (broker getSessionStatusLabel, pi-ahp-server src/types.ts
+ *  snapshot — copied verbatim, no guessed numeric map). String statuses
+ *  render as themselves; absent/unknown → null (line omitted). */
+function chatStateLabel(chat: AhpChatDetailView): string | null {
+	if (pendingQuestionCall(chat) !== null) return "needs input";
+	if (chat.activeTurn) return "running";
+	return statusLabel(chat.status);
+}
+
+/** Canonical labels for the broker's SessionStatus bitmask — VERIFIED enum
+ *  (verbatim from the 0.3.0 broker source, NOT guessed). */
+const AHP_STATUS_BITS = {
+	Active: 1,
+	Done: 1 << 2,
+	Error: 1 << 1,
+	Running: 1 << 3,
+	NeedsInput: 1 << 4,
+	Archived: 1 << 6,
+	Waiting: 1 << 7,
+	Queued: 1 << 8,
+	Throttled: 1 << 9,
+} as const;
+
+function statusLabel(status: number | string | undefined): string | null {
+	if (typeof status === "string") return status.trim() || null;
+	if (typeof status !== "number" || !Number.isFinite(status)) return null;
+	if ((status & AHP_STATUS_BITS.Archived) !== 0) return "archived";
+	// Input is encoded as Running + NeedsInput; test the NeedsInput bit so a
+	// plain Running chat/session is not mislabelled as input (broker source).
+	if ((status & AHP_STATUS_BITS.NeedsInput) !== 0) return "input";
+	if ((status & AHP_STATUS_BITS.Throttled) !== 0) return "throttled";
+	if ((status & AHP_STATUS_BITS.Queued) !== 0) return "queued";
+	if ((status & AHP_STATUS_BITS.Error) !== 0) return "error";
+	if ((status & AHP_STATUS_BITS.Running) !== 0) return "running";
+	if ((status & AHP_STATUS_BITS.Waiting) !== 0) return "waiting";
+	if ((status & AHP_STATUS_BITS.Done) !== 0) return "done";
+	return "active";
+}
+
+/** The in-flight question_user toolCall of one chat (the exact 0.3.0 reducer
+ *  test: an in-flight question_user call still in status 'streaming'), or null. */
+function pendingQuestionCall(chat: AhpChatDetailView): AhpPartView | null {
+	return (
+		[...(chat.activeTurn ? [chat.activeTurn] : []), ...chat.turns]
+			.flatMap((t) => t.parts)
+			.find((p) => p.toolCall?.toolName === "question_user" && p.toolCall.status === "streaming") ??
+		null
+	);
+}
+
 /** One live chat section: header (title · subagent badge · status/activity ·
- *  model/tokens), pending question_user banner, bounded turns + parts. */
-function chatSection(chat: AhpChatDetailView): HTMLElement {
+ *  model/tokens), pending question_user banner, bounded turns + parts, and —
+ *  for primary chats on a controller connection — the prompt row. */
+function chatSection(chat: AhpChatDetailView, promptRow: HTMLElement | null = null): HTMLElement {
 	const section = el("div", {
 		cls: "arthur-ahp-chat",
 		attrs: { "data-ahp-chat": chat.resource },
@@ -404,10 +932,11 @@ function chatSection(chat: AhpChatDetailView): HTMLElement {
 	section.append(head);
 
 	const meta: string[] = [];
-	const state = (chat.status ?? "").toString().trim();
 	const activity = (chat.activity ?? "").trim();
+	// Derived state FIRST (never a raw numeric status), then the activity text.
+	const stateLabel = chatStateLabel(chat);
+	if (stateLabel) meta.push(stateLabel);
 	if (activity) meta.push(truncate(activity, 40));
-	else if (state) meta.push(`status ${state}`);
 	if (chat.model) meta.push(chat.model);
 	let tin = 0;
 	let tout = 0;
@@ -420,16 +949,14 @@ function chatSection(chat: AhpChatDetailView): HTMLElement {
 	if (meta.length > 0) section.append(el("span", { cls: "arthur-card-meta arthur-ahp-meta", text: meta.join(" · ") }));
 
 	// Pending question_user: an in-flight question_user toolCall still in the
-	// status 'streaming' (the exact 0.3.0 server reducer test) — display only.
-	const pendingCall = [...(chat.activeTurn ? [chat.activeTurn] : []), ...chat.turns]
-		.flatMap((t) => t.parts)
-		.find((p) => p.toolCall?.toolName === "question_user" && p.toolCall.status === "streaming");
+	// status 'streaming' — display only; answering goes through the prompt row.
+	const pendingCall = pendingQuestionCall(chat);
 	if (pendingCall?.toolCall) {
 		const prompt = pendingCall.toolCall.partialInput.trim();
 		section.append(
 			el("p", {
 				cls: "arthur-badge arthur-badge--idle arthur-ahp-question",
-				text: `❓ pi needs input (question_user)${prompt ? ` — ${truncate(prompt, 120)}` : ""}`,
+				text: `pi needs input (question_user)${prompt ? ` — ${truncate(prompt, 120)}` : ""}`,
 			}),
 		);
 	}
@@ -446,6 +973,7 @@ function chatSection(chat: AhpChatDetailView): HTMLElement {
 	if (!chat.activeTurn && chat.turns.length === 0) {
 		section.append(el("p", { cls: "arthur-note", text: "no turns yet" }));
 	}
+	if (promptRow) section.append(promptRow);
 	return section;
 }
 
@@ -456,7 +984,7 @@ function turnBlock(turn: AhpTurnView, active: boolean): HTMLElement {
 	head.append(
 		el("span", {
 			cls: `arthur-ahp-turn-state arthur-ahp-turn-state--${turn.state}`,
-			text: active ? "● running" : turn.state === "cancelled" ? "✕ cancelled" : turn.state === "error" ? "error" : "✓",
+			text: active ? "running" : turn.state === "cancelled" ? "cancelled" : turn.state === "error" ? "error" : "done",
 		}),
 	);
 	if (turn.userText) head.append(el("span", { cls: "arthur-ahp-turn-user", text: truncate(turn.userText, 120) }));
@@ -490,7 +1018,7 @@ function partLine(part: AhpPartView): HTMLElement {
 	if (part.kind === "toolCall" && part.toolCall) {
 		const tc = part.toolCall;
 		const isQuestion = tc.toolName === "question_user";
-		const bits = [`▸ ${tc.displayName ?? tc.toolName} (${toolStatusText(tc.status)})`];
+		const bits = [`${tc.displayName ?? tc.toolName} (${toolStatusText(tc.status)})`];
 		const detail = tc.resultText || (isQuestion ? tc.partialInput : "");
 		if (detail) bits.push(truncate(detail, MAX_RESULT_TEXT));
 		return el("div", {
