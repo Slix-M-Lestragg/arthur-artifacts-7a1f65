@@ -65,6 +65,11 @@ export interface PiSessionRow extends AgentPiSession {
 export interface PiPanelOpts {
 	/** Session-tail fetch backing the read-only 'Peek' mini-log. */
 	fetchTail: (device: string, sessionId: string) => Promise<AgentPiTail>;
+	/** The persisted collapsed state of the device-session ARCHIVES group
+	 *  (one bool for the whole group, settings.piArchivesCollapsed). */
+	archivesCollapsed: () => boolean;
+	/** Persist a changed archives-collapse state. */
+	setArchivesCollapsed: (collapsed: boolean) => void;
 }
 
 export interface PiPanelData {
@@ -267,6 +272,60 @@ export function piGroupedSubList(
 	return panel;
 }
 
+/**
+ * Running vs active tri-state of one pi session (producer contract:
+ * pi-arthur v0.1.6 adds `running?: boolean` — TRUE while a turn executes;
+ * undefined on older producers → treat as false-but-active):
+ *   'running'  — active AND running → pulsing accent cue
+ *   'active'   — active but idle (no turn executing) → solid green
+ *   'inactive' — not active → grey
+ */
+export type PiSessionState = "running" | "active" | "inactive";
+
+/** The session's tri-state (see {@link PiSessionState}). */
+export function piSessionState(sess: AgentPiSession): PiSessionState {
+	if (sess.active !== true) return "inactive";
+	return sess.running === true ? "running" : "active";
+}
+
+/**
+ * Group one device's sessions (v0.12.x session archives):
+ *
+ *  - `current` — the CURRENT sessions area: RUNNING sessions first, then the
+ *    active-idle ones; each group sorted by startedAt desc.
+ *  - `archived` — ALL renderable inactive sessions, newest-lastActivity
+ *    first; rendered inside the collapsible 'Archives' separator group
+ *    below the current sessions (collapsed by default, persisted as ONE
+ *    bool for the whole group).
+ *
+ * The piRenderableSession guard applies to BOTH groups: a pathless +
+ * inactive dead one-shot entry never renders anywhere. Inactive sessions
+ * never reach the JOB QUEUE — the queue keeps showing the active sessions
+ * only.
+ */
+export interface PiDeviceSessionGroups {
+	current: AgentPiSession[];
+	archived: AgentPiSession[];
+}
+
+/** Group + sort one device's sessions (see {@link PiDeviceSessionGroups}). */
+export function piDeviceSessionGroups(sessions: AgentPiSession[]): PiDeviceSessionGroups {
+	const renderable = (sessions ?? []).filter(piRenderableSession);
+	const byStartDesc = (a: AgentPiSession, b: AgentPiSession): number =>
+		tsMs(b.startedAt) - tsMs(a.startedAt);
+	const current: AgentPiSession[] = [];
+	for (const sess of renderable.filter((s) => piSessionState(s) === "running").sort(byStartDesc)) {
+		current.push(sess);
+	}
+	for (const sess of renderable.filter((s) => piSessionState(s) === "active").sort(byStartDesc)) {
+		current.push(sess);
+	}
+	const archived = renderable
+		.filter((s) => piSessionState(s) === "inactive")
+		.sort((a, b) => tsMs(b.lastActivity) - tsMs(a.lastActivity));
+	return { current, archived };
+}
+
 /** Session display name: friendly name, else the last path segment of cwd. */
 export function piSessionLabel(sess: AgentPiSession): string {
 	const named = (sess.name ?? "").trim();
@@ -390,26 +449,80 @@ export class PiPanel {
 		}
 	}
 
-	/** One device: compact header (name, active count, stale badge) + cards. */
+	/** One device: compact header (name, active count + archived count, stale
+	 *  badge) + the session cards: the CURRENT sessions area (running first,
+	 *  then active-idle, startedAt desc) and — below — the collapsible
+	 *  'Archives' separator (collapsed by default, persisted) holding ALL
+	 *  inactive sessions, newest-lastActivity first. */
 	private deviceBlock(dev: AgentPiDevice, now: number): HTMLElement {
 		const wrap = el("div", { cls: "arthur-pi-device" });
+		const groups = piDeviceSessionGroups(dev.sessions);
 		const active = dev.sessions?.filter((s) => s.active).length ?? 0;
+		const countBadge = groups.archived.length > 0
+			? `${active} active (${groups.archived.length} archived)`
+			: `${active} active`;
 		const head = el("div", { cls: "arthur-pi-device-head" });
 		head.append(
 			el("span", { cls: "arthur-pi-device-name", text: (dev.hostname ?? "").trim() || dev.device }),
-			el("span", { cls: "arthur-card-meta", text: `${active} active` }),
+			el("span", { cls: "arthur-card-meta", text: countBadge }),
 		);
 		if (dev.stale === true) {
 			head.append(el("span", { cls: "arthur-badge arthur-badge--down arthur-pi-stale", text: "stale" }));
 		}
 		wrap.append(head);
 		const cards = el("div", { cls: "arthur-pi-sessions" });
-		for (const sess of dev.sessions ?? []) {
-			if (!piRenderableSession(sess)) continue; // pathless + inactive: never render
+		// Current sessions area — running first, then active-idle (groups are
+		// pre-sorted). Inactive sessions NEVER enter the job queue; they live
+		// in the archives group below.
+		for (const sess of groups.current) {
 			cards.append(this.sessionCard(dev, sess, now));
+		}
+		if (groups.archived.length > 0) {
+			cards.append(this.archivesToggle(groups.archived.length));
+			if (this.opts.archivesCollapsed() !== true) {
+				for (const sess of groups.archived) {
+					cards.append(this.sessionCard(dev, sess, now));
+				}
+			}
 		}
 		wrap.append(cards);
 		return wrap;
+	}
+
+	/** The collapsible 'Archives' separator row (device-session archives;
+	 *  same pattern as the subagent archives toggle, one persisted collapsed
+	 *  bool for the whole group across all devices). */
+	private archivesToggle(count: number): HTMLElement {
+		const open = this.opts.archivesCollapsed() !== true;
+		const toggle = el("div", {
+			cls: `arthur-pi-archives-toggle arthur-pi-sess-archives${open ? " arthur-pi-archives-toggle--open" : ""}`,
+			attrs: {
+				role: "button",
+				tabindex: "0",
+				"aria-expanded": String(open),
+				title: `Toggle the ${count} archived session${count === 1 ? "" : "s"}`,
+			},
+		});
+		toggle.append(
+			el("span", { cls: "arthur-pi-archives-chev", text: open ? "▾" : "▸" }),
+			el("span", { text: "Archives" }),
+			el("span", { cls: "arthur-card-meta", text: String(count) }),
+		);
+		const toggleIt = (): void => {
+			this.opts.setArchivesCollapsed(open); // open → collapse, closed → expand
+			this.repaint();
+		};
+		toggle.addEventListener("click", (ev?: Event) => {
+			ev?.stopPropagation?.();
+			toggleIt();
+		});
+		toggle.addEventListener("keydown", (e: KeyboardEvent) => {
+			if (e.key === "Enter" || e.key === " ") {
+				e.preventDefault();
+				toggleIt();
+			}
+		});
+		return toggle;
 	}
 
 	/**
@@ -425,14 +538,23 @@ export class PiPanel {
 		const badgeText = piSubBadgeText(groups);
 		const runningSubs = groups.current.filter((s) => s.state === "running").length;
 		const expanded = this.expanded.has(key);
-
+		// Running vs active tri-state (producer contract v0.1.6): undefined
+		// running on older producers reads as active-only (idle).
+		const sessState = piSessionState(sess);
 		const card = el("div", {
-			cls: `arthur-pi-card ${sess.active ? "arthur-pi-card--active" : "arthur-pi-card--inactive"}`,
-			attrs: { "data-pi-session": key, "data-pi-service": "pi" },
+			cls: `arthur-pi-card ${sess.active ? "arthur-pi-card--active" : "arthur-pi-card--inactive"}`
+				+ (sessState === "running" ? " arthur-pi-card--running" : ""),
+			attrs: { "data-pi-session": key, "data-pi-service": "pi", "data-pi-state": sessState },
 		});
-		const dotCls = sess.active ? "arthur-dot arthur-dot--green" : "arthur-dot arthur-dot--gray";
+		const dotCls = sessState === "running"
+			? "arthur-dot arthur-dot--pulse"
+			: sess.active
+				? "arthur-dot arthur-dot--green"
+				: "arthur-dot arthur-dot--gray";
 		const head = el("div", { cls: "arthur-pi-card-head" });
-		head.append(el("span", { cls: dotCls, attrs: { "aria-label": sess.active ? "active" : "inactive" } }));
+		head.append(el("span", { cls: dotCls, attrs: { "aria-label": sessState } }));
+		// The state label (running / active / inactive) right after the dot.
+		head.append(el("span", { cls: `arthur-pi-state arthur-pi-state--${sessState}`, text: sessState }));
 		// Registry-driven service row icon + label ('pi' → lucide terminal
 		// glyph; new non-GPU services render their own entry for free).
 		const icon = el("span", { cls: "arthur-pi-row-icon", attrs: { "data-service": "pi", "aria-label": serviceLabel("pi") } });

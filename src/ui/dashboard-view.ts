@@ -910,6 +910,13 @@ export class ArthurDashboardView extends ItemView {
 		this.debugEventLast.delete(key);
 	}
 
+	/** The profile's ai-toolkit integration toggle (default ON). false = the
+	 *  user intentionally stops the service when unused: the view makes ZERO
+	 *  ai-toolkit requests and its silence is never an error state. */
+	private aiToolkitEnabled(): boolean {
+		return this.plugin.settings.profiles[0]?.aiToolkitEnabled !== false;
+	}
+
 	/** Detail poller entry point — fetch everything, then paint. */
 	async refreshData(): Promise<void> {
 		const clients = this.plugin.clients;
@@ -1106,10 +1113,18 @@ export class ArthurDashboardView extends ItemView {
 			}),
 		);
 
-		const [jobsRes, queueRes] = await Promise.all([
-			tryCall(() => clients.aitoolkit.jobs()),
-			tryCall(() => clients.aitoolkit.queueList()),
-		]);
+		// ai-toolkit integration toggle (per profile): OFF → NO requests at all
+		// anywhere (the user intentionally stops the service when it is unused;
+		// its silence is expected, never an error state — no banner/debug lines,
+		// no watchdog degradation, no training cards/toggles). ON but
+		// unreachable keeps the degraded report, folded into ONE line below.
+		const aitOn = this.aiToolkitEnabled();
+		const jobsRes = aitOn
+			? await tryCall(() => clients.aitoolkit.jobs())
+			: { value: null as Awaited<ReturnType<typeof clients.aitoolkit.jobs>> | null, error: null as unknown };
+		const queueRes = aitOn
+			? await tryCall(() => clients.aitoolkit.queueList())
+			: { value: null as Awaited<ReturnType<typeof clients.aitoolkit.queueList>> | null, error: null as unknown };
 		// The two ai-toolkit collectors are decoupled ON PURPOSE: /api/jobs
 		// answers → training job cards render even when /api/queue fails (the
 		// broken queue endpoint only costs the per-GPU-set toggles), and a jobs
@@ -1128,26 +1143,33 @@ export class ArthurDashboardView extends ItemView {
 						}),
 				  )
 				: [],
-			jobsError: jobsRes.value === null ? describeError(jobsRes.error) : null,
-			queueError: queueRes.value === null ? describeError(queueRes.error) : null,
+			// The integration toggle OFF means "no request, no error": the field
+			// errors stay null so banner/queue/debug never report aitoolkit.
+			jobsError: jobsRes.value === null ? (aitOn ? describeError(jobsRes.error) : null) : null,
+			queueError: queueRes.value === null ? (aitOn ? describeError(queueRes.error) : null) : null,
 		};
-		// Jobs/queues settled — data or error, always a renderable state.
+		// Jobs/queues settled — data or error, always a renderable state. OFF
+		// settles immediately (nothing was attempted → the watchdog stays
+		// clear, stale training state is dropped) and NO aitk line exists.
 		this.watchSettle("training");
-		if (this.aiDetail.jobsError) {
-			this.debugEvent(
-				"aitk-jobs",
-				`ai-toolkit /api/jobs ${hostPortOf(profile.aiToolkitPort)} — ${this.aiDetail.jobsError}`,
-			);
+		if (!aitOn) {
+			this.trainingStuck = false;
+			this.debugEventOk(`aitk@${profile.aiToolkitPort}`);
+			this.pruneTrainingState();
 		} else {
-			this.debugEventOk("aitk-jobs");
-		}
-		if (this.aiDetail.queueError) {
-			this.debugEvent(
-				"aitk-queues",
-				`ai-toolkit /api/queue ${hostPortOf(profile.aiToolkitPort)} — ${this.aiDetail.queueError}`,
-			);
-		} else {
-			this.debugEventOk("aitk-queues");
+			// ONE deduplicated debug line for the whole service — never
+			// per-endpoint duplicates.
+			const aiErrText = this.aiDetail.jobsError && this.aiDetail.queueError
+				? `jobs: ${this.aiDetail.jobsError} · queues: ${this.aiDetail.queueError}`
+				: (this.aiDetail.jobsError ?? this.aiDetail.queueError);
+			if (aiErrText) {
+				this.debugEvent(
+					`aitk@${profile.aiToolkitPort}`,
+					`ai-toolkit ${hostPortOf(profile.aiToolkitPort)} — ${aiErrText}`,
+				);
+			} else {
+				this.debugEventOk(`aitk@${profile.aiToolkitPort}`);
+			}
 		}
 
 		this.lastTick = Date.now();
@@ -1160,7 +1182,8 @@ export class ArthurDashboardView extends ItemView {
 		this.renderQueue();
 
 		// Debug breadcrumb (settings toggle): one line per tick — collector
-		// name, per-service outcome (ok/err/timeout), duration, host:port.
+		// name, per-service outcome (ok/err/timeout), duration, host:port. The
+		// disabled ai-toolkit integration reports 'disabled', never an outcome.
 		if (this.plugin.settings.debugLogging) {
 			const hostPort = (port: number) => `${profile.host}:${port}`;
 			const parts: string[] = [];
@@ -1172,7 +1195,9 @@ export class ArthurDashboardView extends ItemView {
 				parts.push(`comfy ${this.outcomeFor(comfyErrors.get(p.port) ?? null)} ${hostPort(p.port)}`);
 			}
 			parts.push(
-				`aitk jobs ${this.outcomeFor(jobsRes.error)} · queues ${this.outcomeFor(queueRes.error)} ${hostPort(profile.aiToolkitPort)}`,
+				aitOn
+					? `aitk jobs ${this.outcomeFor(jobsRes.error)} · queues ${this.outcomeFor(queueRes.error)} ${hostPort(profile.aiToolkitPort)}`
+					: `aitk disabled ${hostPort(profile.aiToolkitPort)}`,
 			);
 			parts.push(`gpus ${this.outcomeFor(gpuFetchError)} ${hostPort(profile.agentPort)}`);
 			parts.push(`pi ${this.outcomeFor(piFetchError)} ${hostPort(profile.agentPort)}`);
@@ -1273,6 +1298,13 @@ export class ArthurDashboardView extends ItemView {
 				const agent = this.plugin.clients?.agent;
 				if (!agent) return Promise.reject(new Error("agent unavailable"));
 				return agent.piSessionTail(device, sessionId, 10);
+			},
+			// One persisted collapsed bool for the device-session ARCHIVES group
+			// (settings.piArchivesCollapsed; default collapsed).
+			archivesCollapsed: () => this.plugin.settings.piArchivesCollapsed !== false,
+			setArchivesCollapsed: (collapsed) => {
+				this.plugin.settings.piArchivesCollapsed = collapsed === true;
+				void this.plugin.saveSettings();
 			},
 		});
 
@@ -1576,7 +1608,9 @@ export class ArthurDashboardView extends ItemView {
 		} else {
 			this.debugEventOk("version");
 		}
-		// Watchdog: the training collector wedged between data and error.
+		// Watchdog: the training collector wedged between data and error. The
+		// watchdog can never fire while the integration toggle is OFF (the
+		// disabled collector settles immediately) — nothing to gate here.
 		if (this.trainingStuck) {
 			errors.push(
 				`ai-toolkit ${hostPort(clients?.profile.aiToolkitPort ?? 0)} — no response — timeout/offline`,
@@ -1588,10 +1622,15 @@ export class ArthurDashboardView extends ItemView {
 			const d = this.comfyDetail[i];
 			if (d?.online === false) errors.push(`ComfyUI ${hostPort(p.port)} — ${d.error ?? "not responding"}`);
 		});
-		if (this.aiDetail.reachable === false && this.aiDetail.jobsError) {
-			errors.push(`ai-toolkit ${hostPort(clients?.profile.aiToolkitPort ?? 0)} — jobs: ${this.aiDetail.jobsError}`);
-		} else if (this.aiDetail.queuesOk === false && this.aiDetail.queueError) {
-			errors.push(`ai-toolkit ${hostPort(clients?.profile.aiToolkitPort ?? 0)} — queues: ${this.aiDetail.queueError}`);
+		// ai-toolkit unreachable — ONE folded line for the whole service
+		// ('ai-toolkit … unreachable'), never per-endpoint duplicates. The
+		// integration toggle OFF never reports: errors stay null by design.
+		const aiBannerErr = this.aiDetail.jobsError ?? this.aiDetail.queueError;
+		if (aiBannerErr) {
+			const aiDetail2 = this.aiDetail.jobsError && this.aiDetail.queueError
+				? `jobs: ${this.aiDetail.jobsError} · queues: ${this.aiDetail.queueError}`
+				: aiBannerErr;
+			errors.push(`ai-toolkit ${hostPort(clients?.profile.aiToolkitPort ?? 0)} — unreachable — ${aiDetail2}`);
 		}
 		// /api/gpus collector failure only matters while the agent answers at all
 		// (grid columns fall back to derived placements otherwise).
@@ -1614,6 +1653,7 @@ export class ArthurDashboardView extends ItemView {
 			error: this.agentDetail.error,
 			services: this.agentDetail.status?.services ?? [],
 			pi: this.piBarState(),
+			aiToolkitEnabled: this.aiToolkitEnabled(),
 		});
 	}
 
@@ -2921,16 +2961,16 @@ export class ArthurDashboardView extends ItemView {
 				);
 			}
 		});
-		if (this.aiDetail.reachable === false && this.aiDetail.jobsError) {
-			failedParts.push(`training jobs unavailable — ${this.aiDetail.jobsError}`);
+		if (this.aiDetail.jobsError || this.aiDetail.queueError) {
+			// ONE folded degraded part for ai-toolkit (never per-endpoint
+			// duplicates): jobs/queue errors are merged; the integration toggle
+			// OFF never reports (both errors stay null).
+			const aiErr2 = this.aiDetail.jobsError && this.aiDetail.queueError
+				? `jobs: ${this.aiDetail.jobsError} · queues: ${this.aiDetail.queueError}`
+				: (this.aiDetail.jobsError ?? this.aiDetail.queueError);
+			failedParts.push(`training unavailable — ${aiErr2}`);
 			failedTips.push(
-				errTooltip(hostQ ? `${hostQ}:${aiPort}` : "(not configured)", this.aiDetail.jobsError),
-			);
-		}
-		if (this.aiDetail.queuesOk === false && this.aiDetail.queueError) {
-			failedParts.push(`queue toggles unavailable — ${this.aiDetail.queueError}`);
-			failedTips.push(
-				errTooltip(hostQ ? `${hostQ}:${aiPort}` : "(not configured)", this.aiDetail.queueError),
+				errTooltip(hostQ ? `${hostQ}:${aiPort}` : "(not configured)", aiErr2),
 			);
 		}
 		if (hostQ && failedParts.length > 0) {
@@ -2971,6 +3011,10 @@ export class ArthurDashboardView extends ItemView {
 		dur: number,
 	): HTMLElement[] {
 		const key = `pi:${dev.device}/${sess.id}`;
+		// Running vs active cue (producer v0.1.6): running=true (a turn is
+		// executing) → pulsing accent dot + accent-tinted card; undefined/false
+		// → active-idle → solid green (previous behavior).
+		const pRunning = sess.active === true && sess.running === true;
 		const expanded = this.piExpanded.has(key);
 		const groups = piSubGroups(subs);
 		const badge = piSubBadgeText(groups);
@@ -2984,11 +3028,15 @@ export class ArthurDashboardView extends ItemView {
 		if (failed > 0) aggParts.push(`${failed} failed`);
 		if (canceled > 0) aggParts.push(`${canceled} canceled`);
 		const card = el("div", {
-			cls: `arthur-queue-job arthur-pi-parent${expanded ? " arthur-pi-parent--expanded" : ""}`,
+			cls: `arthur-queue-job arthur-pi-parent${pRunning ? " arthur-pi-parent--running" : ""}${expanded ? " arthur-pi-parent--expanded" : ""}`,
 			attrs: { "data-pi-key": key },
 		});
 		const head = el("div", { cls: "arthur-card-head" });
 		head.append(
+			el("span", {
+				cls: `arthur-dot ${pRunning ? "arthur-dot--pulse" : "arthur-dot--green"}`,
+				attrs: { "aria-label": pRunning ? "running" : "active" },
+			}),
 			el("span", {
 				cls: `arthur-pi-chevron${expanded ? " arthur-pi-chevron--open" : ""}`,
 				text: expanded ? "▾" : "▸",

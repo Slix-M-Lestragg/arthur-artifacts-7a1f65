@@ -1738,3 +1738,85 @@
 	background: var(--interactive-accent-hover);
 	box-shadow: none;
 }
+
+/* ---------------------------------------------------------------- v0.12.x
+   plugin-UX round: user-disabled ai-toolkit, running-vs-active pi cues,
+   device session archives
+   ---------------------------------------------------------------- */
+
+/* USER-DISABLED service pill (ai-toolkit integration toggle OFF): the user
+   intentionally stops the service when unused — grey + muted 'disabled'
+   label; visually DISTINCT from the error-offline styling (--disabled is
+   agent-unreachable, this never carries error semantics) and fully inert. */
+.arthur-svc-btn--useroff {
+	opacity: 0.45;
+	filter: grayscale(1);
+	cursor: default;
+}
+
+.arthur-svc-btn--useroff .arthur-svc-name {
+	color: var(--text-faint);
+	font-style: italic;
+}
+
+.arthur-svc-btn--useroff .arthur-svc-kill {
+	opacity: 0.3;
+	cursor: default;
+}
+
+/* RUNNING cue: pulsing accent dot — the producer reports a turn actively
+   executing (pi-arthur ≥0.1.6 `running: true`). Active-idle keeps the solid
+   green dot; undefined running on old producers reads as active-only. */
+.arthur-dot--pulse {
+	background: var(--interactive-accent);
+	animation: arthur-dot-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes arthur-dot-pulse {
+	0%,
+	100% {
+		box-shadow: 0 0 0 0 color-mix(in srgb, var(--interactive-accent) 55%, transparent);
+		opacity: 1;
+	}
+	50% {
+		box-shadow: 0 0 0 0.35em color-mix(in srgb, var(--interactive-accent) 18%, transparent);
+		opacity: 0.75;
+	}
+}
+
+/* running/active/inactive state label on a pi session card's head */
+.arthur-pi-state {
+	flex: none;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.arthur-pi-state--running {
+	color: var(--interactive-accent);
+	font-weight: var(--font-medium);
+}
+
+.arthur-pi-state--active {
+	color: var(--color-green);
+}
+
+.arthur-pi-state--inactive {
+	color: var(--text-faint);
+}
+
+/* a RUNNING session card carries a subtle accent tint atop the active border */
+.arthur-pi-card--running {
+	border-color: var(--interactive-accent);
+}
+
+/* a RUNNING pi parent job in the queue gets the same accent tint */
+.arthur-pi-parent--running .arthur-pi-parent-label {
+	color: var(--interactive-accent);
+	font-weight: var(--font-medium);
+}
+
+/* device-session ARCHIVES toggle (mirrors the subagent archives separator;
+   the persisted collapse lives in settings.piArchivesCollapsed) */
+.arthur-pi-sess-archives {
+	margin-bottom: 0.15em;
+}

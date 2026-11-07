@@ -148,6 +148,9 @@ export interface AgentPiSession {
 	lastActivity?: string | null;
 	/** Session currently in use (drives queue placement: ACTIVE sessions only). */
 	active: boolean;
+	/** True while a turn executes (pi-arthur v0.1.6 producer contract).
+	 *  Undefined on older producers → treat as active-only (idle). */
+	running?: boolean;
 }
 
 /** One pi subagent run (child job of its parentSessionId). */

@@ -28,6 +28,10 @@ export { isWebViewerEnabled, openWebUrl, openUiTooltip, WEBVIEWER_VIEW_TYPE } fr
 // used at runtime beyond the dashboard view's own imports.
 export { PiPickerModal, piDeviceRoot, piMenuSessionLabel } from "./ui/pi-picker";
 export type { PiPickerDevice, PiPickerOpts } from "./ui/pi-picker";
+// Pi session surface (smoke-tests assert the tri-state + device archival
+// grouping helpers directly against the compiled main.js export surface).
+export { piSessionState, piDeviceSessionGroups, piSessionLabel, piRenderableSession } from "./ui/pi-panel";
+export type { PiSessionState, PiDeviceSessionGroups } from "./ui/pi-panel";
 
 /** One server profile — host + which ports the services live on + tokens. */
 export interface ServerProfile {
@@ -39,6 +43,13 @@ export interface ServerProfile {
 	agentPort: number;
 	aiToolkitToken: string;
 	agentToken: string;
+	/** ai-toolkit integration toggle (default ON). OFF = the user
+	 *  intentionally runs this service only when needed: NO aitoolkit
+	 *  requests anywhere (collectors skip, nothing in the banner/debug
+	 *  pane), the service-bar pill renders a 'disabled' state, and training
+	 *  cards/queue toggles vanish. ON-but-unreachable keeps the degraded
+	 *  single-line report. */
+	aiToolkitEnabled: boolean;
 }
 
 export interface ArthurSettings {
@@ -73,6 +84,10 @@ export interface ArthurSettings {
 	/** Last pi device a session was spawned on (service-bar pi button prefill;
 	 *  empty = no device used yet → the only/first online device is used). */
 	lastUsedPiDevice: string;
+	/** The device-session archives group inside a device's 'General' list is
+	 *  collapsed (default true). One persisted bool for the whole group —
+	 *  mirrors the subagent archives pattern. */
+	piArchivesCollapsed: boolean;
 }
 
 /** Clients built from the active profile — rebuilt when settings change. */
@@ -98,6 +113,7 @@ const DEFAULT_PROFILE: ServerProfile = {
 	agentPort: 8766,
 	aiToolkitToken: "",
 	agentToken: "",
+	aiToolkitEnabled: true,
 };
 
 const DEFAULT_SETTINGS: ArthurSettings = {
@@ -113,6 +129,7 @@ const DEFAULT_SETTINGS: ArthurSettings = {
 	gpuCollapsed: {},
 	spawnGpuSel: {},
 	lastUsedPiDevice: "",
+	piArchivesCollapsed: true,
 };
 
 /** Parse a bounded positive int; invalid/missing → fallback. */
@@ -249,6 +266,18 @@ class ArthurSettingTab extends PluginSettingTab {
 							profile.aiToolkitPort = port;
 							await this.plugin.saveSettings();
 						}
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("ai-toolkit integration")
+			.setDesc("Poll the ai-toolkit UI (jobs/queues/stats). Turn OFF while the service is intentionally stopped — the dashboard then makes zero ai-toolkit requests (no error lines); training cards + GPU queue toggles are hidden. Leave on for the degraded single-line report when it is merely unreachable.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(profile.aiToolkitEnabled !== false)
+					.onChange(async (value) => {
+						profile.aiToolkitEnabled = value;
+						await this.plugin.saveSettings();
 					})
 			);
 
@@ -528,7 +557,10 @@ export default class ArthurPlugin extends Plugin {
 		// falls back to the per-instance system_stats free-bytes view.
 		const [agentStatus, aiJobs, gpuResp, piStatus] = await Promise.all([
 			best(clients.agent.status()),
-			best(clients.aitoolkit.jobs()),
+			// ai-toolkit integration OFF → NO request at all (null keeps the
+			// training pill segment empty; the service is user-disabled, never
+			// an error state).
+			this.aiToolkitEnabled() ? best(clients.aitoolkit.jobs()) : Promise.resolve(null),
 			best(clients.agent.gpus()),
 			best(clients.agent.piStatus()),
 		]);
@@ -601,6 +633,12 @@ export default class ArthurPlugin extends Plugin {
 		this.paintStatusBar();
 	}
 
+	/** The profile's ai-toolkit integration toggle (default ON; a legacy saved
+	 *  profile without the key still counts as ON). */
+	private aiToolkitEnabled(): boolean {
+		return this.clients?.profile.aiToolkitEnabled !== false;
+	}
+
 	/** Push the light snapshot into the status bar pill. */
 	private paintStatusBar(): void {
 		if (!this.statusPill) return;
@@ -652,6 +690,9 @@ export default class ArthurPlugin extends Plugin {
 		// Normalize on load too: a host saved by an older version (or by hand in
 		// data.json) could carry a scheme/slashes; never let it reach URL building.
 		profile.host = normalizeHost(profile.host);
+		// The ai-toolkit toggle defaults to ON — a legacy profile without the
+		// key must never read as user-disabled.
+		profile.aiToolkitEnabled = profile.aiToolkitEnabled !== false;
 		this.settings = {
 			profiles: [profile],
 			previewCount: clampInt(data?.previewCount, DEFAULT_SETTINGS.previewCount, 1, 12),
@@ -666,6 +707,7 @@ export default class ArthurPlugin extends Plugin {
 			spawnGpuSel: sanitizeGpuSel(data?.spawnGpuSel),
 			lastUsedPiDevice:
 				typeof data?.lastUsedPiDevice === "string" ? data.lastUsedPiDevice.trim() : "",
+			piArchivesCollapsed: data?.piArchivesCollapsed !== false,
 		};
 	}
 

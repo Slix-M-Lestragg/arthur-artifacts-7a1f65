@@ -1698,8 +1698,8 @@ try {
 	assert(ok, "queue-endpoint-failure refresh did not throw");
 	assert(findByClass(view16b.contentEl, "arthur-queue-job--training").length === 3,
 		"a broken /api/queue does NOT hide the training job cards");
-	assert(view16b.aiStateEl.isShown() === true && allText(view16b.aiStateEl).includes("queue toggles unavailable"),
-		"failed ai-toolkit part shows its degraded state inline in the queue");
+	assert(view16b.aiStateEl.isShown() === true && allText(view16b.aiStateEl).includes("training unavailable"),
+		"failed ai-toolkit part shows its ONE folded degraded line in the queue (no per-endpoint duplicates)");
 	assert(view16b.queueEmptyEl === undefined,
 		"no 'every queue is clear' note while a source is degraded (element removed)");
 
@@ -1722,8 +1722,8 @@ try {
 	}
 	assert(ok, "jobs-endpoint-failure refresh did not throw");
 	assert(findByClass(view16c.contentEl, "arthur-queue-job--training").length === 0, "no training cards without the jobs endpoint");
-	assert(view16c.aiStateEl.isShown() === true && allText(view16c.aiStateEl).includes("training jobs unavailable"),
-		"failed jobs collector shows its inline error state in the queue");
+	assert(view16c.aiStateEl.isShown() === true && allText(view16c.aiStateEl).includes("training unavailable"),
+		"failed jobs collector shows its ONE folded degraded line in the queue (no per-endpoint duplicates)");
 	assert(view16c.queueEmptyEl === undefined,
 		"unreachable source → inline error state, NOT the empty note (element removed)");
 
@@ -2811,23 +2811,22 @@ try {
 			"device header shows the hostname + active session count (2: sess-a + pathless-active sess-d)");
 	}
 
-	// (b) active + inactive session cards render with model/provider + duration
+	// (b) session cards: CURRENT area (running/active) + the new device-session
+	// ARCHIVES group (inactive sessions, collapsed by default, persisted)
 	{
 		const cards22 = () => findByClass(piSection22, "arthur-pi-card");
-		assert(cards22().length === 3, "3 renderable session cards (sess-c pathless+inactive DROPPED, sess-d pathless+active kept)");
+		assert(cards22().length === 2, "2 CURRENT session cards (sess-c pathless+inactive DROPPED, sess-b inactive moved into the collapsed Archives)");
 		assert(!cards22().some((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-c")),
 			"pathless+inactive sess-c never renders as a session card");
-		const activeCard22 = cards22().find((c) => c.hasClass("arthur-pi-card--active"));
-		const inactiveCard22 = cards22().find((c) => c.hasClass("arthur-pi-card--inactive"));
-		assert(!!activeCard22 && !!inactiveCard22, "one active + one inactive session card");
-		assert((activeCard22?.attributes.get("data-pi-session") ?? "").endsWith("sess-a"), "active card keyed to sess-a");
+		assert(!cards22().some((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-b")),
+			"inactive sess-b is tucked into the collapsed Archives (not in the current area)");
+		const activeCard22 = cards22().find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-a"));
+		assert(!!activeCard22 && activeCard22.hasClass("arthur-pi-card--active"), "sess-a renders as the active card");
 		assert(allText(activeCard22).includes("arthur plugin work") && allText(activeCard22).includes("GLM-5 · zai"),
 			"active card shows session name + model · provider");
 		assert(allText(activeCard22).includes("1:00:00"), "active card shows the startedAt duration (1h)");
 		assert(findByClass(activeCard22, "arthur-dot--green").length === 1, "active card carries the green dot");
-		assert(allText(inactiveCard22).includes("MiMo · x") && allText(inactiveCard22).includes("2:00"),
-			"inactive card shows model + lastActivity duration");
-		assert(allText(inactiveCard22).includes("other"), "inactive card falls back to the last cwd segment as name");
+		assert(allText(activeCard22).includes("active"), "the active card carries its 'active' state label");
 		// REGISTRY-DRIVEN service row icons: 'pi' renders the lucide terminal
 		// glyph (no official pi logo exists) + the service label via the registry
 		for (const card of cards22()) {
@@ -2835,18 +2834,33 @@ try {
 			assert(!!icon22 && icon22.getAttribute("data-icon") === "terminal" && icon22.getAttribute("data-service") === "pi",
 				"every pi session row renders the registry-driven service icon (lucide terminal)");
 		}
-		// ONE compact stats line: device · last-activity age · tokens (· cost)
-		const activeStats22 = findByClass(activeCard22, "arthur-pi-card-stats")[0];
-		assert(!!activeStats22 && allText(activeStats22).startsWith("laptop · activity "),
-			"the stats line opens with the device + last-activity age");
-		assert(allText(activeStats22).includes("14.2k tok · $0.42"),
-			"the stats line carries the producer usage rollup (tokens + cost)");
+		// device header: active count + archived count
+		const devHead22 = findByClass(piSection22, "arthur-pi-device-head")[0];
+		assert(allText(devHead22).includes("2 active") && allText(devHead22).includes("(1 archived)"),
+			"device header badge shows 'N active (M archived)' (1 archive: sess-b)");
+		// ARCHIVES: collapsed by default (persisted default true), toggle + count
+		const archToggle22 = findByClass(piSection22, "arthur-pi-sess-archives")[0];
+		assert(!!archToggle22 && allText(archToggle22).includes("Archives") && allText(archToggle22).includes("1"),
+			"the device session 'Archives' separator carries its count (1)");
+		assert(plugin.settings.piArchivesCollapsed === true, "session archives START collapsed (persisted default)");
+		// opening the archives reveals the archived cards + persists the state
+		archToggle22.handlers.get("click")[0]?.();
+		const cardsOpen22 = () => findByClass(piSection22, "arthur-pi-card");
+		assert(cardsOpen22().length === 3, "opening the Archives reveals the archived session card (sess-b)");
+		const inactiveCard22 = cardsOpen22().find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-b"));
+		assert(!!inactiveCard22 && inactiveCard22.hasClass("arthur-pi-card--inactive"), "sess-b renders as the inactive card");
+		assert(allText(inactiveCard22).includes("MiMo · x") && allText(inactiveCard22).includes("2:00"),
+			"inactive card shows model + lastActivity duration");
+		assert(allText(inactiveCard22).includes("other"), "inactive card falls back to the last cwd segment as name");
+		assert(allText(inactiveCard22).includes("inactive"), "the inactive card carries its 'inactive' state label");
 		const inactiveStats22 = findByClass(inactiveCard22, "arthur-pi-card-stats")[0];
 		assert(allText(inactiveStats22).includes("2.5M tok") && !allText(inactiveStats22).includes("$"),
 			"million-scale tokens format compactly; absent cost is simply omitted (sess-b carries no costUsd)");
 		assert(findButton(inactiveCard22, "Peek") === null, "inactive cards carry NO Peek button");
 		assert(findButton(activeCard22, "Peek") != null, "active cards with a path carry the read-only Peek button");
-		const pathlessActive22 = cards22().find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-d"));
+		assert(plugin.settings.piArchivesCollapsed === false && plugin._data?.piArchivesCollapsed === false,
+			"opening session archives persists piArchivesCollapsed=false");
+		const pathlessActive22 = cardsOpen22().find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-d"));
 		assert(!!pathlessActive22 && pathlessActive22.hasClass("arthur-pi-card--active"),
 			"pathless+ACTIVE sess-d still renders as an active card");
 		assert(findButton(pathlessActive22, "Peek") === null, "pathless+active session card carries NO Peek (nothing to tail)");
@@ -2861,8 +2875,17 @@ try {
 			&& findByClass(expandedCard22, "arthur-pi-st--done").length === 1, "subagent rows carry per-state icons");
 		expandedCard22.handlers.get("click")[0]?.({ target: expandedCard22 });
 		assert(findByClass(piSection22, "arthur-pi-sub").length === 0, "second click collapses the subagent list");
+		// inactive-card subagent states: with the archives OPEN the sess-b card
+		// exposes its failed/canceled icons too
+		inactiveCard22.handlers.get("click")[0]?.({ target: inactiveCard22 });
+		const expandedB22 = findByClass(piSection22, "arthur-pi-card").find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-b"));
+		assert(findByClass(expandedB22, "arthur-pi-st--failed")[0]?.textContent === "✕", "failed child renders the red cross icon");
+		assert(findByClass(expandedB22, "arthur-pi-st--canceled")[0]?.textContent === "–", "canceled child renders the grey dash icon");
+		assert(findByClass(expandedB22, "arthur-pi-archives-toggle").length === 0,
+			"no subagent Archives toggle when nothing is archived (the only batch is current)");
+		expandedB22.handlers.get("click")[0]?.({ target: expandedB22 });
 	}
-
+	
 	// (c) subagent badge counts on the session cards
 	{
 		const cards22c = () => findByClass(piSection22, "arthur-pi-card").filter((c) => {
@@ -2908,16 +2931,6 @@ try {
 		assert(findByClass(expanded22, "arthur-pi-st--failed").length === 0 && findByClass(expanded22, "arthur-pi-st--canceled").length === 0,
 			"sess-a's children carry no failed/canceled icons (those belong to the inactive session)");
 		assert(allText(childRows22[0]).includes("fix the pi badge"), "child rows show the taskPreview");
-		// state icons for EVERY child state (sess-b's WHOLE feed is the current
-		// batch on its own session → current-run group, always visible).
-		const inactCard22b = findByClass(piSection22, "arthur-pi-card").find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-b"));
-		inactCard22b.handlers.get("click")[0]?.({ target: inactCard22b });
-		const expandedB22 = findByClass(piSection22, "arthur-pi-card").find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-b"));
-		assert(findByClass(expandedB22, "arthur-pi-st--failed")[0]?.textContent === "✕", "failed child renders the red cross icon");
-		assert(findByClass(expandedB22, "arthur-pi-st--canceled")[0]?.textContent === "–", "canceled child renders the grey dash icon");
-		assert(findByClass(expandedB22, "arthur-pi-archives-toggle").length === 0,
-			"no Archives toggle when nothing is archived (the only batch is current)");
-		expandedB22.handlers.get("click")[0]?.({ target: expandedB22 });
 		// collapse again
 		view22.queueEl.children.filter((c) => c.hasClass?.("arthur-pi-parent"))[0].handlers.get("click")[0]?.();
 		assert(findByClass(
@@ -3436,8 +3449,11 @@ try {
 	const pane24 = view24b.debugPane;
 	assert(!!pane24 && typeof pane24.append === "function", "the view owns the debug pane");
 	const jobsLineCount24 = () =>
-		pane24.allLines.filter((l) => l.includes("ai-toolkit /api/jobs")).length;
-	assert(jobsLineCount24() >= 1, "collector failures logged: ai-toolkit /api/jobs line present");
+		pane24.allLines.filter((l) => l.includes("ai-toolkit 10.0.0.9:8675")).length;
+	// folded: jobs+queues failures report as ONE deduplicated line for the
+	// whole ai-toolkit service (never per-endpoint duplicates)
+	assert(jobsLineCount24() === 1,
+		"collector failures logged: ONE folded ai-toolkit line present (never per-endpoint duplicates)");
 	assert(/^\[\d{2}:\d{2}:\d{2}\] /.test(pane24.allLines[0]) === true, `every line is timestamped '[HH:MM:SS] …' (got ${pane24.allLines[0]})`);
 	assert(pane24.allLines.some((l) => l.includes("http://10.0.0.9:8675/api/jobs")),
 		"transport-level request errors are logged with the attempted URL");
@@ -3530,6 +3546,205 @@ try {
 	StubNotice.reset();
 	await app.workspace.detachLeavesOfType("arthur-dashboard");
 
+	// ---- 25. ai-toolkit integration toggle: OFF → zero requests + disabled
+	//        pill + hidden training UI; ON-but-unreachable → ONE folded line
+	console.log("== 25. ai-toolkit integration toggle (OFF / ON-unreachable) ==");
+	{
+		const json25 = (status, body) => ({ status, body });
+		const calls25 = [];
+		// A responder that answers EVERYTHING 200 — the ai-toolkit OFF check
+		// counts the /api/jobs + /api/queue calls it never makes.
+		httpResponder = (opts) => {
+			calls25.push({ url: opts.url, method: opts.method ?? "GET" });
+			if (opts.url.endsWith("/health")) return json25(200, { ok: true, version: "0.8.0" });
+			if (opts.url.endsWith("/api/status")) return json25(200, {
+				version: "0.8.0", host_uptime: 1,
+				services: [
+					{ id: "comfyui", name: "ComfyUI", active: true, multi_instance: true, max_instances: 4, default_port: 8188, unit_template: "comfy@{i}", instances: [] },
+					{ id: "aitoolkit", name: "AI Toolkit", active: false, multi_instance: false, max_instances: 1, default_port: 8675, unit: "ai-toolkit", instances: [] },
+				],
+			});
+			if (opts.url.endsWith("/api/gpus")) return json25(200, { gpus: [], count: 0 });
+			if (opts.url.endsWith("/api/jobs")) return json25(200, { jobs: [] });
+			if (opts.url.endsWith("/api/queue")) return json25(200, { queues: [] });
+			if (opts.url.endsWith("/api/pi/status")) return json25(200, { devices: [] });
+			return null;
+		};
+		plugin.settings.piArchivesCollapsed = true;
+		plugin.settings.profiles[0].aiToolkitEnabled = false;
+		await plugin.saveSettings();
+		await sleep(700);
+		let view25;
+		ok = true;
+		try {
+			await plugin.activateView();
+			view25 = app.workspace.getLeavesOfType("arthur-dashboard")[0]?.view;
+			calls25.length = 0;
+			await view25.refreshData();
+			await plugin.collectLightData(); // light cycle: same zero-request rule
+		} catch (err) {
+			ok = false;
+			console.error(`    view25 attach threw: ${err?.stack ?? err}`);
+		}
+		assert(ok, "ait-off view attach + refresh did not throw");
+		const aitCalls25 = () => calls25.filter((c) => c.url.includes(":8675"));
+		assert(aitCalls25().length === 0, `ait OFF → ZERO ai-toolkit requests anywhere (detail + light cycle; got ${JSON.stringify(aitCalls25().map((c) => c.url))})`);
+		// service pill: distinct USER-DISABLED state (grey + muted label), never
+		// the error-offline styling, fully inert
+		const aitBtn25 = view25.serviceBar?.buttons.get("aitoolkit")?.btn;
+		assert(!!aitBtn25 && aitBtn25.hasClass("arthur-svc-btn--useroff") === true, "aitoolkit pill carries the DISTINCT arthur-svc-btn--useroff class");
+		assert(aitBtn25.hasClass("arthur-svc-btn--offline") === false && aitBtn25.hasClass("arthur-svc-btn--disabled") === false,
+			"the user-disabled pill is NOT the error-offline styling");
+		assert(allText(aitBtn25).includes("disabled"), "the pill label reads 'disabled'");
+		assert((aitBtn25.getAttribute("aria-label") ?? "").includes("disabled in plugin settings"), "the pill tooltips its disabled-in-settings reason");
+		// no ait error surfaces: banner + inline degraded line + debug pane
+		assert(allText(view25.bannerEl).includes("ai-toolkit") === false, "zero ai-toolkit lines in the banner while the integration is OFF");
+		assert(view25.aiStateEl.isShown() === false, "no ai-toolkit degraded line in the queue section (its silence is expected)");
+		const errUrls25 = view25.debugPane.allLines.filter((l) => l.includes(":8675") || l.toLowerCase().includes("ai-toolkit") || l.toLowerCase().includes("aitk"));
+		assert(errUrls25.length === 0, `zero ai-toolkit error lines in the debug pane (got ${JSON.stringify(errUrls25)})`);
+		// training job cards + GPU queue toggles hidden (+ no stale toggle chips)
+		assert(findByClass(view25.contentEl, "arthur-queue-job--training").length === 0, "no training job cards while the integration is OFF");
+		assert(findByClass(view25.contentEl, "arthur-queue-toggle").length === 0, "no GPU queue toggle chips while the integration is OFF");
+		assert(view25.aiDetail.jobs.length === 0 && view25.aiDetail.queues.length === 0, "ait state snapshot holds no jobs/queues while OFF");
+		assert(view25.gridEl.textContent?.includes("GPU0") !== true, "no training grid rows while the integration is OFF");
+
+		// ON but unreachable → the degraded report shows ONCE (folded), still
+		// never duplicated per endpoint
+		httpResponder = (opts) => {
+			if (opts.url.endsWith("/health")) return json25(200, { ok: true, version: "0.8.0" });
+			if (opts.url.endsWith("/api/status")) return json25(200, {
+				version: "0.8.0", host_uptime: 1,
+				services: [
+					{ id: "comfyui", name: "ComfyUI", active: true, multi_instance: true, max_instances: 4, default_port: 8188, unit_template: "comfy@{i}", instances: [] },
+				],
+			});
+			if (opts.url.endsWith("/api/gpus")) return json25(200, { gpus: [], count: 0 });
+			if (opts.url.endsWith("/api/pi/status")) return json25(200, { devices: [] });
+			return null; // agent /api/* + both ai-toolkit endpoints unreachable
+		};
+		plugin.settings.profiles[0].aiToolkitEnabled = true;
+		await plugin.saveSettings();
+		await sleep(700);
+		ok = true;
+		try {
+			await view25.refreshData();
+		} catch (err) {
+			ok = false;
+			console.error(`    ait-unreachable refresh threw: ${err?.stack ?? err}`);
+		}
+		const bannerParts25 = allText(view25.bannerEl).split(" · ");
+		const aitParts25 = bannerParts25.filter((p) => p.includes("ai-toolkit"));
+		assert(aitParts25.length === 1, `ait ON-unreachable → exactly ONE folded banner line (got ${JSON.stringify(aitParts25)})`);
+		assert(allText(view25.bannerEl).includes("unreachable"), "the folded banner line reads 'ai-toolkit … unreachable'");
+		const stateParts25 = allText(view25.aiStateEl).split(" · ");
+		assert(stateParts25.filter((p) => p.includes("training unavailable")).length === 1,
+			"the queue's degraded ai-toolkit line shows ONCE (no /api/jobs + /api/queue duplicates)");
+		// restore: ON + the answering responder so later suites behave normally
+		plugin.settings.profiles[0].aiToolkitEnabled = true;
+		await plugin.saveSettings();
+		httpResponder = null;
+		StubNotice.reset();
+		await app.workspace.detachLeavesOfType("arthur-dashboard");
+	}
+
+	// ---- 26. running vs active pi cues (producer contract: running?: bool) --
+	console.log("== 26. running-vs-active pi dots + queue pulse + archives grouping ==");
+	{
+		const json26 = (status, body) => ({ status, body });
+		const iso26 = (msAgo) => new Date(Date.now() - msAgo).toISOString();
+		// producer v0.1.6 contract: running:true while a turn executes;
+		// undefined on old producers → active-only.
+		const piBody26 = {
+			generatedAt: iso26(0),
+			devices: [
+				{
+					device: "dev-r", hostname: "runbox", stale: false,
+					activeSessions: 2, sessionsCount: 3,
+					sessions: [
+						{ id: "run-a", path: "/h/a.jsonl", cwd: "/h/a", name: "turn running", model: "GLM-5", provider: "zai", startedAt: iso26(60000), lastActivity: iso26(1000), active: true, running: true },
+						{ id: "run-b", path: "/h/b.jsonl", cwd: "/h/b", name: "idle active", model: "MiMo", provider: "x", startedAt: iso26(120000), lastActivity: iso26(60000), active: true },
+						{ id: "run-c", path: "/h/c.jsonl", cwd: "/h/c", name: "inactive", model: "GLM-5", provider: "zai", startedAt: iso26(180000), lastActivity: iso26(90000), active: false, running: true },
+					],
+					subagents: [],
+				},
+			],
+		};
+		httpResponder = (opts) => {
+			if (opts.url.endsWith("/health")) return json26(200, { ok: true, version: "0.8.0" });
+			if (opts.url.endsWith("/api/status")) return json26(200, {
+				version: "0.8.0", host_uptime: 1,
+				services: [
+					{ id: "comfyui", name: "ComfyUI", active: true, multi_instance: true, max_instances: 4, default_port: 8188, unit_template: "comfy@{i}", instances: [] },
+				],
+			});
+			if (opts.url.endsWith("/api/gpus")) return json26(200, { gpus: [], count: 0 });
+			if (opts.url.endsWith("/api/jobs")) return json26(200, { jobs: [] });
+			if (opts.url.endsWith("/api/queue")) return json26(200, { queues: [] });
+			if (opts.url.endsWith("/api/pi/status")) return json26(200, piBody26);
+			return null;
+		};
+		let view26;
+		ok = true;
+		try {
+			await plugin.activateView();
+			view26 = app.workspace.getLeavesOfType("arthur-dashboard")[0]?.view;
+			await view26.refreshData();
+		} catch (err) {
+			ok = false;
+			console.error(`    view26 attach threw: ${err?.stack ?? err}`);
+		}
+		assert(ok, "view26 attach + refresh did not throw");
+		const piSec26 = view26.piPanel.rootEl;
+		// tri-state helper (exported for this suite)
+		assert(bundle.piSessionState({ id: "x", path: "", cwd: "", active: true, running: true }) === "running", "piSessionState: active+running → 'running'");
+		assert(bundle.piSessionState({ id: "x", path: "", cwd: "", active: true }) === "active", "piSessionState: active with undefined running → 'active' (old producer)");
+		assert(bundle.piSessionState({ id: "x", path: "", cwd: "", active: false }) === "inactive", "piSessionState: inactive → 'inactive'");
+		const card26 = (id) => findByClass(piSec26, "arthur-pi-card").find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith(id));
+		// RUNNING: pulsing accent dot + 'running' state label + running card class
+		const runCard26 = card26("run-a");
+		assert(!!runCard26 && runCard26.hasClass("arthur-pi-card--running"), "the running session card carries arthur-pi-card--running");
+		assert(findByClass(runCard26, "arthur-dot--pulse").length === 1, "the running card's dot is the PULSING accent dot");
+		assert(findByClass(runCard26, "arthur-pi-state--running").length === 1
+			&& allText(findByClass(runCard26, "arthur-pi-state--running")[0]).trim() === "running", "the running card carries the 'running' state label");
+		// ACTIVE-idle: solid green dot + 'active' label (undefined running)
+		const idleCard26 = card26("run-b");
+		assert(findByClass(idleCard26, "arthur-dot--green").length === 1 && findByClass(idleCard26, "arthur-dot--pulse").length === 0,
+			"the active-idle card keeps the SOLID green dot (no pulse)");
+		assert(findByClass(idleCard26, "arthur-pi-state--active").length === 1, "the active-idle card carries the 'active' state label");
+		assert(idleCard26.hasClass("arthur-pi-card--running") === false, "the active-idle card carries NO running class");
+		// INACTIVE sessions live in the collapsed archives — open them first
+		assert(findByClass(piSec26, "arthur-pi-sess-archives")[0] != null, "the device session Archives separator exists");
+		findByClass(piSec26, "arthur-pi-sess-archives")[0].handlers.get("click")[0]?.();
+		// INACTIVE: grey label + not in the queue, even with running:true
+		const inactCard26 = card26("run-c");
+		assert(!!inactCard26 && inactCard26.hasClass("arthur-pi-card--inactive"), "the inactive card renders inside the Archives group (grey state)");
+		assert(findByClass(inactCard26, "arthur-dot--gray").length === 1, "the inactive card's dot is grey");
+		assert(findByClass(inactCard26, "arthur-pi-state--inactive").length === 1, "the inactive card carries the 'inactive' state label");
+		// current area order: running FIRST, then active-idle (startedAt desc)
+		const order26 = findByClass(piSec26, "arthur-pi-card").map((c) => (c.attributes.get("data-pi-session") ?? "").split("/").pop());
+		assert(order26[0] === "run-a" && order26[1] === "run-b",
+			`current area orders running-first (run-a before run-b; got ${order26.join(",")})`);
+		// queue: ACTIVE sessions only; the RUNNING parent gets the pulsing cue
+		const parents26 = view26.queueEl.children.filter((c) => c.hasClass?.("arthur-pi-parent"));
+		assert(parents26.length === 2, "the queue holds only the ACTIVE sessions (2 parents)");
+		const runParent26 = parents26.find((c) => (c.attributes.get("data-pi-key") ?? "").endsWith("run-a"));
+		const idleParent26 = parents26.find((c) => (c.attributes.get("data-pi-key") ?? "").endsWith("run-b"));
+		assert(runParent26.hasClass("arthur-pi-parent--running") === true, "the running parent card carries arthur-pi-parent--running");
+		assert(findByClass(runParent26, "arthur-dot--pulse").length === 1, "the running parent card gets the pulsing dot cue");
+		assert(idleParent26.hasClass("arthur-pi-parent--running") === false && findByClass(idleParent26, "arthur-dot--green").length === 1,
+			"the idle parent card keeps the solid green dot (no pulse)");
+		assert(!parents26.some((c) => (c.attributes.get("data-pi-key") ?? "").includes("run-c")),
+			"inactive sessions NEVER enter the queue (ghost stays in the archives)");
+		// archives grouping helper (exported for this suite)
+		const g26 = bundle.piDeviceSessionGroups(piBody26.devices[0].sessions);
+		assert(g26.current.length === 2 && g26.archived.length === 1, "piDeviceSessionGroups: 2 current (running first) + 1 archived");
+		assert((g26.current[0].id ?? "") === "run-a" && (g26.current[1].id ?? "") === "run-b", "piDeviceSessionGroups: running session sorted FIRST, then active-idle");
+		assert((g26.archived[0].id ?? "") === "run-c", "piDeviceSessionGroups: inactive session lands in archived (pathless+inactive would be dropped)");
+		httpResponder = null;
+		StubNotice.reset();
+		await app.workspace.detachLeavesOfType("arthur-dashboard");
+	}
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();
@@ -3545,4 +3760,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.0-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.0-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping all clean");

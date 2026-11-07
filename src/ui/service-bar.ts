@@ -96,6 +96,11 @@ export interface ServiceBarState {
 	services: AgentService[];
 	/** Pi feed snapshot for the pseudo-service button (null → pi disabled). */
 	pi?: PiMenuData | null;
+	/** The profile's ai-toolkit integration toggle (undefined/true = ON).
+	 *  false → the aitoolkit pill renders a distinct USER-DISABLED state
+	 *  (grey + muted 'disabled' label — NOT the error-offline styling) and
+	 *  is inert (no start/spawn/hover dropdown). */
+	aiToolkitEnabled?: boolean;
 }
 
 /** One pi device row of the pi DEVICE dropdown: the /api/pi/devices entry
@@ -194,6 +199,10 @@ export interface ServiceButton {
 	/** Latest rendered service-level state. */
 	active: boolean;
 	disabled: boolean;
+	/** True when the USER turned this service off in the plugin settings
+	 *  (ai-toolkit integration toggle) — distinct from agent-unreachable
+	 *  disabled: grey + muted label, never error-styled, fully inert. */
+	userOff: boolean;
 	/** Hover wrapper (position:relative anchor for the GPU dropdown). */
 	wrap: HTMLElement;
 	btn: HTMLButtonElement;
@@ -296,6 +305,34 @@ export class ServiceBar {
 				this.renderPiButton(entry, pi);
 				continue;
 			}
+			// USER-DISABLED service (ai-toolkit integration toggle OFF): the pill
+			// renders a distinct grey 'disabled' label — never the red/error
+			// offline styling — and the button is fully inert (no start/spawn,
+			// no hover dropdown). The user intentionally stopped the service;
+			// its silence is expected, not an error.
+			const userOff = svc.id === "aitoolkit" && state.aiToolkitEnabled === false;
+			if (userOff) {
+				const name = svc.name ?? svc.id;
+				entry.svc = svc;
+				entry.active = false;
+				entry.disabled = true;
+				entry.userOff = true;
+				entry.btn.disabled = true;
+				entry.btn.className = "arthur-svc-btn arthur-svc-btn--useroff";
+				entry.name.setText(`${name} · disabled`);
+				entry.btn.setAttribute(
+					"aria-label",
+					`${name} — disabled in plugin settings (ai-toolkit integration off; no requests are made)`,
+				);
+				this.applyIcon(entry);
+				if (entry.kill) {
+					entry.kill.style.display = ""; // greyed out by the pill's filter
+					entry.kill.removeAttribute("aria-label");
+					entry.kill.removeAttribute("title");
+				}
+				continue;
+			}
+			entry.userOff = false;
 			const active = reachable && svc.active;
 			entry.svc = svc;
 			entry.active = active;
@@ -401,6 +438,7 @@ export class ServiceBar {
 			pseudo,
 			active: false,
 			disabled: true,
+			userOff: false,
 			wrap,
 			btn,
 			main,
@@ -448,9 +486,11 @@ export class ServiceBar {
 	}
 
 	/** Wrap mouseenter: cancel any pending close, then (re)open the dropdown
-	 *  for this service (opening a sibling first closes it, no delay). */
+	 *  for this service (opening a sibling first closes it, no delay). A
+	 *  user-disabled service (ai-toolkit off) never opens a dropdown. */
 	private enterHover(entry: ServiceButton): void {
 		this.cancelScheduledClose(entry);
+		if (entry.userOff) return;
 		this.openMenu(entry);
 	}
 
