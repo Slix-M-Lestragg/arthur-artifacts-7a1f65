@@ -1,7 +1,7 @@
 # Arthur + AHP / obsidian-pi integration — research and delivery plan
 
 - **Date**: 2026-11-07
-- **Status**: **Phase 0 preserved + Phase 1 slice 1 implemented, mock-tested, and sandbox-validated; Phase 2 PLUGIN side implemented and mock-tested** (roles gate + opt-in controls + exact mutation wire, gate green) — **backend roles work lives on a separate remote broker branch (81 tests passing, since superseded: the roles + command gate landed at broker `b6e26148`, 82 tests, DEPLOYED — see §10c; production roll-out EXECUTED, see §11b)**; **live Phase 2 interactive sandbox EXECUTED (linux-obsidian-73323, see Status snapshot / E15) with one BLOCKER found & FIXED (`createSession` `provider:'pi'`) and the focused live retest of the fixed wrapper PASS (`linux-obsidian-74310`, E17 — UI-created HOSTED pi session, `AHP_PHASE2_CREATE_OK`, pause/resume/dispose, 0 plugin errors, cleanup verified)**; **INLINE dispose confirmation hardening implemented + mock-tested (native `window.confirm` removed, E18) — its final focused live sandbox was ABORTED by the harness and cleaned, so the hardened dispose UI stays mock-tested / NOT live-revalidated**; question_user answering remains mock-only; **production role deployment EXECUTED and COMPLETE (broker `b6e26148` live, all protocol role probes PASS, ALL clients recovered — see §11b + §11c); interactive production UI validation ATTEMPTED — FAILED at hosted create (`spawn /home/ulysse/.local/bin/pi` ENOENT, zero plugin console errors, no session created; root cause since CLARIFIED, E22: **missing spawn workingDirectory on ulysse, NOT a missing pi binary** — the absolute pi on ulysse exists and is executable v1.4.0, and a DIRECT production create/prompt/dispose probe with valid cwd `/home/ulysse` PASSED `PROBE_OK` with no broker restart; the final interactive plugin UI validation with a valid cwd is PENDING — see §11c); interactive deployment NOT complete**; Phases 3–5 still [PROPOSED]
+- **Status**: **Phase 0 preserved + Phase 1 slice 1 implemented, mock-tested, and sandbox-validated; Phase 2 PLUGIN side implemented and mock-tested** (roles gate + opt-in controls + exact mutation wire, gate green) — **backend roles work lives on a separate remote broker branch (81 tests passing, since superseded: the roles + command gate landed at broker `b6e26148`, 82 tests, DEPLOYED — see §10c; production roll-out EXECUTED, see §11b)**; **live Phase 2 interactive sandbox EXECUTED (linux-obsidian-73323, see Status snapshot / E15) with one BLOCKER found & FIXED (`createSession` `provider:'pi'`) and the focused live retest of the fixed wrapper PASS (`linux-obsidian-74310`, E17 — UI-created HOSTED pi session, `AHP_PHASE2_CREATE_OK`, pause/resume/dispose, 0 plugin errors, cleanup verified)**; **INLINE dispose confirmation hardening implemented + mock-tested (native `window.confirm` removed, E18) — since LIVE-revalidated end-to-end in the final sandbox (§11d/E23)**; question_user answering remains mock-only; **production role deployment EXECUTED and COMPLETE (broker `b6e26148` live, all protocol role probes PASS, ALL clients recovered — see §11b + §11c); interactive production UI validation ATTEMPTED — FAILED at hosted create (`spawn /home/ulysse/.local/bin/pi` ENOENT, zero plugin console errors, no session created; root cause since CLARIFIED, E22: **missing spawn workingDirectory on ulysse, NOT a missing pi binary** — the absolute pi on ulysse exists and is executable v1.4.0, and a DIRECT production create/prompt/dispose probe with valid cwd `/home/ulysse` PASSED `PROBE_OK` with no broker restart; the final interactive plugin UI validation with a valid cwd has since PASSED (final sandbox `ahp-prod-ui-final`, §11d/E23) — **interactive deployment COMPLETE**; Phases 3–5 still [PROPOSED]
 - **Scope**: planning record + delivery evidence for Phase 0 and Phase 1 slice 1. No canonical `docs/PLAN.md`, manifest, or ROADMAP/TESTING changes.
 
 ### Status snapshot (2026-11-07)
@@ -828,7 +828,8 @@ record time; no plugin/version/release artifacts change with this record.
     was NOT restarted for this verification — production state
     unchanged by the probe.
   - **Remaining gap: the interactive arthur-plugin UI validation with a
-    valid workingDirectory is PENDING.** Until the plugin-driven
+    valid workingDirectory is PENDING.** (Since CLOSED — the validation
+    passed, §11d/E23.) Until the plugin-driven
     hosted-create flow (viewer + controller paths incl. the hardened
     inline-dispose UI, E18's open item) passes against the live broker
     with the cwd fix in place, **the interactive production deployment
@@ -853,12 +854,76 @@ record time; no plugin/version/release artifacts change with this record.
     store (nothing to clean up);
   - repair of the spawn path + retest of the hosted-create flow are IN
     PROGRESS; until the retest passes, **the interactive production
-    deployment is NOT complete** — do not treat it as such.
+    deployment is NOT complete** — do not treat it as such. (Since
+    COMPLETE — §11d/E23.)
 - **Cleanup — DONE except the deferred probe orphans.** No residue
   beyond the §11b cleanup record and the §11c probe residue above: the
   failed create left no session, no listener, no temp artifact; the 8
   orphan probe `.jsonl` files remain, deliberately deferred to a later
   careful cleanup (never a bulk/risky delete).
+
+---
+
+## 11d. Interactive deployment close-out + final cleanup (2026-11-07)
+
+Docs-only close-out record of the final interactive UI validation and
+the exact post-closeout cleanup on ulysse. No plugin/version/release
+artifacts change with this record. Facts verified live at record time.
+
+- **Final interactive production UI validation — PASS.** Disposable
+  agent-os Linux-Obsidian sandbox `ahp-prod-ui-final` against the live
+  roles broker (main PID 175271, `0.0.0.0:4500`, build `b6e26148`),
+  plugin-driven with a valid working directory:
+  - hosted create through the plugin control with
+    `provider:'pi'` + `workingDirectory:'/home/ulysse'` created a
+    REAL hosted interactive pi session under cwd `/home/ulysse`; ONE
+    prompt sent and answered — this closes the §11c cwd-repair retest
+    (E22 direct probe → now the plugin-UI equivalent);
+  - the hardened INLINE dispose UI exercised END-TO-END live:
+    **cancel** path (no disposal, session intact) then **confirm**
+    path (dispose executed cleanly) — E18's hardening is now
+    LIVE-revalidated;
+  - detail/row clear and **Refresh stayed responsive** throughout;
+  - **zero plugin-caused console errors** end-to-end;
+  - **sandbox deleted after the run** — everyday vault untouched.
+- **Interactive deployment COMPLETE.** This closes the last pending
+  gap from §11b/§11c: the plugin-driven hosted-create flow incl. the
+  hardened inline-dispose UI has passed against the live production
+  broker with a valid cwd.
+- **Client recovery — final state COMPLETE** (supersedes §11c):
+  every client recovered healthy to the restarted production broker;
+  the ONLY exception is client `1897872` (pi-ahp-tty, ulysse),
+  stopped INTENTIONALLY by operator choice and verified post-closeout
+  still stopped/offline (`T` state) — untouched.
+- **Post-closeout cleanup — EXACT (verified live on ulysse).** The 8
+  deferred orphan probe `.jsonl` files (§11c) removed after per-file
+  re-verification; NO broad pruning; NO active session deleted:
+  - each re-verified as a test/probe-named ONE-line
+    `session/creationFailed` (spawn ENOENT) artifact with NO matching
+    `.json` metadata in the store, then removed:
+    `pi-test-1786736326606`, `pi-test-1786736377330`,
+    `probe-enoent2-1786738909862`, `probe-enoent3-1786739083132`,
+    `probe-test-1786738817931`, `test`,
+    `arthur-7651t155-mw6waiwc-p1bpve`,
+    `arthur-5r2ovcrk-mw6wb5gt-nq9wrj`; store count exactly
+    **4798 → 4790** (`.json`/`.jsonl` balanced); the point-in-time
+    copies under `backups/arthur-roles-20261107-204020/store/` left
+    INTACT;
+  - stale `/tmp/ahp-b6e26148.token` verified ABSENT (already gone;
+    the stale `/tmp/ahp-bak-path` marker removed too); disposable
+    AHP test-workspace pi session dirs removed
+    (`--tmp-ahp-phase2-ws--`, `--tmp-ahp-retest-185820-ws--`, empty
+    `--tmp-e18-roles-4600-work--`); the leftover hung read-only
+    recovery probe process terminated (`/tmp/probe3.mjs` gone).
+- **Production healthy — nothing else touched.** Broker main PID
+  175271 on `0.0.0.0:4500` responsive post-cleanup (initialize +
+  subscribe answered; live sessions 0 — all disconnected/disposed);
+  `:4501` (PID 1666927) and the foreign port `:8189` untouched; NO
+  active session deletion performed.
+- **Remaining known issues — NON-BLOCKERS (future cleanup, not
+  blockers):** pi-voice max-payload reconnect behaviour; stale
+  glyphs in the AHP surface. Both recorded deliberately as later
+  cleanup items; neither affects the validated deployment.
 
 ---
 
@@ -890,5 +955,7 @@ record time; no plugin/version/release artifacts change with this record.
 | E21 | **Production validation follow-up (2026-11-07, §11c)**: ALL clients recovered to the restarted broker — voyager recovered via graceful Obsidian restart; three old-ulysse TTY clients recovered with exact transcripts; client `1897872` stopped intentionally (left offline); pi-voice status PENDING. Interactive production UI validation **FAILED at hosted create** — broker error `spawn /home/ulysse/.local/bin/pi ENOENT` (server-side path defect), **zero plugin-caused console errors**, **no session created**; spawn-path repair + retest IN PROGRESS (since CLARIFIED, see E22); **interactive deployment NOT complete**; cleanup verified done | ulysse live state + plugin run record (delivery record) |
 
 | E22 | **ENOENT root-cause clarification + direct production probe PASS (2026-11-07, §11c)**: the `spawn /home/ulysse/.local/bin/pi ENOENT` was NOT a missing binary — the absolute pi on ulysse EXISTS, EXECUTABLE, v1.4.0; actual cause: the spawn ran with a MISSING workingDirectory (cwd) on ulysse (spawn-config defect, not the plugin); direct (non-plugin) production create → prompt → dispose with valid cwd `/home/ulysse` PASSED — transcript marker `PROBE_OK`, clean dispose, **NO broker restart**; pi-voice RECOVERED on the restarted broker immediately after its `/reload`; all client recovery COMPLETE except client `1897872` (stopped intentionally, offline); residue: **8 orphan probe `.jsonl` files** identified for careful LATER cleanup, **no pre-existing sessions deleted**; final interactive arthur-plugin UI validation with a valid cwd PENDING | ulysse live state + direct probe record (delivery record) |
+
+| E23 | **Interactive deployment close-out (2026-11-07, §11d)**: final production UI sandbox `ahp-prod-ui-final` PASS against live broker PID 175271/4500 (`b6e26148`) — plugin-driven hosted create with valid cwd `/home/ulysse`, one prompt answered, hardened INLINE dispose cancel+confirm exercised live (E18 hardening live-revalidated), detail/row clear + Refresh responsive, **zero plugin-caused console errors**, sandbox deleted after; **interactive deployment COMPLETE**; client recovery COMPLETE except client `1897872` (stopped intentionally, verified still stopped/offline post-closeout); the 8 orphan probe `.jsonl` files removed after per-file re-verification (test/probe naming, one-line `session/creationFailed` ENOENT, no matching `.json`; store 4798→4790, backups intact), stale `/tmp/ahp-*` residue cleared, hung probe process terminated; production healthy (live sessions 0), `:4501`/`:8189` untouched, no active session deleted; remaining non-blockers recorded: pi-voice max-payload reconnect, stale glyphs (future cleanup) | ulysse live state + final sandbox run record (delivery record) |
 
 *End of plan.*
