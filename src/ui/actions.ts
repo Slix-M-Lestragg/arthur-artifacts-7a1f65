@@ -6,6 +6,7 @@
 import { App, Modal, Notice } from "obsidian";
 
 import { ArthurApiError } from "../api/transport";
+import { debugLine } from "../debug-log";
 
 /** Success toast (short-lived). */
 export function toastOk(message: string): void {
@@ -90,6 +91,9 @@ export async function run(
 		await apiCall();
 		toastOk(`${label} — done`);
 	} catch (err) {
+		// Debug pane (v0.12.0): mutation failures carry the server's message —
+		// copyable instead of only a long-lived toast.
+		debugLine(`mutation ${label} failed — ${describeError(err)}`);
 		toastErr(`${label} — ${describeError(err)}`);
 	} finally {
 		for (const poller of pollers) poller.pollNow();

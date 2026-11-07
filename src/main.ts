@@ -53,6 +53,14 @@ export interface ArthurSettings {
 	instancesCollapsed: boolean;
 	/** Job-queue section collapsed (dashboard title toggle; default expanded). */
 	queueCollapsed: boolean;
+	/** 'General' sub-container within the Instances section collapsed (default
+	 *  expanded) — the cross-device pi sessions list. */
+	generalCollapsed: boolean;
+	/** 'GPUs' sub-container within the Instances section collapsed (default
+	 *  expanded) — the GPU grid (+ per-GPU-column toggles remain independent). */
+	gpusCollapsed: boolean;
+	/** 'Debug' log pane collapsed (default COLLAPSED). */
+	debugCollapsed: boolean;
 	/** Per-GPU-column collapse of the Services section's instance grid —
 	 *  Record<gpuIndex, boolean> (string keys, JSON-safe): true = that column's
 	 *  rows hidden via the column-head chevron. Independent of the whole
@@ -99,6 +107,9 @@ const DEFAULT_SETTINGS: ArthurSettings = {
 	debugLogging: false,
 	instancesCollapsed: false,
 	queueCollapsed: false,
+	generalCollapsed: false,
+	gpusCollapsed: false,
+	debugCollapsed: true,
 	gpuCollapsed: {},
 	spawnGpuSel: {},
 	lastUsedPiDevice: "",
@@ -648,6 +659,9 @@ export default class ArthurPlugin extends Plugin {
 			debugLogging: data?.debugLogging === true,
 			instancesCollapsed: data?.instancesCollapsed === true,
 			queueCollapsed: data?.queueCollapsed === true,
+			generalCollapsed: data?.generalCollapsed === true,
+			gpusCollapsed: data?.gpusCollapsed === true,
+			debugCollapsed: data?.debugCollapsed !== false,
 			gpuCollapsed: sanitizeGpuCollapsed(data?.gpuCollapsed),
 			spawnGpuSel: sanitizeGpuSel(data?.spawnGpuSel),
 			lastUsedPiDevice:

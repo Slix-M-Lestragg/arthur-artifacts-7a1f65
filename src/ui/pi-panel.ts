@@ -86,6 +86,187 @@ export function piStateIcon(state: string): HTMLElement {
 	});
 }
 
+// ------------------------------------------------------------------
+// subagent grouping (v0.12.0) — current-run batch vs archives
+// ------------------------------------------------------------------
+
+/**
+ * The grouped view of a session's subagent runs (v0.12.0):
+ *
+ *  - `current` — the CURRENT-RUN group, TOP of the list: every RUNNING run
+ *    (never hidden, regardless of batch) + every terminal (done/failed/
+ *    canceled) run of the MOST RECENT batchId — the latest dispatch wave.
+ *    When a new batch starts, the previous batch's terminal runs move down
+ *    into the archives.
+ *  - `currentBatchId` — the batchId containing the most-recently-started run
+ *    (null when NO entry carries a usable batchId).
+ *  - `archived` — every OTHER terminal run, most-recent-first (finishedAt
+ *    desc, fallback startedAt desc); rendered inside the collapsible
+ *    'Archives' separator group (collapsed by default).
+ *
+ * batchId semantics: a missing, non-string, or blank batchId is null —
+ * terminal null-batch runs are OLD entries the producer (pi-arthur) can date
+ * to no batch; they group under ARCHIVES ordered by timestamp. Running
+ * null-batch runs stay in `current` (running runs are never hidden, never
+ * archived).
+ */
+export interface PiSubGroups {
+	current: AgentPiSubagent[];
+	currentBatchId: string | null;
+	archived: AgentPiSubagent[];
+}
+
+const TERMINAL_SUB_STATES = new Set(["done", "failed", "canceled"]);
+
+/** The entry's usable batchId (trimmed non-empty string), else null. */
+function piSubBatchOf(sub: AgentPiSubagent): string | null {
+	const raw = (sub as { batchId?: unknown }).batchId;
+	if (typeof raw !== "string") return null;
+	const trimmed = raw.trim();
+	return trimmed ? trimmed : null;
+}
+
+/**
+ * Group a session's subagent runs (see {@link PiSubGroups}). All inputs are
+ * returned in most-recent-first order (startedAt desc).
+ */
+export function piSubGroups(subs: AgentPiSubagent[]): PiSubGroups {
+	const startMs = (s: AgentPiSubagent): number => tsMs(s.startedAt) || tsMs(s.finishedAt);
+
+	// Most recent batchId = the batch holding the latest-started run.
+	let currentBatchId: string | null = null;
+	let bestStart = -1;
+	for (const s of subs) {
+		const batch = piSubBatchOf(s);
+		if (!batch) continue;
+		const st = startMs(s);
+		if (st > bestStart) {
+			bestStart = st;
+			currentBatchId = batch;
+		}
+	}
+
+	const current: AgentPiSubagent[] = [];
+	const archived: AgentPiSubagent[] = [];
+	for (const s of subs) {
+		const terminal = TERMINAL_SUB_STATES.has(s.state);
+		if (!terminal || s.state === "running") {
+			// Guard for odd states: running (or unknown) runs never archive.
+			current.push(s);
+		} else if (currentBatchId !== null && piSubBatchOf(s) === currentBatchId) {
+			current.push(s); // still the current dispatch wave (its terminal runs)
+		} else {
+			archived.push(s);
+		}
+	}
+
+	const recency = (s: AgentPiSubagent): number => tsMs(s.finishedAt) || tsMs(s.startedAt);
+	current.sort((a, b) => startMs(b) - startMs(a));
+	archived.sort((a, b) => recency(b) - recency(a));
+	return { current, currentBatchId, archived };
+}
+
+/**
+ * Counts badge text for a grouped session row: 'N running', or
+ * 'N running · M archived' with archives, or 'N done' when everything in the
+ * current batch already finished (never hidden), or '' with no runs at all.
+ */
+export function piSubBadgeText(groups: PiSubGroups): string {
+	const running = groups.current.filter((s) => s.state === "running").length;
+	const archived = groups.archived.length;
+	const parts: string[] = [];
+	if (running > 0) parts.push(`${running} running`);
+	if (archived > 0) parts.push(`${archived} archived`);
+	if (parts.length === 0 && groups.current.length > 0) {
+		parts.push(`${groups.current.length} done`);
+	}
+	return parts.join(" · ");
+}
+
+/**
+ * One subagent run row (shared by the session panel and the queue parent
+ * cards): state icon, agent name, task preview, live duration (running:
+ * now − startedAt; finished: finishedAt − startedAt).
+ */
+export function piSubRow(sub: AgentPiSubagent, now: number, cls: string): HTMLElement {
+	const startMs = tsMs(sub.startedAt);
+	const endMs = tsMs(sub.finishedAt) || (sub.state === "running" ? now : 0);
+	const dur = startMs > 0 && endMs > startMs ? fmtDuration((endMs - startMs) / 1000) : null;
+	const row = el("div", { cls: `${cls} ${cls}--${sub.state}` });
+	row.append(
+		piStateIcon(sub.state),
+		el("span", { cls: `${cls}-agent`, text: truncate(sub.agent, 24) }),
+		el("span", { cls: `arthur-card-meta ${cls}-task`, text: truncate(sub.taskPreview ?? "", 64), attrs: { title: sub.taskPreview ?? "" } }),
+		dur ? el("span", { cls: "arthur-card-meta arthur-pi-duration", text: dur }) : el("span"),
+	);
+	return row;
+}
+
+export interface PiGroupedListOpts {
+	/** True = the 'Archives' group is expanded (session-scoped, in-memory). */
+	archiveOpen: boolean;
+	/** Toggles the archives group (the caller re-renders). */
+	onToggleArchive: () => void;
+}
+
+/**
+ * The GROUPED subagent list of one session (expanded panel content):
+ * TOP the 'current run' group (a small label only when archives exist too),
+ * BELOW the collapsible 'Archives' separator (collapsed by default; hidden
+ * entirely when there is nothing archived).
+ */
+export function piGroupedSubList(
+	groups: PiSubGroups,
+	now: number,
+	cls: string,
+	o: PiGroupedListOpts,
+): HTMLElement {
+	const panel = el("div", { cls: `${cls}s` });
+	if (groups.current.length === 0 && groups.archived.length === 0) {
+		panel.append(el("span", { cls: "arthur-card-meta arthur-pi-note", text: "no subagent runs" }));
+		return panel;
+	}
+	if (groups.archived.length > 0) {
+		panel.append(el("span", { cls: "arthur-card-meta arthur-pi-sublabel", text: "Current run" }));
+	}
+	for (const sub of groups.current) panel.append(piSubRow(sub, now, cls));
+	if (groups.current.length === 0) {
+		panel.append(el("span", { cls: "arthur-card-meta arthur-pi-note", text: "no current run" }));
+	}
+	if (groups.archived.length > 0) {
+		const toggle = el("div", {
+			cls: `arthur-pi-archives-toggle${o.archiveOpen ? " arthur-pi-archives-toggle--open" : ""}`,
+			attrs: {
+				role: "button",
+				tabindex: "0",
+				"aria-expanded": String(o.archiveOpen),
+				title: `Toggle the ${groups.archived.length} archived subagent run${groups.archived.length === 1 ? "" : "s"}`,
+			},
+		});
+		toggle.append(
+			el("span", { cls: "arthur-pi-archives-chev", text: o.archiveOpen ? "▾" : "▸" }),
+			el("span", { text: "Archives" }),
+			el("span", { cls: "arthur-card-meta", text: String(groups.archived.length) }),
+		);
+		const toggleIt = (ev?: Event): void => {
+			ev?.stopPropagation?.();
+			o.onToggleArchive();
+		};
+		toggle.addEventListener("click", (ev) => toggleIt(ev));
+		toggle.addEventListener("keydown", (e: KeyboardEvent) => {
+			if (e.key === "Enter" || e.key === " ") {
+				e.preventDefault();
+				toggleIt();
+			}
+		});
+		panel.append(toggle);
+		if (o.archiveOpen) {
+			for (const sub of groups.archived) panel.append(piSubRow(sub, now, cls));
+		}
+	}
+	return panel;
+}
+
 /** Session display name: friendly name, else the last path segment of cwd. */
 export function piSessionLabel(sess: AgentPiSession): string {
 	const named = (sess.name ?? "").trim();
@@ -142,8 +323,9 @@ export function fmtUsd(n: number | null | undefined): string {
 const TAIL_LINES = 10;
 
 export class PiPanel {
-	/** The pi block's root — lives INSIDE the Services section body, FIRST
-	 *  position (the GPU grid renders below within the same section). */
+	/** The pi block's root — lives INSIDE the 'General' sub-container of the
+	 *  'Instances' section, FIRST position (the GPU grid renders in the
+	 *  'GPUs' sub-container below). */
 	readonly rootEl: HTMLElement;
 	private readonly warningEl: HTMLElement;
 	private readonly devicesEl: HTMLElement;
@@ -170,6 +352,16 @@ export class PiPanel {
 	/** The device's subagent runs grouped per parent session id. */
 	private subsOf(dev: AgentPiDevice, sessionId: string): AgentPiSubagent[] {
 		return (dev.subagents ?? []).filter((s) => s.parentSessionId === sessionId);
+	}
+
+	/** In-memory 'Archives' group expansion, per session (collapsed by default;
+	  * pruned with dead sessions alongside the expansion/peek state). */
+	private readonly archivesOpen = new Set<string>();
+
+	private toggleArchives(key: string): void {
+		if (this.archivesOpen.has(key)) this.archivesOpen.delete(key);
+		else this.archivesOpen.add(key);
+		this.repaint();
 	}
 
 	/** Repaint from the last poll snapshot. Never throws with devices: []. */
@@ -229,7 +421,9 @@ export class PiPanel {
 	private sessionCard(dev: AgentPiDevice, sess: AgentPiSession, now: number): HTMLElement {
 		const key = `${dev.device}/${sess.id}`;
 		const subs = this.subsOf(dev, sess.id);
-		const runningSubs = subs.filter((s) => s.state === "running").length;
+		const groups = piSubGroups(subs);
+		const badgeText = piSubBadgeText(groups);
+		const runningSubs = groups.current.filter((s) => s.state === "running").length;
 		const expanded = this.expanded.has(key);
 
 		const card = el("div", {
@@ -254,13 +448,15 @@ export class PiPanel {
 		if (durMs > 0) {
 			head.append(el("span", { cls: "arthur-card-meta arthur-pi-duration", text: fmtDuration(Math.max(0, (now - durMs) / 1000)) }));
 		}
-		// Subagent child-count badge — VISIBLY populated from the feed's
-		// subagent entries (parentSessionId match); click expands the list.
-		if (subs.length > 0) {
+		// Subagent grouped counts badge (v0.12.0) — 'N running · M archived':
+		// N = RUNNING runs of the current-run group, M = archived terminal runs;
+		// all-terminal current batch folds into 'N done'. Click expands the
+		// grouped list (current run on top, collapsible Archives below).
+		if (subs.length > 0 && badgeText) {
 			head.append(
 				el("span", {
 					cls: `arthur-badge arthur-badge--idle arthur-pi-count${runningSubs > 0 ? " arthur-pi-count--running" : ""}`,
-					text: String(subs.length),
+					text: badgeText,
 					attrs: { title: `${runningSubs} running subagent${runningSubs === 1 ? "" : "s"}` },
 				}),
 			);
@@ -297,7 +493,12 @@ export class PiPanel {
 
 		if (expanded) {
 			card.addClass("arthur-pi-card--expanded");
-			card.append(this.subagentList(subs, now));
+			// v0.12.0 grouped subagent list: the current run (top) + the
+			// collapsible, collapsed-by-default Archives below.
+			card.append(piGroupedSubList(groups, now, "arthur-pi-sub", {
+				archiveOpen: this.archivesOpen.has(key),
+				onToggleArchive: () => this.toggleArchives(key),
+			}));
 		}
 		card.setAttribute("title", expanded ? "Click to collapse" : "Click to expand");
 		card.addEventListener("click", (e) => this.toggleExpanded(key, e));
@@ -307,29 +508,6 @@ export class PiPanel {
 			card.append(this.miniLog(key));
 		}
 		return card;
-	}
-
-	/** Expanded session panel: the parent session's subagent runs. */
-	private subagentList(subs: AgentPiSubagent[], now: number): HTMLElement {
-		const panel = el("div", { cls: "arthur-pi-subs" });
-		if (subs.length === 0) {
-			panel.append(el("span", { cls: "arthur-card-meta arthur-pi-note", text: "no subagent runs" }));
-			return panel;
-		}
-		for (const sub of subs) {
-			const startMs = tsMs(sub.startedAt);
-			const endMs = tsMs(sub.finishedAt) || (sub.state === "running" ? now : 0);
-			const dur = startMs > 0 && endMs > startMs ? fmtDuration((endMs - startMs) / 1000) : null;
-			const row = el("div", { cls: `arthur-pi-sub arthur-pi-sub--${sub.state}` });
-			row.append(
-				piStateIcon(sub.state),
-				el("span", { cls: "arthur-pi-sub-agent", text: truncate(sub.agent, 24) }),
-				el("span", { cls: "arthur-card-meta arthur-pi-sub-task", text: truncate(sub.taskPreview ?? "", 64), attrs: { title: sub.taskPreview ?? "" } }),
-				dur ? el("span", { cls: "arthur-card-meta arthur-pi-duration", text: dur }) : el("span"),
-			);
-			panel.append(row);
-		}
-		return panel;
 	}
 
 	/** Toggle a session card's subagent expansion (buttons own their clicks). */
@@ -417,6 +595,7 @@ export class PiPanel {
 				this.expanded.delete(key);
 				this.peekOpen.delete(key);
 				this.tails.delete(key);
+				this.archivesOpen.delete(key);
 			}
 		}
 	}

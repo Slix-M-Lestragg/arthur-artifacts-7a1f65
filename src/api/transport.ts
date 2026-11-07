@@ -10,6 +10,7 @@
 import { requestUrl } from "obsidian";
 
 import { DEFAULT_REQUEST_TIMEOUT_MS } from "../util";
+import { debugLine } from "../debug-log";
 
 /** Typed error carrying HTTP status (0 = network-level failure). */
 export class ArthurApiError extends Error {
@@ -108,7 +109,12 @@ export const obsidianRequester: Requester = {
 		let timerId: ReturnType<typeof setTimeout> | null = null;
 		const timer = new Promise<never>((_resolve, reject) => {
 			timerId = setTimeout(
-				() => reject(new ArthurApiError(opts.url, 0, `timeout after ${timeoutMs}ms`)),
+				() => {
+					// Debug pane: a wedged/unreachable server used to surface only
+					// in tooltips — make the timeout itself copyable.
+					debugLine(`request timeout ${opts.method ?? "GET"} ${opts.url} — no response in ${timeoutMs}ms`);
+					reject(new ArthurApiError(opts.url, 0, `timeout after ${timeoutMs}ms`));
+				},
 				timeoutMs,
 			);
 		});
@@ -132,6 +138,8 @@ export const obsidianRequester: Requester = {
 					err instanceof Error
 						? err.message
 						: "request failed (network error)";
+				// Debug pane: requestUrl network-level failure, copyable (v0.12.0).
+				debugLine(`request error ${opts.method ?? "GET"} ${opts.url} — ${message}`);
 				throw new ArthurApiError(opts.url, 0, message);
 			},
 		);

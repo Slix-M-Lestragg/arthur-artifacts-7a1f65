@@ -1551,8 +1551,8 @@ try {
 	const heads15 = findByClass(view15.contentEl, "arthur-section-head");
 	assert(heads15.length === 2, "each dashboard section opens with a collapse title head (services + queue: 2 total)");
 	const sectionTitles15 = findByClass(view15.contentEl, "arthur-section-title").map((t) => t.textContent);
-	assert(sectionTitles15.includes("Services") && sectionTitles15.includes("Queue"),
-		`title texts are 'Services' + 'Queue' (v0.11: pi merged into Services; got: ${sectionTitles15.join(" / ")})`);
+	assert(sectionTitles15.includes("Instances") && sectionTitles15.includes("Queue"),
+		`title texts are 'Instances' + 'Queue' (v0.12: Services renamed Instances; got: ${sectionTitles15.join(" / ")})`);
 	// centered layout + chevron live in the dedicated CSS classes; the DOM must
 	// carry both on every head
 	assert(heads15.every((h) => h.hasClass("arthur-section-head") && findByClass(h, "arthur-section-chevron").length === 1),
@@ -1565,7 +1565,7 @@ try {
 
 	// click a title → its section body collapses to the head + setting flips
 	instancesHead15.handlers.get("click")[0]?.();
-	assert(view15.gridBodyEl.isShown() === false, "clicking the Services title collapses the services body (pi block + grid + notes)");
+	assert(view15.gridBodyEl.isShown() === false, "clicking the Instances title collapses the instances body (General + GPUs)");
 	assert(plugin.settings.instancesCollapsed === true, "grid collapse flips the persisted instancesCollapsed setting");
 	assert(plugin._data?.instancesCollapsed === true, "instancesCollapsed persisted via saveData");
 	assert(instancesHead15.getAttribute("aria-expanded") === "false", "collapsed head reports aria-expanded=false");
@@ -1586,13 +1586,13 @@ try {
 	assert(plugin.settings.instancesCollapsed === true, "instancesCollapsed reloads from saved settings");
 	await plugin.activateView();
 	const view15b = app.workspace.getLeavesOfType("arthur-dashboard")[0]?.view;
-	assert(view15b.gridBodyEl.isShown() === false, "Services section (pi + grid) stays collapsed across reopen");
+	assert(view15b.gridBodyEl.isShown() === false, "Instances section stays collapsed across reopen");
 	assert(view15b.queueBodyEl.isShown() === true, "Queue section stays expanded across reopen");
 	// restore: click the collapsed Services title back open for later sections
 	const instHead15b = findByClass(view15b.contentEl, "arthur-section-head").find((h) => h.getAttribute("data-section") === "instances");
 	instHead15b.handlers.get("click")[0]?.();
 	await sleep(700);
-	assert(view15b.gridBodyEl.isShown() === true, "restored Services section expands again");
+	assert(view15b.gridBodyEl.isShown() === true, "restored Instances section expands again");
 	assert(plugin.settings.instancesCollapsed === false && plugin._data?.instancesCollapsed === false,
 		"restored expanded state persists too");
 
@@ -2791,13 +2791,17 @@ try {
 	// inside arthur-section-instances, BEFORE arthur-grid, with NO head of its
 	// own (the Services section head owns the collapse; separate piCollapsed gone)
 	{
-		assert(piSection22?._parent === view22.gridBodyEl,
-			"the pi block lives INSIDE the Services section body");
+		assert(piSection22?._parent === view22.generalBodyEl,
+			"the pi block lives INSIDE the General sub-container of Instances");
+		assert(view22.generalBodyEl?._parent === view22.gridBodyEl,
+			"the General body lives INSIDE the Instances section body");
 		const bodyChildren22 = view22.gridBodyEl.children ?? [];
-		const piIdx22 = bodyChildren22.indexOf(piSection22);
-		const gridIdx22 = bodyChildren22.indexOf(view22.gridEl);
-		assert(piIdx22 >= 0 && gridIdx22 > piIdx22,
-			`pi content FIRST in Services, GPU grid below it (pi=${piIdx22}, grid=${gridIdx22})`);
+		const generalIdx22 = bodyChildren22.indexOf(view22.generalBodyEl);
+		const gpusIdx22 = bodyChildren22.indexOf(view22.gpusBodyEl);
+		assert(generalIdx22 >= 0 && gpusIdx22 > generalIdx22,
+			`General FIRST, GPUs below it inside Instances (general=${generalIdx22}, gpus=${gpusIdx22})`);
+		assert((view22.gridEl?._parent ?? null) === view22.gpusBodyEl,
+			"the GPU grid lives INSIDE the GPUs sub-container");
 		assert(findByClass(view22.contentEl, "arthur-pi-warning").every((w) => w._shown !== true),
 			"no pi warning line while devices are reported");
 		assert(findByClass(view22.contentEl, "arthur-section-head").every((h) => h.getAttribute("data-section") !== "pi"),
@@ -2867,7 +2871,11 @@ try {
 		});
 		for (const card of cards22c()) {
 			const badge = findByClass(card, "arthur-pi-count")[0];
-			assert(!!badge && badge.textContent === "2", `session card carries the '2' subagent count badge (got ${badge?.textContent})`);
+			const expected22 = (card.attributes.get("data-pi-session") ?? "").endsWith("sess-a")
+				? "1 running"  // r1 running + r2 done, same (current) batch b1
+				: "2 done";    // sess-b's terminal batch b2 is ITS most recent batch
+			assert(!!badge && badge.textContent === expected22,
+				`session card carries the grouped counts badge '${expected22}' (got ${badge?.textContent})`);
 		}
 	}
 
@@ -2880,7 +2888,7 @@ try {
 		assert((parent22.attributes.get("data-pi-key") ?? "") === "pi:dev-lt/sess-a", "parent card keyed to the active session");
 		assert(allText(parent22).includes("pi · arthur plugin work"), "parent card labeled 'pi · <name>'");
 		assert(allText(parent22).includes("laptop"), "parent card carries the device prefix");
-		assert(findByClass(parent22, "arthur-pi-count")[0]?.textContent === "2", "parent card carries the child count badge");
+		assert(findByClass(parent22, "arthur-pi-count")[0]?.textContent === "1 running", "parent card carries the grouped counts badge");
 		assert(allText(parent22).includes("1 running · 1 done"), "parent card shows the aggregate subagent state counts");
 		assert(allText(parent22).includes("1:00:00 run"), "parent card shows the live duration");
 		// a queued training card must NOT precede the pi parent (rank order)
@@ -2900,12 +2908,16 @@ try {
 		assert(findByClass(expanded22, "arthur-pi-st--failed").length === 0 && findByClass(expanded22, "arthur-pi-st--canceled").length === 0,
 			"sess-a's children carry no failed/canceled icons (those belong to the inactive session)");
 		assert(allText(childRows22[0]).includes("fix the pi badge"), "child rows show the taskPreview");
-		// state icons for EVERY child state (panel of the inactive session covers failed/canceled)
+		// state icons for EVERY child state (sess-b's WHOLE feed is the current
+		// batch on its own session → current-run group, always visible).
 		const inactCard22b = findByClass(piSection22, "arthur-pi-card").find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-b"));
 		inactCard22b.handlers.get("click")[0]?.({ target: inactCard22b });
 		const expandedB22 = findByClass(piSection22, "arthur-pi-card").find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-b"));
 		assert(findByClass(expandedB22, "arthur-pi-st--failed")[0]?.textContent === "✕", "failed child renders the red cross icon");
 		assert(findByClass(expandedB22, "arthur-pi-st--canceled")[0]?.textContent === "–", "canceled child renders the grey dash icon");
+		assert(findByClass(expandedB22, "arthur-pi-archives-toggle").length === 0,
+			"no Archives toggle when nothing is archived (the only batch is current)");
+		expandedB22.handlers.get("click")[0]?.({ target: expandedB22 });
 		// collapse again
 		view22.queueEl.children.filter((c) => c.hasClass?.("arthur-pi-parent"))[0].handlers.get("click")[0]?.();
 		assert(findByClass(
@@ -3257,6 +3269,241 @@ try {
 	StubNotice.reset();
 	await app.workspace.detachLeavesOfType("arthur-dashboard");
 
+	// ---- 24. Instances sub-containers (General/GPUs) + grouped subagents +
+	//         debug log pane (v0.12.0) ---------------------------------
+	console.log("== 24. Instances sub-containers + subagent archives + debug pane ==");
+	plugin.settings.profiles[0].comfyPorts = "";
+	plugin.settings.generalCollapsed = false;
+	plugin.settings.gpusCollapsed = false;
+	plugin.settings.debugCollapsed = true; // Debug pane's COLLAPSED default
+	plugin.settings.debugLogging = false;
+	await plugin.saveSettings();
+	await sleep(700);
+	plugin.clients.lightPoller.stop(); // deterministic: manual ticks only
+	plugin.clients.detailPoller.stop();
+
+	const json24 = (status, body) => ({ status, body });
+	const iso24 = (msAgo) => new Date(Date.now() - msAgo).toISOString();
+	const piBody24 = {
+		generatedAt: iso24(0),
+		devices: [
+			{
+				device: "dev-m", hostname: "groupbox", stale: false,
+				activeSessions: 1, sessionsCount: 1,
+				sessions: [
+					{ id: "sess-m", path: "/home/me/.pi/sess-m.jsonl", cwd: "/home/me/grp", name: "grouping test", model: "GLM-5", provider: "zai", startedAt: iso24(3_600_000), lastActivity: iso24(1_000), active: true },
+				],
+				subagents: [
+					// older batches → ARCHIVES (previous dispatch waves)
+					{ runId: "m-b1", batchId: "b1", agent: "agent-arch-b1", taskPreview: "oldest batch", state: "done", parentSessionId: "sess-m", startedAt: iso24(10_000_000), finishedAt: iso24(9_000_000) },
+					{ runId: "m-b2", batchId: "b2", agent: "agent-arch-b2", taskPreview: "previous batch", state: "done", parentSessionId: "sess-m", startedAt: iso24(2_000_000), finishedAt: iso24(1_500_000) },
+					// blank batchIds are NULL semantics → archives, by timestamp
+					{ runId: "m-ws", batchId: "  ", agent: "agent-arch-ws", taskPreview: "no batch", state: "canceled", parentSessionId: "sess-m", startedAt: iso24(120_000), finishedAt: iso24(95_000) },
+					// the CURRENT batch (b3 = the most-recently-started run) stays TOP
+					{ runId: "m-b3-done", batchId: "b3", agent: "agent-b3-done", taskPreview: "current batch", state: "done", parentSessionId: "sess-m", startedAt: iso24(90_000), finishedAt: iso24(80_000) },
+					{ runId: "m-b3-run", batchId: "b3", agent: "agent-b3-run", taskPreview: "current batch", state: "running", parentSessionId: "sess-m", startedAt: iso24(60_000), finishedAt: null },
+					// a RUNNING run with NO batchId never hides / never archives
+					{ runId: "m-nb", batchId: "", agent: "agent-nullrun", taskPreview: "no batch running", state: "running", parentSessionId: "sess-m", startedAt: iso24(30_000), finishedAt: null },
+				],
+			},
+		],
+	};
+	const responder24 = (opts) => {
+		if (opts.url.endsWith("/health")) return json24(200, { ok: true, version: "0.8.0" });
+		if (opts.url.endsWith("/api/status")) return json24(200, {
+			version: "0.8.0", host_uptime: 1,
+			services: [
+				{ id: "comfyui", name: "ComfyUI", active: true, multi_instance: true, max_instances: 4, default_port: 8188, unit_template: "comfy@{i}", instances: [] },
+			],
+		});
+		// gpus/jobs/queue "offline" → real collector failures for the pane.
+		if (opts.url.endsWith("/api/pi/status")) return json24(200, piBody24);
+		return null;
+	};
+	httpResponder = responder24;
+
+	// (A) sub-containers: General/GPUs/Debug subordinate heads + persistence
+	let view24;
+	ok = true;
+	try {
+		await plugin.activateView();
+		view24 = app.workspace.getLeavesOfType("arthur-dashboard")[0]?.view;
+		await view24.refreshData();
+	} catch (err) {
+		ok = false;
+		console.error(`    view24 attach threw: ${err?.stack ?? err}`);
+	}
+	assert(ok, "view24 attach + refresh did not throw");
+	const subheads24 = () => findByClass(view24.contentEl, "arthur-subhead");
+	assert(subheads24().length === 3, "three subordinate sub-heads exist (General / GPUs / Debug)");
+	const subKeys24 = subheads24().map((h) => h.getAttribute("data-subsection")).join(",");
+	assert(subKeys24 === "general,gpus,debug", `sub-heads tagged per sub-container (got ${subKeys24})`);
+	const subTitles24 = subheads24().map((h) => allText(findByClass(h, "arthur-subhead-title")[0]).trim());
+	assert(subTitles24.join(",") === "General,GPUs,Debug", `sub-head titles are 'General'/'GPUs'/'Debug' (got ${subTitles24.join(",")})`);
+	// the Debug head carries the Copy/Clear buttons on its own row
+	const debugHead24 = subheads24().find((h) => h.getAttribute("data-subsection") === "debug");
+	assert(findByClass(debugHead24, "arthur-debug-copy").length === 1 && findByClass(debugHead24, "arthur-debug-clear").length === 1,
+		"the Debug pane head carries the Copy + Clear buttons");
+	// Debug starts COLLAPSED; General/GPUs start expanded
+	assert(debugHead24.hasClass("arthur-subhead--collapsed") === true && debugHead24.getAttribute("aria-expanded") === "false",
+		"Debug pane starts collapsed (its default)");
+	const generalHead24 = subheads24().find((h) => h.getAttribute("data-subsection") === "general");
+	const gpusHead24 = subheads24().find((h) => h.getAttribute("data-subsection") === "gpus");
+	assert(generalHead24.getAttribute("aria-expanded") === "true" && gpusHead24.getAttribute("aria-expanded") === "true",
+		"General + GPUs start expanded (their defaults)");
+	assert(view24.generalBodyEl.isShown() === true && view24.gpusBodyEl.isShown() === true, "both sub-bodies shown by default");
+	// the GPU grid + its notes live in the GPUs body (column chips intact)
+	assert((view24.gridEl?._parent ?? null) === view24.gpusBodyEl, "the grid lives INSIDE the GPUs body");
+	// collapse toggles persist per sub-container
+	generalHead24.handlers.get("click")[0]?.();
+	assert(view24.generalBodyEl.isShown() === false && plugin.settings.generalCollapsed === true
+		&& plugin._data?.generalCollapsed === true, "collapsing General hides its body + persists generalCollapsed");
+	gpusHead24.handlers.get("click")[0]?.();
+	assert(view24.gpusBodyEl.isShown() === false && plugin.settings.gpusCollapsed === true
+		&& plugin._data?.gpusCollapsed === true, "collapsing GPUs hides its body + persists gpusCollapsed");
+	debugHead24.handlers.get("click")[0]?.();
+	assert(view24.plugin.settings.debugCollapsed === false && plugin._data?.debugCollapsed === false,
+		"expanding Debug persists debugCollapsed=false");
+	// persistence across reopen (fresh view + reload settings)
+	await sleep(700);
+	await app.workspace.detachLeavesOfType("arthur-dashboard");
+	await plugin.loadSettings();
+	assert(plugin.settings.generalCollapsed === true && plugin.settings.gpusCollapsed === true && plugin.settings.debugCollapsed === false,
+		"sub-container collapse states reload from saved settings");
+	await plugin.activateView();
+	const view24b = app.workspace.getLeavesOfType("arthur-dashboard")[0]?.view;
+	assert(view24b.generalBodyEl.isShown() === false, "General stays collapsed across reopen");
+	assert(view24b.gpusBodyEl.isShown() === false, "GPUs stays collapsed across reopen");
+	assert(findByClass(findByClass(view24b.contentEl, "arthur-subhead").find((h) => h.getAttribute("data-subsection") === "debug"), "arthur-subhead--collapsed").length === 0,
+		"Debug stays expanded across reopen");
+	// restore for the rest of the suite
+	findByClass(view24b.contentEl, "arthur-subhead").find((h) => h.getAttribute("data-subsection") === "general").handlers.get("click")[0]?.();
+	await sleep(700);
+	assert(view24b.generalBodyEl.isShown() === true && plugin.settings.generalCollapsed === false, "General re-expanded (persisted)");
+	findByClass(view24b.contentEl, "arthur-subhead").find((h) => h.getAttribute("data-subsection") === "gpus").handlers.get("click")[0]?.();
+	await sleep(700);
+	assert(view24b.gpusBodyEl.isShown() === true && plugin.settings.gpusCollapsed === false, "GPUs re-expanded (persisted)");
+
+	// (B) grouped subagents: current run (top) vs Archives (collapsed by default)
+	const piCardM24 = () =>
+		findByClass(view24b.contentEl, "arthur-pi-card").find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-m"));
+	const cardM24 = piCardM24();
+	assert(!!cardM24, "the grouping-test session card renders");
+	const badgeM24 = findByClass(cardM24, "arthur-pi-count")[0];
+	assert(!!badgeM24 && badgeM24.textContent === "2 running · 3 archived",
+		`session badge reads '2 running · 3 archived' (got ${badgeM24?.textContent})`);
+	cardM24.handlers.get("click")[0]?.({ target: piCardM24() });
+	const rowsM24 = () => findByClass(piCardM24(), "arthur-pi-sub");
+	assert(rowsM24().length === 3, "expanded card shows ONLY the current-run group until Archives opens (3 rows)");
+	assert(findByClass(piCardM24(), "arthur-pi-sublabel").length === 1
+		&& allText(findByClass(piCardM24(), "arthur-pi-sublabel")[0]).includes("Current run"),
+		"the current-run group carries the 'Current run' label (when archives exist)");
+	const rowOrderM24 = rowsM24().map((r) => allText(r));
+	assert(rowOrderM24[0].includes("agent-nullrun") && rowOrderM24[1].includes("agent-b3-run") && rowOrderM24[2].includes("agent-b3-done"),
+		"current run is sorted most-recent-first (null-batch running → b3 run → b3 done)");
+	const archivesM24 = findByClass(piCardM24(), "arthur-pi-archives-toggle")[0];
+	assert(!!archivesM24 && archivesM24.textContent.includes("Archives") && archivesM24.textContent.includes("3"),
+		"the 'Archives' separator group carries its count (3)");
+	archivesM24.handlers.get("click")[0]?.();
+	assert(rowsM24().length === 6, "opening Archives reveals the archived rows");
+	// archived sorted most-recent-first (finishedAt desc): ws-canceled → b2 → b1
+	const allRowText24 = rowsM24().map((r) => allText(r));
+	assert(allRowText24[3].includes("agent-arch-ws") && allRowText24[4].includes("agent-arch-b2") && allRowText24[5].includes("agent-arch-b1"),
+		"Archives are sorted most-recent-first (blank-batch canceled → b2 → b1)");
+	// collapse the session card again
+	piCardM24().handlers.get("click")[0]?.({ target: piCardM24() });
+	assert(findByClass(piCardM24(), "arthur-pi-sub").length === 0, "second click collapses the grouped list");
+	// queue parent card: same grouping
+	const parentM24 = view24b.queueEl.children.filter((c) => c.hasClass?.("arthur-pi-parent")).find(
+		(c) => (c.attributes.get("data-pi-key") ?? "") === "pi:dev-m/sess-m");
+	assert(!!parentM24, "the active grouping-test session renders as a queue parent card");
+	assert(findByClass(parentM24, "arthur-pi-count")[0]?.textContent === "2 running · 3 archived",
+		"queue parent badge uses the same grouped counts");
+	parentM24.handlers.get("click")[0]?.();
+	const parentM24x = view24b.queueEl.children.filter((c) => c.hasClass?.("arthur-pi-parent")).find(
+		(c) => (c.attributes.get("data-pi-key") ?? "") === "pi:dev-m/sess-m");
+	assert(findByClass(parentM24x, "arthur-pi-child").length === 3, "expanded parent shows the current-run rows");
+	assert(findByClass(parentM24x, "arthur-pi-archives-toggle")[0]?.textContent.includes("Archives") === true,
+		"expanded parent offers the collapsible Archives separator");
+	findByClass(parentM24x, "arthur-pi-archives-toggle")[0].handlers.get("click")[0]?.();
+	const parentM24y = view24b.queueEl.children.filter((c) => c.hasClass?.("arthur-pi-parent")).find(
+		(c) => (c.attributes.get("data-pi-key") ?? "") === "pi:dev-m/sess-m");
+	assert(findByClass(parentM24y, "arthur-pi-child").length === 6, "opening the parent's Archives reveals all 6 run rows");
+	parentM24y.handlers.get("click")[0]?.();
+	view24b.piArchivesOpen.delete("pi:dev-m/sess-m");
+
+	// (C) debug pane: accumulation, dedupe, cap, breadcrumbs, copy, clear
+	const pane24 = view24b.debugPane;
+	assert(!!pane24 && typeof pane24.append === "function", "the view owns the debug pane");
+	const jobsLineCount24 = () =>
+		pane24.allLines.filter((l) => l.includes("ai-toolkit /api/jobs")).length;
+	assert(jobsLineCount24() >= 1, "collector failures logged: ai-toolkit /api/jobs line present");
+	assert(/^\[\d{2}:\d{2}:\d{2}\] /.test(pane24.allLines[0]) === true, `every line is timestamped '[HH:MM:SS] …' (got ${pane24.allLines[0]})`);
+	assert(pane24.allLines.some((l) => l.includes("http://10.0.0.9:8675/api/jobs")),
+		"transport-level request errors are logged with the attempted URL");
+	// deduped: same failure text is NOT re-logged on every tick
+	const before24 = jobsLineCount24();
+	await view24b.refreshData();
+	await view24b.refreshData();
+	assert(jobsLineCount24() === before24, "a repeated identical failure is deduped (one line, not per tick)");
+	// cap: 200-line ring buffer, oldest evicted
+	pane24.clear();
+	for (let i = 0; i < 205; i++) pane24.append(`cap-test line ${i}`);
+	assert(pane24.allLines.length === 200, `the ring buffer caps at 200 lines (got ${pane24.allLines.length})`);
+	assert(pane24.allLines[0].includes("cap-test line 5") && pane24.allLines[199].includes("cap-test line 204"),
+		"the OLDEST lines are evicted past the cap");
+	// poller debug breadcrumbs mirror into the pane when the toggle is ON
+	pane24.clear();
+	plugin.settings.debugLogging = true;
+	plugin.clients.detailPoller.debugLogging = true;
+	const realDebug24 = console.debug;
+	console.debug = () => {};
+	plugin.clients.detailPoller.pollNow();
+	{
+		const deadline = Date.now() + 5000;
+		while (plugin.clients.detailPoller.hasInFlight && Date.now() < deadline) await sleep(50);
+	}
+	await sleep(50);
+	console.debug = realDebug24;
+	plugin.settings.debugLogging = false;
+	plugin.clients.detailPoller.debugLogging = false;
+	assert(pane24.allLines.some((l) => l.includes("arthur poll dashboard-detail")),
+		"the poller's debug breadcrumbs mirror into the pane (toggle ON)");
+	// Copy → clipboard + toast; Clear → empty
+	const copyCapture24 = { text: null };
+	Object.defineProperty(globalThis, "navigator", {
+		value: { clipboard: { writeText: async (t) => { copyCapture24.text = t; } } },
+		configurable: true,
+	});
+	StubNotice.reset();
+	let copyBtn24 = null;
+	for (const h of findByClass(view24b.contentEl, "arthur-subhead")) {
+		if (h.getAttribute("data-subsection") === "debug") copyBtn24 = findByClass(h, "arthur-debug-copy")[0];
+	}
+	assert(!!copyBtn24, "the rendered Debug head exposes the Copy button");
+	copyBtn24.handlers.get("click")[0]?.();
+	await sleep(30);
+	assert(copyCapture24.text === pane24.allLines.join("\n"),
+		"Copy puts the exact buffer text on the clipboard");
+	assert(StubNotice.shown.some((m) => m.includes("debug log copied to the clipboard")) === true,
+		"Copy toasts success");
+	let clearBtn24 = null;
+	for (const h of findByClass(view24b.contentEl, "arthur-subhead")) {
+		if (h.getAttribute("data-subsection") === "debug") clearBtn24 = findByClass(h, "arthur-debug-clear")[0];
+	}
+	assert(!!clearBtn24, "the rendered Debug head exposes the Clear button");
+	clearBtn24.handlers.get("click")[0]?.();
+	assert(pane24.allLines.length === 0, "Clear empties the buffer");
+	// reset the pane, clipboard shim + settings for cleanliness
+	Object.defineProperty(globalThis, "navigator", { value: {}, configurable: true });
+	pane24.clear();
+	plugin.settings.debugCollapsed = true;
+	await plugin.saveSettings();
+
+	httpResponder = null;
+	StubNotice.reset();
+	await app.workspace.detachLeavesOfType("arthur-dashboard");
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();
@@ -3272,4 +3519,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.0-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.0-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane all clean");

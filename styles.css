@@ -409,6 +409,128 @@
 	color: var(--text-normal);
 }
 
+/* v0.12.0 — visually SUBORDINATE collapsible sub-heads inside the Instances
+   section ('General', 'GPUs') and the standalone 'Debug' pane head at the
+   bottom of the dashboard: the same centered head/chevron pattern, but
+   smaller + indented vs the main section head. */
+.arthur-subhead {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 0.4em;
+	align-self: center;
+	margin-inline-start: 1.4em;
+	padding: 0 0.7em;
+	border-radius: var(--radius-s);
+	cursor: pointer;
+	user-select: none;
+}
+
+.arthur-subhead:hover,
+.arthur-subhead:focus-visible {
+	background: var(--background-secondary);
+	outline: none;
+}
+
+.arthur-subhead-title {
+	font-weight: var(--font-medium);
+	font-size: var(--font-ui-small);
+	letter-spacing: 0.05em;
+	color: var(--text-muted);
+	transition: color 0.15s ease;
+}
+
+.arthur-subhead:hover .arthur-subhead-title {
+	color: var(--text-normal);
+}
+
+.arthur-subhead-chevron {
+	transform-origin: 50% 22%;
+	scale: 0.8;
+}
+
+.arthur-subhead--collapsed .arthur-subhead-chevron {
+	transform: rotate(-90deg);
+}
+
+.arthur-subhead--collapsed .arthur-subhead-title {
+	color: var(--text-faint);
+}
+
+.arthur-subhead--collapsed:hover .arthur-subhead-title {
+	color: var(--text-normal);
+}
+
+/* 'General' / 'GPUs' sub-container bodies (collapse hides the whole body) */
+.arthur-subbody {
+	display: flex;
+	flex-direction: column;
+	gap: 0.6em;
+}
+
+/* expanded panel 'Current run' label (grouped subagent lists) */
+.arthur-pi-sublabel {
+	font-weight: var(--font-medium);
+	color: var(--text-muted);
+}
+
+/* collapsible 'Archives' separator below the current run (collapsed default) */
+.arthur-pi-archives-toggle {
+	display: flex;
+	align-items: center;
+	gap: 0.4em;
+	padding: 0.1em 0.3em;
+	border-radius: var(--radius-s);
+	font-weight: var(--font-medium);
+	font-size: var(--font-ui-small);
+	color: var(--text-muted);
+	cursor: pointer;
+	user-select: none;
+}
+
+.arthur-pi-archives-toggle:hover {
+	background: var(--background-secondary);
+	color: var(--text-normal);
+}
+
+.arthur-pi-archives-chev {
+	width: 1em;
+}
+
+.arthur-pi-archives-toggle--open .arthur-pi-archives-chev {
+	color: var(--text-normal);
+}
+
+/* v0.12.0 — the 'Debug' log pane: copyable, monospace, read-only, scrollable */
+.arthur-debug-section {
+	margin-top: 0.2em;
+}
+
+.arthur-debug-count {
+	flex-shrink: 0;
+}
+
+.arthur-debug-log {
+	max-height: 240px;
+	overflow-y: auto;
+	overflow-x: hidden;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background: var(--background-primary);
+	padding: 0.4em 0.6em;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+	white-space: pre-wrap;
+	word-break: break-all;
+	user-select: text;
+	cursor: text;
+}
+
+.arthur-debug-line {
+	white-space: pre-wrap;
+	word-break: break-all;
+}
+
 /* unmanaged-row fallback heading (agent unreachable) */
 .arthur-inst-group {
 	display: flex;

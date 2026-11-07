@@ -9,19 +9,23 @@
  *                    dead services + last error + attempted host:port; hidden
  *                    entirely while everything answers (also carries the
  *                    'not configured' / token / version-mismatch states).
- *   0c. SECTION TITLES — SERVICES and JOB QUEUE each open with a centered,
- *                    click-to-toggle collapse header ('Services', 'Queue')
- *                    with a rotating chevron; collapsed state persists per
- *                    section in the plugin settings (instancesCollapsed /
- *                    queueCollapsed). The error banner sits ABOVE both
- *                    collapsibles and never collapses. (v0.11: the standalone
- *                    'Pi' panel merged into the Services section, first
- *                    position — pi content above the GPU grid within the
- *                    same collapsible; its separate piCollapsed is gone.)
- *   1. SERVICES    — the merged section (v0.11: pi + GPU grid in ONE
- *                    collapsible): FIRST the pi observational block (device
- *                    headers + session rows, see pi-panel.ts — no actions,
- *                    read-only Peek), THEN the GPU instance grid: one COLUMN
+ *   0c. SECTION TITLES — the INSTANCES and JOB QUEUE sections each open with
+ *                    a centered, click-to-toggle collapse header ('Instances',
+ *                    'Queue') with a rotating chevron; collapsed state
+ *                    persists per section in the plugin settings
+ *                    (instancesCollapsed / queueCollapsed). The error banner
+ *                    sits ABOVE both collapsibles and never collapses.
+ *                    (v0.11 merged the standalone 'Pi' panel into this
+ *                    section, first position; v0.12 renamed it 'Instances'
+ *                    and split its content into TWO SUBORDINATE collapsible
+ *                    sub-containers, see below.)
+ *   1. INSTANCES   — 'Instances' (v0.12 rename + restructure of the merged
+ *                    section): TWO subordinate collapsible sub-containers —
+ *                    'General' (FIRST: the cross-device pi observational
+ *                    block, device headers + session rows, see pi-panel.ts —
+ *                    no actions, read-only Peek; non-GPU services live here
+ *                    now and future ones later) and 'GPUs' (below): the GPU
+ *                    instance grid: one COLUMN
  *                    per GPU (live stats from GET /api/gpus, agent v0.5.4)
  *                    and a ROW-PACKED row set (instances whose GPU sets
  *                    don't overlap share a visual row via the packer;
@@ -83,6 +87,16 @@
  *                    the agent's discovered instances (settings list is the
  *                    fallback only).
  *
+ *   3. DEBUG       — the 'Debug' sub-container at the very bottom of the
+ *                    dashboard (v0.12.0): a copyable, monospace, read-only,
+ *                    scrollable log of recent events (collector failures with
+ *                    the attempted host:port, transport request errors, WS
+ *                    connect failures/backoff, mutation failures with the
+ *                    server message, agent-version/pi-pipe warnings) — a
+ *                    200-line ring buffer, reset on view reopen, never
+ *                    persisted; the poller's debug breadcrumbs mirror into
+ *                    it whenever the settings 'debug logging' toggle is ON.
+ *
  * The DOM skeleton (service bar, error banner, grid, per-port queue groups)
  * is built once in onOpen; poll ticks and WS events only update text,
  * classes, attributes and bar widths, and re-append the cached queue nodes
@@ -129,7 +143,7 @@ import type { ComfyUIClient, QueueResponse, SystemStats } from "../api/comfy";
 import { parseComfyBinaryFrame } from "../comfy-frame";
 import { WsConnection, WsState } from "../connection";
 import { renderLossChart } from "./loss-chart";
-import { PiPanel, piRenderableSession, piSessionLabel, piStateIcon } from "./pi-panel"; // piStateIcon for queue child rows
+import { PiPanel, piGroupedSubList, piRenderableSession, piSessionLabel, piSubBadgeText, piSubGroups } from "./pi-panel"; // grouping + row helpers shared with the queue parents
 import type { AgentPiDevice, AgentPiSession, AgentPiStatus, AgentPiSubagent } from "../api/agent";
 import {
 	el,
@@ -141,6 +155,7 @@ import {
 	truncate,
 } from "../util";
 import { ArthurApiError, isTimeoutError } from "../api/transport";
+import { DebugLogPane, setDebugSink } from "../debug-log";
 import { ServiceBar } from "./service-bar";
 import type { GpuMenuData, GpuOccupant, PiDeviceEntry, PiMenuData } from "./service-bar";
 import { piDeviceRoot, PiPickerModal, piMenuSessionLabel } from "./pi-picker";
@@ -453,27 +468,6 @@ function jobBadgeCls(status: AiToolkitJobStatus): string {
 	return "arthur-badge--idle";
 }
 
-/**
- * One child row of a pi parent queue card — a subagent run of the parent
- * session: state icon (running → spinner-green, done → check, failed → red
- * cross, canceled → grey dash), agent name, task preview, live duration
- * (running: now − startedAt; finished: finishedAt − startedAt).
- */
-function piChildRow(sub: AgentPiSubagent): HTMLElement {
-	const startMs = sub.startedAt ? Date.parse(sub.startedAt) || 0 : 0;
-	const endMs = (sub.finishedAt ? Date.parse(sub.finishedAt) || 0 : 0)
-		|| (sub.state === "running" && startMs > 0 ? Date.now() : 0);
-	const dur = startMs > 0 && endMs > startMs ? fmtDuration((endMs - startMs) / 1000) : null;
-	const row = el("div", { cls: `arthur-pi-child arthur-pi-child--${sub.state}` });
-	row.append(
-		piStateIcon(sub.state),
-		el("span", { cls: "arthur-pi-child-agent", text: truncate(sub.agent, 24) }),
-		el("span", { cls: "arthur-card-meta arthur-pi-child-task", text: truncate(sub.taskPreview ?? "", 64), attrs: { title: sub.taskPreview ?? "" } }),
-		dur ? el("span", { cls: "arthur-card-meta arthur-pi-duration", text: dur }) : el("span"),
-	);
-	return row;
-}
-
 /** Training step % for progress bars (null → no bar). */
 function jobStepPct(job: AiToolkitJob): number | null {
 	return job.total_steps != null && job.total_steps > 0 && job.step > 0
@@ -529,11 +523,28 @@ export class ArthurDashboardView extends ItemView {
 	/** Error banner — sits outside both collapsibles; always shows when
 	 *  unhealthy (hidden while every service answers). */
 	private bannerEl!: HTMLElement;
-	/** Services section (v0.11: pi + GPU grid merged): centered collapsible
-	 *  title head + body holding the pi block FIRST, then the grid, its notes
-	 *  and the unmanaged-row fallback. */
+	/** Services section (v0.12: renamed 'Instances'): centered collapsible
+	 *  title head + body holding TWO subordinate collapsible sub-containers:
+	 *  'General' (the cross-device pi sessions list) FIRST, then 'GPUs' (the
+	 *  grid, its notes and the unmanaged-row fallback). Both sub-collapse
+	 *  states persist independently (generalCollapsed / gpusCollapsed). */
 	private gridHeadEl!: HTMLElement;
 	private gridBodyEl!: HTMLElement;
+	/** 'General' sub-container (the pi sessions list; more non-GPU services
+	 *  live here later). */
+	private generalHeadEl!: HTMLElement;
+	private generalBodyEl!: HTMLElement;
+	/** 'GPUs' sub-container (the GPU grid; per-GPU-column toggles unchanged). */
+	private gpusHeadEl!: HTMLElement;
+	private gpusBodyEl!: HTMLElement;
+	/** 'Debug' log pane (bottom of the dashboard): host element + pane model.
+	 *  The pane owns a 200-line ring buffer, reset on every view open, never
+	 *  persisted; the collapsed state persists (settings.debugCollapsed). */
+	private debugHostEl!: HTMLElement;
+	private readonly debugPane = new DebugLogPane({ toast: (message) => toastOk(message) });
+	/** Per-key last debug-event text — one line per distinct failure, no
+	 *  per-tick duplicates (poller debug breadcrumbs are exempt: they tick). */
+	private readonly debugEventLast = new Map<string, string>();
 	/** Job queue section: centered collapsible title head + body. */
 	private queueHeadEl!: HTMLElement;
 	private queueBodyEl!: HTMLElement;
@@ -549,7 +560,7 @@ export class ArthurDashboardView extends ItemView {
 	 *  errored (ai-toolkit collectors, unreachable comfy ports, or the
 	 *  watchdog's stuck-collector states) — never a fake empty state. */
 	private aiStateEl!: HTMLElement;
-	/** Pi block (observational service; rendered FIRST inside the Services
+	/** Pi block (observational service; rendered FIRST inside the 'General'
 	 *  section body, above the GPU grid — NO own head/collapse since the v0.11
 	 *  merge, NO lifecycle actions). */
 	private piPanel!: PiPanel;
@@ -629,6 +640,9 @@ export class ArthurDashboardView extends ItemView {
 	/** Expanded pi QUEUE parent cards (child rows visible), keyed
 	 *  `pi:<device>/<sessionId>` — survives the per-tick queue rebuild. */
 	private readonly piExpanded = new Set<string>();
+	/** Expanded 'Archives' groups of pi parent cards (same keys) — in-memory,
+	 *  collapsed by default. */
+	private readonly piArchivesOpen = new Set<string>();
 	/** Rows queued for an expand ANIMATION on the next grid render (a re-render
 	 *  from a poll must paint panels already-open, never re-run the animation). */
 	private readonly expandAnimationPending = new Set<string>();
@@ -742,7 +756,13 @@ export class ArthurDashboardView extends ItemView {
 		this.spawnPendings.clear();
 		this.pluginStarts.clear();
 		this.piExpanded.clear();
+		this.piArchivesOpen.clear();
+		this.debugEventLast.clear();
+		this.debugPane.clear(); // the log lives ONLY while the view is open
 		this.buildSkeleton(this.desiredPorts());
+		// Debug events (collector/transport/WS/mutation failures) flow here
+		// until the view closes; the buffer resets on the next open.
+		setDebugSink((line) => this.debugPane.append(line));
 		this.openWss();
 		this.plugin.dashboardView = this;
 		// Belt-and-braces: if teardown ever skips onClose, sockets and caches
@@ -768,6 +788,7 @@ export class ArthurDashboardView extends ItemView {
 
 	async onClose(): Promise<void> {
 		this.isOpened = false;
+		setDebugSink(null); // events while the view is closed are dropped
 		if (this.watchTimer !== null) {
 			window.clearInterval(this.watchTimer);
 			this.watchTimer = null;
@@ -782,6 +803,9 @@ export class ArthurDashboardView extends ItemView {
 		this.spawnPendings.clear();
 		this.pluginStarts.clear();
 		this.piExpanded.clear();
+		this.piArchivesOpen.clear();
+		this.debugEventLast.clear();
+		this.debugPane.detach();
 		if (this.plugin.dashboardView === this) this.plugin.dashboardView = null;
 		this.contentEl.empty();
 	}
@@ -866,6 +890,26 @@ export class ArthurDashboardView extends ItemView {
 		return isTimeoutError(err) ? "timeout" : "err";
 	}
 
+	/**
+	 * One deduplicated debug-pane event: `key` identifies the subject (e.g.
+	 * `comfy:8188`, `agent`, `ws:8188`); the line is appended when it FIRST
+	 * appears or its text changes — not again on every poll tick — until the
+	 * problem resolves (`debugEventOk` below clears the key so a relapse logs
+	 * again). Poller debug breadcrumbs are exempt (they are per-tick by
+	 * design, only when the settings toggle is ON).
+	 */
+	private debugEvent(key: string, text: string): void {
+		if (!text) return;
+		if (this.debugEventLast.get(key) === text) return;
+		this.debugEventLast.set(key, text);
+		this.debugPane.append(text);
+	}
+
+	/** The named subject answered again — allow its next failure to log. */
+	private debugEventOk(key: string): void {
+		this.debugEventLast.delete(key);
+	}
+
 	/** Detail poller entry point — fetch everything, then paint. */
 	async refreshData(): Promise<void> {
 		const clients = this.plugin.clients;
@@ -940,6 +984,16 @@ export class ArthurDashboardView extends ItemView {
 		// Health/status settled — with data (ok) or a captured error; both are
 		// renderable states, so the agent section can never sit "loading" here.
 		this.watchSettle("agent");
+		// Debug-pane event (one line per distinct failure — see debugEvent).
+		const hostPortOf = (port: number) => (profile.host ? `${profile.host}:${port}` : "(not configured)");
+		if (this.agentDetail.error) {
+			this.debugEvent(
+				`agent@${profile.agentPort}`,
+				`agent ${hostPortOf(profile.agentPort)} — ${this.agentDetail.error}`,
+			);
+		} else {
+			this.debugEventOk(`agent@${profile.agentPort}`);
+		}
 		// Optimistic spawn pendings: resolve against the fresh status (or time
 		// out into the error row) BEFORE the grid renders.
 		this.tickSpawnPendings();
@@ -954,9 +1008,14 @@ export class ArthurDashboardView extends ItemView {
 			const piRes = await tryCall(() => clients.agent.piStatus());
 			if (piRes.value !== null) {
 				this.piDetail = { status: piRes.value, error: null };
+				this.debugEventOk(`pi@${profile.agentPort}`);
 			} else {
 				piFetchError = piRes.error;
 				this.piDetail = { status: null, error: describeError(piRes.error) };
+				this.debugEvent(
+					`pi@${profile.agentPort}`,
+					`pi collector ${hostPortOf(profile.agentPort)} — ${describeError(piRes.error)}`,
+				);
 			}
 		}
 
@@ -986,9 +1045,14 @@ export class ArthurDashboardView extends ItemView {
 					list,
 					error: list.length === 0 ? (gRes.value.error ?? "no gpus reported") : null,
 				};
+				this.debugEventOk(`gpus@${profile.agentPort}`);
 			} else {
 				gpuFetchError = gRes.error;
 				this.gpuDetail = { list: [], error: describeError(gRes.error) };
+				this.debugEvent(
+					`gpus@${profile.agentPort}`,
+					`gpu stats collector ${hostPortOf(profile.agentPort)} — ${describeError(gRes.error)}`,
+				);
 			}
 		}
 
@@ -1023,10 +1087,15 @@ export class ArthurDashboardView extends ItemView {
 					const stats = await client.systemStats();
 					const queue = await client.queue();
 					this.watchSettle(`gen:${port}`);
+					this.debugEventOk(`comfy:${port}`);
 					return { online: true, stats, queue, error: null };
 				} catch (err) {
 					comfyErrors.set(port, err);
 					this.watchSettle(`gen:${port}`);
+					this.debugEvent(
+						`comfy:${port}`,
+						`ComfyUI ${hostPortOf(port)} — ${describeError(err)}`,
+					);
 					return {
 						online: false,
 						stats: null,
@@ -1064,6 +1133,22 @@ export class ArthurDashboardView extends ItemView {
 		};
 		// Jobs/queues settled — data or error, always a renderable state.
 		this.watchSettle("training");
+		if (this.aiDetail.jobsError) {
+			this.debugEvent(
+				"aitk-jobs",
+				`ai-toolkit /api/jobs ${hostPortOf(profile.aiToolkitPort)} — ${this.aiDetail.jobsError}`,
+			);
+		} else {
+			this.debugEventOk("aitk-jobs");
+		}
+		if (this.aiDetail.queueError) {
+			this.debugEvent(
+				"aitk-queues",
+				`ai-toolkit /api/queue ${hostPortOf(profile.aiToolkitPort)} — ${this.aiDetail.queueError}`,
+			);
+		} else {
+			this.debugEventOk("aitk-queues");
+		}
 
 		this.lastTick = Date.now();
 		this.trainingStuck = false;
@@ -1160,39 +1245,49 @@ export class ArthurDashboardView extends ItemView {
 		this.bannerEl = root.createEl("div", { cls: "arthur-banner" });
 		this.bannerEl.hide();
 
-		// PI BLOCK — v0.11 merge: the observational pi service moved INSIDE the
-		// Services section below (FIRST position, above the GPU grid; pi is not
-		// hardware-bound). No own collapse head anymore — the Services head owns
-		// the collapse; NO lifecycle actions — read-only + peek.
+		// PI BLOCK — v0.12: the observational pi service lives INSIDE the 'General'
+		// sub-container of the Instances section (below), FIRST position. No own
+		// head of its own beyond the subhead — NO lifecycle actions; read-only
+		// + peek. Non-GPU services (and future ones) live in 'General'.
 
-		// 1. SERVICES — collapsible section (the v0.11 merge: pi + GPU grid in
-		// ONE collapsible): a centered click-to-toggle title line ('Services' +
-		// chevron) above the body (pi block + grid + notes + unmanaged-row
-		// fallback). Collapse persists in the settings (instancesCollapsed).
+		// 1. INSTANCES — collapsible section (v0.12: renamed 'Services' →
+		// 'Instances'): a centered click-to-toggle title line ('Instances' +
+		// chevron) above TWO subordinate collapsible sub-containers:
+		//   'General' (FIRST) — the cross-device pi sessions list (non-GPU);
+		//   'GPUs' (below) — the GPU grid + its notes + unmanaged fallback,
+		// with the per-GPU-column collapse toggles unchanged. Both sub-collapses
+		// persist independently (settings.generalCollapsed / gpusCollapsed).
 		const gridSection = root.createEl("div", { cls: "arthur-section" });
 		this.gridHeadEl = this.buildSectionHead("instances");
 		gridSection.append(this.gridHeadEl);
 		this.gridBodyEl = gridSection.createEl("div", { cls: "arthur-section-body" });
 		this.gridHeadEl.setAttribute("aria-controls", "arthur-section-instances");
 		this.gridBodyEl.setAttribute("id", "arthur-section-instances");
-		// FIRST position inside Services: the pi observational block (device
-		// headers + session rows; no own head — the section head owns collapse).
-		this.piPanel = new PiPanel(this.gridBodyEl, {
+
+		// 'General' sub-container FIRST (visually subordinate to the main head).
+		this.generalHeadEl = this.buildSubHead("general");
+		this.gridBodyEl.append(this.generalHeadEl);
+		this.generalBodyEl = this.gridBodyEl.createEl("div", { cls: "arthur-subbody" });
+		this.piPanel = new PiPanel(this.generalBodyEl, {
 			fetchTail: (device, sessionId) => {
 				const agent = this.plugin.clients?.agent;
 				if (!agent) return Promise.reject(new Error("agent unavailable"));
 				return agent.piSessionTail(device, sessionId, 10);
 			},
 		});
-		// THEN the GPU grid within the same section.
-		this.gridEl = this.gridBodyEl.createEl("div", { cls: "arthur-grid" });
+
+		// 'GPUs' sub-container below (column headers + collapse chips unchanged).
+		this.gpusHeadEl = this.buildSubHead("gpus");
+		this.gridBodyEl.append(this.gpusHeadEl);
+		this.gpusBodyEl = this.gridBodyEl.createEl("div", { cls: "arthur-subbody" });
+		this.gridEl = this.gpusBodyEl.createEl("div", { cls: "arthur-grid" });
 		this.gridEl.append(el("p", { cls: "arthur-note", text: "loading…" }));
-		this.gridNoteEl = this.gridBodyEl.createEl("p", {
+		this.gridNoteEl = this.gpusBodyEl.createEl("p", {
 			cls: "arthur-note",
 			text: "",
 		});
 		this.gridNoteEl.hide();
-		this.unmanagedEl = this.gridBodyEl.createEl("div", { cls: "arthur-cards" });
+		this.unmanagedEl = this.gpusBodyEl.createEl("div", { cls: "arthur-cards" });
 		this.unmanagedEl.hide();
 
 		// 2. JOB QUEUE — collapsible section ('Queue' + chevron) wrapping the
@@ -1215,19 +1310,44 @@ export class ArthurDashboardView extends ItemView {
 		this.aiStateEl = this.queueEl.createEl("div", { cls: "arthur-aiqueue-state" });
 		this.aiStateEl.hide();
 
+		// 3. DEBUG — the copyable event log pane (v0.12.0), bottom of the
+		// dashboard as its own collapsible 'Debug' subhead container. Default
+		// collapsed; the state persists (settings.debugCollapsed). Producers:
+		// collector failures, transport errors, WS backoff, mutation failures,
+		// version/pipe warnings + the poller's debug breadcrumbs.
+		this.debugHostEl = root.createEl("div", { cls: "arthur-section arthur-debug-section" });
+
 		// Port list the groups+WS are now built for.
 		this.activePorts = ports;
 		this.skeletonBuilt = true;
 		// Body elements now exist — paint each section's persisted collapse state.
 		this.syncSectionCollapse("instances");
 		this.syncSectionCollapse("queue");
+		this.syncSubCollapse("general");
+		this.syncSubCollapse("gpus");
+		this.renderDebug();
 	}
 
-	/**
-	 * One collapsible section head: a centered title line ('Services' or
-	 * 'Queue') with a rotating chevron. Clicking (or Enter/Space while
-	 * focused) toggles that section's body; the state persists per section
-	 * in the plugin settings. Returns the head element.
+	/** (Re)render the collapsible 'Debug' log pane into its dashboard host. */
+	private renderDebug(): void {
+		if (!this.debugHostEl) return;
+		this.debugPane.render(this.debugHostEl, {
+			collapsed: this.plugin.settings.debugCollapsed === true,
+			onToggle: () => this.toggleDebug(),
+		});
+	}
+
+	/** Flip + persist the Debug pane collapse, repaint. */
+	private toggleDebug(): void {
+		this.plugin.settings.debugCollapsed = this.plugin.settings.debugCollapsed !== true;
+		void this.plugin.saveSettings();
+		this.renderDebug();
+	}
+
+	/** One collapsible section head: a centered title line ('Instances' or
+	 *  'Queue') with a rotating chevron. Clicking (or Enter/Space while
+	 *  focused) toggles that section's body; the state persists per section
+	 *  in the plugin settings. Returns the head element.
 	 */
 	private buildSectionHead(section: "instances" | "queue"): HTMLElement {
 		const head = el("div", {
@@ -1237,13 +1357,13 @@ export class ArthurDashboardView extends ItemView {
 				role: "button",
 				tabindex: "0",
 				"aria-expanded": "true",
-				title: `Toggle the ${section === "instances" ? "services (pi + instance grid)" : "job queue"} section`,
+				title: `Toggle the ${section === "instances" ? "instances (General + GPUs)" : "job queue"} section`,
 			},
 		});
 		head.append(
 			el("span", {
 				cls: "arthur-section-title",
-				text: section === "instances" ? "Services" : "Queue",
+				text: section === "instances" ? "Instances" : "Queue",
 			}),
 			el("span", { cls: "arthur-section-chevron", attrs: { "aria-hidden": "true" } }),
 		);
@@ -1255,6 +1375,65 @@ export class ArthurDashboardView extends ItemView {
 			}
 		});
 		return head;
+	}
+
+	/**
+	 * One VISUALLY SUBORDINATE collapsible sub-head inside the Instances
+	 * section: the same centered head/chevron pattern as the main section
+	 * heads but smaller (and indented slightly) — 'General' (the cross-device
+	 * pi sessions) and 'GPUs' (the GPU grid). Collapse persists independently
+	 * per sub-container (settings.generalCollapsed / gpusCollapsed).
+	 */
+	private buildSubHead(section: "general" | "gpus"): HTMLElement {
+		const head = el("div", {
+			cls: "arthur-subhead",
+			attrs: {
+				"data-subsection": section,
+				role: "button",
+				tabindex: "0",
+				"aria-expanded": "true",
+				title: `Toggle the ${section === "general" ? "General (cross-device sessions)" : "GPUs (instance grid)"} sub-container`,
+			},
+		});
+		head.append(
+			el("span", { cls: "arthur-subhead-title", text: section === "general" ? "General" : "GPUs" }),
+			el("span", { cls: "arthur-section-chevron arthur-subhead-chevron", attrs: { "aria-hidden": "true" } }),
+		);
+		head.addEventListener("click", () => this.toggleSubSection(section));
+		head.addEventListener("keydown", (e: KeyboardEvent) => {
+			if (e.key === "Enter" || e.key === " ") {
+				e.preventDefault();
+				this.toggleSubSection(section);
+			}
+		});
+		return head;
+	}
+
+	/** Toggle + persist one sub-container's collapse, repaint. */
+	private toggleSubSection(section: "general" | "gpus"): void {
+		const s = this.plugin.settings;
+		if (section === "general") s.generalCollapsed = !s.generalCollapsed;
+		else s.gpusCollapsed = !s.gpusCollapsed;
+		void this.plugin.saveSettings();
+		this.syncSubCollapse(section);
+	}
+
+	/** Paint one sub-container's collapse state (body hidden + collapsed head). */
+	private syncSubCollapse(section: "general" | "gpus"): void {
+		const collapsed = section === "general"
+			? this.plugin.settings.generalCollapsed === true
+			: this.plugin.settings.gpusCollapsed === true;
+		const body = section === "general" ? this.generalBodyEl : this.gpusBodyEl;
+		const head = section === "general" ? this.generalHeadEl : this.gpusHeadEl;
+		if (!body || !head) return;
+		if (collapsed) {
+			body.hide();
+			head.addClass("arthur-subhead--collapsed");
+		} else {
+			body.show();
+			head.removeClass("arthur-subhead--collapsed");
+		}
+		head.setAttribute("aria-expanded", String(!collapsed));
 	}
 
 	/** Click-to-toggle one section: flip the persisted setting, save, repaint. */
@@ -1391,7 +1570,11 @@ export class ArthurDashboardView extends ItemView {
 		} else if (ad.statusOk === false) {
 			errors.push("agent token rejected — check Agent token in settings");
 		} else if (ad.status && ad.status.version !== AGENT_VERSION) {
-			errors.push(`agent version mismatch: server ${ad.status.version}, expected ${AGENT_VERSION} — update server/`);
+			const line = `agent version mismatch: server ${ad.status.version}, expected ${AGENT_VERSION} — update server/`;
+			errors.push(line);
+			this.debugEvent("version", line);
+		} else {
+			this.debugEventOk("version");
 		}
 		// Watchdog: the training collector wedged between data and error.
 		if (this.trainingStuck) {
@@ -1585,9 +1768,19 @@ export class ArthurDashboardView extends ItemView {
 	}
 
 	/** Sync the pi block from the last pi snapshot (observational, no actions;
-	 *  rendered FIRST inside the Services body, above the grid). */
+	 *  rendered FIRST inside the 'General' sub-body, above the grid). */
 	private renderPi(): void {
 		const status = this.piDetail.status;
+		// Debug-pane pipe warning: the agent answers but reports no pi-sync
+		// devices (status pipe not set up) — copyable instead of tooltip-only.
+		if (this.agentDetail.statusOk === true && (!status || (status.devices ?? []).length === 0)) {
+			this.debugEvent(
+				"pipe",
+				`pi status pipe absent — pi-sync status pipe not set up (${this.piDetail.error ?? "devices: []"})`,
+			);
+		} else {
+			this.debugEventOk("pipe");
+		}
 		if (status) this.piPanel.prune(status.devices ?? []);
 		this.piPanel.render({
 			status,
@@ -2645,6 +2838,7 @@ export class ArthurDashboardView extends ItemView {
 			}
 			for (const key of [...this.piExpanded]) {
 				if (!liveKeys.has(key)) this.piExpanded.delete(key);
+				this.piArchivesOpen.delete(key);
 			}
 		}
 
@@ -2762,10 +2956,13 @@ export class ArthurDashboardView extends ItemView {
 
 	/**
 	 * One active pi session as a parent job card in the unified queue: 'pi ·
-	 * <name>' with a device prefix, subagent child count badge, aggregate
-	 * subagent state counts ('N running · M done'), live duration, chevron
-	 * + collapsed child rows (state icon · agent · taskPreview · duration).
-	 * Click toggles the child expansion (state survives the per-tick rebuild).
+	 * <name>' with a device prefix, GROUPED subagent counts badge
+	 * ('N running · M archived', v0.12.0), aggregate subagent state counts
+	 * ('N running · M done'), live duration, chevron + collapsed child rows.
+	 * Expanded children follow the same grouped structure as the session rows:
+	 * the current run (top) + a collapsible 'Archives' separator (collapsed
+	 * by default). Click toggles the expansion (state survives the per-tick
+	 * rebuild).
 	 */
 	private piParentNodes(
 		dev: AgentPiDevice,
@@ -2775,6 +2972,8 @@ export class ArthurDashboardView extends ItemView {
 	): HTMLElement[] {
 		const key = `pi:${dev.device}/${sess.id}`;
 		const expanded = this.piExpanded.has(key);
+		const groups = piSubGroups(subs);
+		const badge = piSubBadgeText(groups);
 		const running = subs.filter((s) => s.state === "running").length;
 		const done = subs.filter((s) => s.state === "done").length;
 		const failed = subs.filter((s) => s.state === "failed").length;
@@ -2797,10 +2996,10 @@ export class ArthurDashboardView extends ItemView {
 			el("span", { cls: "arthur-queue-label arthur-pi-parent-label", text: `pi · ${piSessionLabel(sess)}` }),
 			el("span", { cls: "arthur-card-meta arthur-pi-device", text: ((dev.hostname ?? "").trim() || dev.device) }),
 		);
-		if (subs.length > 0) {
+		if (subs.length > 0 && badge) {
 			head.append(el("span", {
 				cls: "arthur-badge arthur-badge--idle arthur-pi-count",
-				text: String(subs.length),
+				text: badge,
 				attrs: { title: `${subs.length} subagent run${subs.length === 1 ? "" : "s"}` },
 			}));
 		}
@@ -2812,13 +3011,17 @@ export class ArthurDashboardView extends ItemView {
 		}
 		card.append(head);
 		if (expanded) {
-			const kids = el("div", { cls: "arthur-pi-children" });
-			if (subs.length === 0) {
-				kids.append(el("span", { cls: "arthur-card-meta arthur-pi-note", text: "no subagent runs" }));
-			} else {
-				for (const sub of subs) kids.append(piChildRow(sub));
-			}
-			card.append(kids);
+			// Same grouped structure as the session rows (v0.12.0): current run
+			// first, collapsible Archives below; the Archives expansion is the
+			// view-local toggle below.
+			card.append(piGroupedSubList(groups, Date.now(), "arthur-pi-child", {
+				archiveOpen: this.piArchivesOpen.has(key),
+				onToggleArchive: () => {
+					if (this.piArchivesOpen.has(key)) this.piArchivesOpen.delete(key);
+					else this.piArchivesOpen.add(key);
+					this.renderQueue();
+				},
+			}));
 		}
 		card.addEventListener("click", () => {
 			if (this.piExpanded.has(key)) this.piExpanded.delete(key);
@@ -3607,6 +3810,17 @@ export class ArthurDashboardView extends ItemView {
 
 	private wsStateChanged(port: number, state: WsState): void {
 		if (!this.isOpened) return;
+		// Debug pane: log WS connect failures + backoff settling (deduped per
+		// port until the socket opens again).
+		if (state === WsState.Backoff) {
+			const host = this.plugin.clients?.profile.host ?? "";
+			this.debugEvent(
+				`ws:${port}`,
+				`comfy ws ${host ? `${host}:${port}` : "(no host)"} — connect failed (reconnecting with backoff)`,
+			);
+		} else if (state === WsState.Open) {
+			this.debugEventOk(`ws:${port}`);
+		}
 		// WS state chip lives on the instance grid card (updated in place, no
 		// grid rebuild); with no cached chip the next grid repaint shows it.
 		const widgets = this.gridRows.get(`run:${port}`);

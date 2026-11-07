@@ -9,6 +9,7 @@
  */
 import { WsState } from "./connection"; // eslint-disable-line -- type adjacency only
 import { isTimeoutError } from "./api/transport";
+import { debugLine } from "./debug-log";
 
 interface Collector {
 	name: string;
@@ -87,9 +88,11 @@ export class Poller {
 				// previous run unsettled — skip. With request timeouts this only
 				// happens for the few seconds a long chain legitimately takes.
 				if (this.debugLogging) {
-					console.debug(
-						`arthur poll ${collector.name} skipped (in flight) ${collector.describe?.() ?? ""}`.trimEnd(),
-					);
+					const line = `arthur poll ${collector.name} skipped (in flight) ${collector.describe?.() ?? ""}`.trimEnd();
+					console.debug(line);
+					// Debug pane breadcrumb (v0.12.0): the settings toggle is ON —
+					// mirror the developer-console line into the dashboard pane.
+					debugLine(line);
 				}
 				continue;
 			}
@@ -112,9 +115,10 @@ export class Poller {
 		} finally {
 			collector.inFlight--;
 			if (this.debugLogging) {
-				console.debug(
-					`arthur poll ${collector.name} ${outcome} ${Date.now() - started}ms ${collector.describe?.() ?? ""}`.trimEnd(),
-				);
+				const line = `arthur poll ${collector.name} ${outcome} ${Date.now() - started}ms ${collector.describe?.() ?? ""}`.trimEnd();
+				// Debug pane breadcrumb: console + the dashboard pane (v0.12.0).
+				console.debug(line);
+				debugLine(line);
 			}
 		}
 	}
