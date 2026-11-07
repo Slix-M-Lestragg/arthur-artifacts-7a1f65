@@ -1,7 +1,7 @@
 # Arthur + AHP / obsidian-pi integration — research and delivery plan
 
 - **Date**: 2026-11-07
-- **Status**: **Phase 0 preserved + Phase 1 slice 1 implemented, mock-tested, and sandbox-validated; Phase 2 PLUGIN side implemented and mock-tested** (roles gate + opt-in controls + exact mutation wire, gate green) — **backend roles work lives on a separate remote broker branch (81 tests passing, NOT deployed)**; **live Phase 2 interactive sandbox EXECUTED (linux-obsidian-73323, see Status snapshot / E15) with one BLOCKER found & FIXED (`createSession` `provider:'pi'`) and the focused live retest of the fixed wrapper PASS (`linux-obsidian-74310`, E17 — UI-created HOSTED pi session, `AHP_PHASE2_CREATE_OK`, pause/resume/dispose, 0 plugin errors, cleanup verified)**; **INLINE dispose confirmation hardening implemented + mock-tested (native `window.confirm` removed, E18) — its final focused live sandbox was ABORTED by the harness and cleaned, so the hardened dispose UI stays mock-tested / NOT live-revalidated**; question_user answering remains mock-only; production role deployment still PENDING; Phases 3–5 still [PROPOSED]
+- **Status**: **Phase 0 preserved + Phase 1 slice 1 implemented, mock-tested, and sandbox-validated; Phase 2 PLUGIN side implemented and mock-tested** (roles gate + opt-in controls + exact mutation wire, gate green) — **backend roles work lives on a separate remote broker branch (81 tests passing, since superseded: the roles + command gate landed at broker `b6e26148`, 82 tests, DEPLOYED — see §10c; production restart still PENDING)**; **live Phase 2 interactive sandbox EXECUTED (linux-obsidian-73323, see Status snapshot / E15) with one BLOCKER found & FIXED (`createSession` `provider:'pi'`) and the focused live retest of the fixed wrapper PASS (`linux-obsidian-74310`, E17 — UI-created HOSTED pi session, `AHP_PHASE2_CREATE_OK`, pause/resume/dispose, 0 plugin errors, cleanup verified)**; **INLINE dispose confirmation hardening implemented + mock-tested (native `window.confirm` removed, E18) — its final focused live sandbox was ABORTED by the harness and cleaned, so the hardened dispose UI stays mock-tested / NOT live-revalidated**; question_user answering remains mock-only; production role deployment still PENDING; Phases 3–5 still [PROPOSED]
 - **Scope**: planning record + delivery evidence for Phase 0 and Phase 1 slice 1. No canonical `docs/PLAN.md`, manifest, or ROADMAP/TESTING changes.
 
 ### Status snapshot (2026-11-07)
@@ -686,6 +686,50 @@ sandbox-validated in the final focused revalidation (E13, `linux-obsidian-70047`
 
 ---
 
+---
+
+## 11. Role deployment — preparation record (2026-11-07)
+
+Facts recorded from the deployment-prep session (this section is a docs-only
+record; no plugin/version/release artifacts change with it). Supersedes the
+"NOT deployed / NOT merged" wording in the Status snapshot and Phase 2 where
+it concerns the backend components:
+
+- **pi-ahp-client — deployed at `a8e5e8212`, 71 tests green.** Deployed
+  (artifact) hashes recorded; client is in place ahead of the role rollout.
+- **swarm — deployed at `a0c3625`, 9 tests green.** Deployment hygiene: the
+  backups were moved OUTSIDE the extensions directory (extensions paths are
+  sync/backup surfaces — the same rationale as §7's "move source out of the
+  vault" note).
+- **arthur — `dev` at `5b2b05a`** ("fix: clear AHP detail when catalogue
+  empties" — the stale-detail fix). Plugin side of the Phase 2 surface as
+  delivered in §Status snapshot / E14–E18.
+- **broker (pi-ahp-server) — landed at `b6e26148`, 82 tests green**, carrying
+  the Phase 2 roles authorization (`viewer` / `controller` / `hostAgent`,
+  server-side `-32008` gate on mutations, §2/§Phase 2 env contract) together
+  with the **command gate**. DEPLOYED to the broker install; supersedes the
+  earlier roles-branch "81 tests, not deployed" state.
+- **Credential staging/audit — GO.** The role-credential staging and audit
+  pass approved (values never recorded here, per the §6/§Phase-2 rules).
+- **Residual recovery caveat — ulysse pi-ahp-client rsync incident**: an
+  rsync incident on ulysse overwrote the stale worktree `dev` edits of the
+  pi-ahp-client checkout; `.git` was restored, so the worktree is
+  reconstructible from known hashes only — the uncommitted stale edits are
+  NOT recoverable. Recorded as the residual caveat for any later diffing
+  against that worktree's pre-incident state.
+- **Production restart — PENDING.** The broker is deployed at `b6e26148` but
+  the running service has not been restarted onto it yet (the Phase 0 "do not
+  restart as part of research" RULE stands; the restart is the explicit
+  production step at rollout). Until that restart, live `initialize` answers
+  still come from the pre-roles build — the plugin's controls stay
+  fail-closed-off in consequence.
+
+Next actions carried from §9 unchanged; the pending production restart is the
+gate for exercising the roles/command-gate surface live (incl. the hardened
+INLINE dispose revalidation still open from the Status snapshot).
+
+---
+
 ## Appendix: evidence
 
 | # | Fact | Where verified |
@@ -707,6 +751,7 @@ sandbox-validated in the final focused revalidation (E13, `linux-obsidian-70047`
 | E15 | **Phase 2 live interactive sandbox PASS-with-blocker (2026-11-07)**: disposable agent-os Linux-Obsidian instance `linux-obsidian-73323` (**deleted after; everyday vault untouched; cleanup paths + broker :4500 state untouched**) against the live roles-broker: viewer token mutations rejected with the broker's forbidden `-32008`; controller token surfaced the control affordances and exercised pause/resume, ONE prompt (`AHP_PHASE2_OK` in the hosted session transcript), retry, a second chat, and dispose — all off server envelopes; **0 plugin-caused console errors**. Residue recorded: `createSession` sent no `provider` → the broker created an empty RELAY (blocker, since fixed & mock-tested, E16); question_user answering stayed mock-only; the focused live retest of the fixed wrapper is pending | agent-os Linux-Obsidian instance + live roles broker (delivery record) |
 | E16 | **Blocker fix + cosmetic pass (2026-11-07)**: `src/api/ahp.ts` `createSession` now sends exactly `{channel, provider: 'pi', workingDirectory}` (hosted backend; the omitted provider defaults to `pi-ahp-server` = empty relay, verified in the broker's `handleCreateSession`); smoke suite 28d asserts the exact payload keys, `provider === 'pi'`, and the created card's `kind: 'hosted'` from the mock model's relay-vs-hosted split (provider-missing now projects `kind 'relay'`), so the pre-fix build fails the regression. Cosmetic: tofu-prone glyphs (＋/⏸/▸/↺/●/✓/✕/❓/⚠ in the AHP surface incl. the settings warning) → plain readable text; chat detail meta no longer renders raw `status 1` — it derives from live activeTurn/pending-question fields, then the VERIFIED broker status bitmask (`getSessionStatusLabel`, verbatim). | arthur `dev` working tree (mock; no private host) |
 | E17 | **Focused provider:'pi' live retest PASS (2026-11-07, `linux-obsidian-74310`)**: disposable agent-os Linux-Obsidian instance against the live roles broker with the FIXED create wrapper (**deleted after; everyday vault untouched; broker :4500 state + cleanup paths untouched**) — a session created through the plugin's new-session control with `provider:'pi'` materialized as a REAL HOSTED interactive pi session (`AHP_PHASE2_CREATE_OK` in its transcript), pause/resume and dispose exercised live, **0 plugin-caused console errors**, cleanup verified. Residue surfaced: the native `window.confirm` dispose dialog wedged a stale selected detail after the server-side deletion (fixed as E18) | agent-os Linux-Obsidian instance + live roles broker (delivery record) |
+| E19 | **Role deployment preparation record (2026-11-07, §11)**: pi-ahp-client `a8e5e8212` deployed (71 tests green, hashes recorded); swarm `a0c3625` deployed (9 tests green, backups moved OUTSIDE extensions); arthur `dev` `5b2b05a` (stale-detail fix); broker `b6e26148` deployed (82 tests green, roles + command gate); credential staging/audit GO; **production restart PENDING**; ulysse pi-ahp-client rsync incident — `.git` restored, stale worktree `dev` edits overwritten (known hashes only) | deployment-prep delivery record, recorded in §11 |
 | E18 | **INLINE dispose confirmation hardening (2026-11-07, mock-tested; the final focused live sandbox was ABORTED by the harness and cleaned — NOT live-revalidated)**: native `window.confirm` removed from the dispose flow — `src/ui/ahp-view.ts` now arms an INLINE plain-DOM confirm strip in the selected detail (warning naming the session + `confirm dispose`/`cancel`; busy-disabled while pending; one single `disposeSession` request); `src/api/ahp.ts` `root/sessionRemoved` now ALSO releases a matching selected detail (late reply / stale-detail wedge defense; only the removed session is cleared — never a NEW selection); successful response clears the arm + releases the detail immediately + reloads the catalogue authoritatively; errors restore a safe state. Smoke suite 28d rewritten to the inline flow ((ac)) + new regressions ((ac2) late-reply/new-selection race, `root/sessionRemoved` detail release); gate green — **989 asserted checks**; uncommitted `dev` working tree (no commit/version/deps) | arthur `dev` working tree |
 
 *End of plan.*
