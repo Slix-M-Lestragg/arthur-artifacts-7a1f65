@@ -95,7 +95,7 @@ pi-sync feed of v0.7.0:
                  long-lived `pi --mode rpc` with stdin held open), 201 +
                  audit log, 502 on spawn failure
 
-(v0.8.2, Bearer-gated) pi AHP terminal spawning — launch `pi-ahp-tty` (the
+(v0.8.3, Bearer-gated) pi AHP terminal spawning — launch `pi-ahp-tty` (the
 AHP terminal-registering pi supervisor) detached on a target device so the
 Obsidian plugin can offer "New pi session → live terminal":
 
@@ -108,6 +108,12 @@ Obsidian plugin can offer "New pi session → live terminal":
                  log. 422 {error: "pi-ahp-tty not available on <device>"}
                  when the tool is missing on the device (nothing spawned),
                  502 on launch failure, 503 offline, 400 bad device/cwd.
+                 The 201 detail also carries `sessionId` — the
+                 `ahp-session:/<id>` URI the supervisor resumed/minted,
+                 extracted by polling the launch log for up to ~10 s
+                 (self: local read; remote: ssh tail/grep); null when the
+                 session-URI line does not appear in the window (the
+                 terminal registers async — the 201 still stands).
                  A GET listing was SKIPPED (not trivial — see README).
 """
 
@@ -127,7 +133,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-AGENT_VERSION = "0.8.2"
+AGENT_VERSION = "0.8.3"
 
 CONFIG_PATH = os.environ.get("ARTHUR_AGENT_CONFIG", "/etc/arthur-agent/config.json")
 TOKEN_PATH = os.environ.get("ARTHUR_AGENT_TOKEN_FILE", "/etc/arthur-agent/token")
@@ -1349,6 +1355,15 @@ PI_RPC_SHELL = "tail -f /dev/null | pi --mode rpc"  # long-lived RPC fallback
 PI_AHP_TTY_REL = ".pi/agent/extensions/pi-ahp-client/dist/bin/pi-ahp-tty.js"
 PI_AHP_LOG_REL = ".pi/agent/extensions/pi-ahp-client/logs"
 PI_AHP_TTY_TIMEOUT = 20    # spawn/availability ssh subprocess timeout (s)
+# v0.8.3: poll the per-launch log for the session-URI line the supervisor
+# prints once it has created/resumed its AHP session, so the plugin can
+# poll the EXACT session resource instead of a cwd-prefix heuristic. The
+# resume path prints `[pi-ahp-tty] session <ahp-session:/id> already
+# exists, reusing`; a fresh create currently prints nothing (the extractor
+# accepts any `[pi-ahp-tty] session <ahp-session:/id> …` line).
+PI_AHP_SESSION_WAIT = 10   # session-URI log poll window (s)
+PI_AHP_SESSION_LOG_RE = re.compile(
+    r"\[pi-ahp-tty\]\s+session\s+(ahp-session:/\S+)")
 
 
 def pi_repo():
@@ -1925,6 +1940,58 @@ def _pi_ahp_tty_spawn_remote(spec, cwd, stamp):
     return {"log": "~/" + logfile_rel, "pid": pid}, None
 
 
+def _pi_ahp_extract_session(spec, detail):
+    """(sessionId|None) — best-effort extraction of the `ahp-session:/<id>`
+    URI the supervisor resumed/minted, by polling the per-launch log for up
+    to PI_AHP_SESSION_WAIT seconds for the session-URI line the CLI prints
+    once createSession returns (resume: `… already exists, reusing`; a fresh
+    create currently prints nothing). self: read the local log head in a
+    loop; remote: one ssh call running a bounded remote wait loop (head/grep)
+    over the remote log. Returns the full URI or None when the line does not
+    appear in the window — terminal registration is async, so the 201 still
+    stands and the plugin falls back to its cwd-prefix heuristic."""
+    timeout = PI_AHP_SESSION_WAIT
+    if spec["self"]:
+        logfile = detail.get("log")
+        if not logfile:
+            return None
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                with open(logfile, "rb") as f:
+                    head = f.read(262144)
+                m = PI_AHP_SESSION_LOG_RE.search(
+                    head.decode("utf-8", "replace"))
+                if m:
+                    return m.group(1)
+            except OSError:
+                pass
+            time.sleep(0.25)
+        return None
+    # remote: bounded wait loop over ssh (head/grep the remote log). detail.log
+    # is `~/`-relative on remote; strip the prefix for $HOME-relative use.
+    target = spec["ssh"]
+    logfile_rel = detail.get("log") or ""
+    if logfile_rel.startswith("~/"):
+        logfile_rel = logfile_rel[2:]
+    if not logfile_rel:
+        return None
+    cmd = (
+        "end=$(( $(date +%%s) + %d )); "
+        "while [ $(date +%%s) -lt $end ]; do "
+        "  m=$(head -c 262144 \"$HOME/%s\" 2>/dev/null | "
+        "      grep -aoE '\\[pi-ahp-tty\\] session ahp-session:/[^[:space:]]+' | "
+        "      head -n1); "
+        "  if [ -n \"$m\" ]; then printf '%%s\\n' \"$m\"; exit 0; fi; "
+        "  sleep 0.25; "
+        "done; exit 0" % (timeout, logfile_rel)
+    )
+    rc, out, _err = run_cmd(["ssh"] + SSH_BATCH_OPTS + [target, cmd],
+                            timeout=timeout + SSH_TIMEOUT)
+    m = PI_AHP_SESSION_LOG_RE.search(out.strip())
+    return m.group(1) if m else None
+
+
 def pi_spawn_terminal_session(dev_id, spec, cwd, ip):
     """(code, body) for POST /api/pi/terminal-sessions — launch pi-ahp-tty
     (the AHP terminal-registering pi supervisor) detached on one device with
@@ -1964,6 +2031,11 @@ def pi_spawn_terminal_session(dev_id, spec, cwd, ip):
         audit("pi", dev_id, "terminal-spawn",
               "failed:%s" % err[:120].replace(":", ";"), ip)
         return 502, {"error": "launch failed on %s: %s" % (dev_id, err[:200])}
+    # v0.8.3: extract the resumed/minted AHP session URI from the launch log
+    # so the plugin can poll the exact session resource. Best-effort: null
+    # when the session-URI line does not appear in the window (terminal
+    # registration is async — the 201 still stands).
+    detail["sessionId"] = _pi_ahp_extract_session(spec, detail)
     audit("pi", dev_id, "terminal-spawn",
           "spawned:pi-ahp-tty:%s" % (detail.get("pid") or stamp), ip)
     return 201, {"device": dev_id, "cwd": cwd, "spawned": "pi-ahp-tty",

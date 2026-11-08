@@ -2,9 +2,10 @@
 
 `server/` holds the pieces that run on the arthur home server (the machine
 hosting ComfyUI + ai-toolkit), not the Obsidian plugin itself. The agent is
-at **v0.8.2** (GPU-aware spawning + pi session aggregation + the pi device
+at **v0.8.3** (GPU-aware spawning + pi session aggregation + the pi device
 registry / SSH dir listing / session spawn endpoints + unmanaged-instance
-visibility + pi-ahp-tty AHP terminal launch):
+visibility + pi-ahp-tty AHP terminal launch with resumed/minted
+session-id reporting):
 
 ```json
 {"known": {"comfyui": {"0": null, "2": [1], "3": [0, 1]}}}
@@ -146,7 +147,7 @@ sudo install -m 644 comfy@.service comfy-dual.service arthur-agent.service \
 sudo systemctl daemon-reload
 sudo systemctl enable comfy-dual.service   # enabled but NOT started
 sudo systemctl restart arthur-agent
-curl -s http://127.0.0.1:8766/health   # → {"ok": true, "version": "0.8.2"}
+curl -s http://127.0.0.1:8766/health   # → {"ok": true, "version": "0.8.3"}
 ```
 
 Token lives in `/etc/arthur-agent/token` (root 0600) and `/etc/arthur-agent/env`
@@ -246,11 +247,30 @@ first. Every launch — and every refusal — lands in the audit log
 {"device": "Arthur", "cwd": "/tmp",
  "spawned": "pi-ahp-tty",
  "detail": {"log": "/home/slix/.pi/agent/extensions/pi-ahp-client/logs/pi-ahp-tty-20261108T201500Z.log",
-             "pid": 123456}}
+             "pid": 123456,
+             "sessionId": "ahp-session:/2026-11-02__slix__01a19e9bbc2f"}}
 ```
 
 (`detail.log` is the absolute log path on `self` devices, `~/...`-relative on
 remote; `detail.pid` is the supervisor's PID when captured, else `null`.)
+
+`detail.sessionId` (v0.8.3) is the `ahp-session:/<id>` URI the supervisor
+resumed (default resume semantics) or minted (`--fresh`), extracted by
+polling the launch log for up to ~10 s for the session-URI line the CLI
+prints once `createSession` returns — the resume variant reads
+`[pi-ahp-tty] session ahp-session:/<id> already exists, reusing`; a fresh
+create currently prints nothing. `self` devices read the local log head in
+a loop; remote devices extract it over the same BatchMode ssh mapping used
+to spawn (a bounded `head`/`grep` wait loop on the remote log). It is
+`null` when the line does not appear in the window — terminal registration
+is async, so the 201 still stands and the plugin falls back to its
+cwd-prefix heuristic. This lets the plugin poll the **exact** AHP session
+resource instead of guessing by cwd prefix (pi-ahp-tty resumes the existing
+pi session for a cwd, so the terminal channel registers on the OLD session
+resource a cwd-prefix poll for a NEW session can never match).
+
+Contract pinned for the plugin: `detail: {"log": string, "pid": number|null,
+"sessionId": string|null}`.
 
 Failures use the existing error shapes:
 - **400** `unknown device 'x'` (device not in `pi_devices`) / bad `cwd`
@@ -511,12 +531,14 @@ child `pi` PTY. Every launch/refusal is audited (`service: "pi"`, action
 {"device": "Arthur", "cwd": "/tmp",
  "spawned": "pi-ahp-tty",
  "detail": {"log": "/home/slix/.pi/agent/extensions/pi-ahp-client/logs/pi-ahp-tty-20261108T201500Z.log",
-             "pid": 123456}}
+             "pid": 123456,
+             "sessionId": "ahp-session:/2026-11-02__slix__01a19e9bbc2f"}}
 ```
 
 Failures: **400** unknown device / bad or missing `cwd`; **422** tool
 missing on device; **502** launch failed (error preview); **503** device
-offline. A `GET /api/pi/terminal-sessions` listing was **skipped** (not
+offline. `detail.sessionId` is documented in the v0.8.2 section above
+(v0.8.3 add). A `GET /api/pi/terminal-sessions` listing was **skipped** (not
 trivial — see the v0.8.2 section above).
 
 Live GPU stats straight from `nvidia-smi --query-gpu=...` (5 s subprocess
@@ -778,3 +800,13 @@ same: `comfy-0`, `comfy-1`, `aitoolkit`).
   the HTTP call and agent restarts; it runs as the config-declared local
   `user` on `self` devices and over BatchMode ssh on remote ones. No new
   deps; the audit log gains `terminal-spawn` entries.
+- **pi-ahp-tty session-id reporting (v0.8.3).** The 201 `detail` now also
+  carries `sessionId` — the `ahp-session:/<id>` URI the supervisor
+  resumed/minted — extracted by polling the launch log for up to ~10 s
+  (self: local read; remote: ssh `head`/`grep` wait loop). This lets the
+  plugin poll the exact AHP session resource instead of a cwd-prefix
+  heuristic (pi-ahp-tty resumes the existing pi session for a cwd, so the
+  terminal channel registers on the OLD session resource). `null` when the
+  session-URI line does not appear in the window; the 201 still stands
+  (registration is async). No new request-influenced subprocess arguments;
+  the extractor only reads the per-launch log it already wrote.
