@@ -523,9 +523,15 @@ export class AhpClient {
 		let attempt: Promise<void>;
 		attempt = this.attemptSocket(true);
 		attempt.catch(() => undefined);
-		this.currentAttempt = attempt.finally(() => {
-			if (this.currentAttempt === attempt) this.currentAttempt = null;
+		// Capture the cleanup promise so the .finally nulling actually compares
+		// against what `currentAttempt` was set to (the cleanup promise, not the
+		// raw `attempt`) — otherwise a rejected attempt is never cleared and the
+		// next `ensureConnected`/`load()` returns the stale rejection forever
+		// (a never-opened broker then poisons every later picker open).
+		const cleanup = attempt.finally(() => {
+			if (this.currentAttempt === cleanup) this.currentAttempt = null;
 		});
+		this.currentAttempt = cleanup;
 		this.currentAttempt.catch(() => undefined);
 		return attempt;
 	}
@@ -1638,9 +1644,12 @@ export class AhpClient {
 			let retry: Promise<void>;
 			retry = this.attemptSocket(false);
 			retry.catch(() => undefined);
-			this.currentAttempt = retry.finally(() => {
-				if (this.currentAttempt === retry) this.currentAttempt = null;
+			// Same cleanup-capture as ensureConnected: compare against the cleanup
+			// promise so a settled backoff attempt actually clears currentAttempt.
+			const cleanup = retry.finally(() => {
+				if (this.currentAttempt === cleanup) this.currentAttempt = null;
 			});
+			this.currentAttempt = cleanup;
 			this.currentAttempt.catch(() => undefined);
 		}, delay);
 	}

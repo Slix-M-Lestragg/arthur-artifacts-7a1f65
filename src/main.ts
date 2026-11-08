@@ -965,7 +965,16 @@ export default class ArthurPlugin extends Plugin {
 		if (!manager) throw new Error("terminal manager unavailable (plugin unloading)");
 		const client = await manager.acquireClient();
 		if (client.currentState !== "ready") throw new Error(client.error ?? "AHP not connected");
-		await client.refresh();
+		// The shared client's `load()` already paged the catalogue; this refresh
+		// only re-pages `listSessions` to surface a just-spawned session. A
+		// slow/timed-out page (REQUEST_TIMEOUT_MS = 10s) must NOT fail the whole
+		// modal while the connection is `ready` — fall back to the existing
+		// catalogue so the picker still renders its rows.
+		try {
+			await client.refresh();
+		} catch {
+			// a stale/slow page is non-fatal: the ready catalogue still stands
+		}
 		return client.catalogue();
 	}
 

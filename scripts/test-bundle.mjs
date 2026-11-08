@@ -6567,6 +6567,103 @@ try {
 	ws28.dupePages = false;
 	})();
 
+	// ---- 32. terminal picker resilience — retry a failed client load and
+	//      fall back to the catalogue when a redundant refresh() fails -----
+	console.log("== 32. terminal picker resilience (retry failed client load / refresh-failure fallback) ==");
+	await (async () => {
+		// Fresh plugin lifecycle (section 31 unloaded nothing) — a clean
+		// terminalManager with NO shared client, then a mock-broker posture.
+		await plugin.onunload();
+		await plugin.onload();
+		ws28.roles = ["viewer", "controller"];
+		ws28.replayActions = [];
+		ws28.reconnectResult = null;
+		ws28.emptyCatalogue = false;
+		ws28.failListPage = 0;
+		ws28.holdListPage = 0;
+		ws28.dupePages = false;
+		ws28.ttySpawn = false;
+		ws28.ttyA = true;
+		ws28.createdSessions.length = 0;
+		ws28.createdCwds.length = 0;
+		ws28.createdProviders.length = 0;
+		ws28.pausedMap = {};
+		ws28.listCalls.length = 0;
+		plugin.settings.ahpEndpoint = "100.75.249.5:4500";
+		plugin.settings.ahpToken = "smoke-token";
+		plugin.settings.ahpEnableTerminal = true;
+		StubModal.reset();
+
+		const t4Cmd32 = plugin.commands.get("open-pi-terminal");
+		const RealAhpBroker = MockAhpBroker;
+
+		// (a) A client whose FIRST load fails (broker unreachable) recovers on
+		//     the next acquireClient() once reachable — WITHOUT a settings
+		//     change or plugin unload. The cached error state must be retried,
+		//     not poisoned forever (the AhpClient has no backoff on a never-
+		//     opened socket, so the memoized failure never re-attempts unaided).
+		class UnreachableAhpBroker {
+			constructor(url) {
+				this.url = String(url);
+				this.readyState = 3; // never opens — simulates a dead/unreachable broker
+				this.onopen = null; this.onmessage = null; this.onclose = null; this.onerror = null;
+				queueMicrotask(() => this.onclose?.({})); // opened=false → state 'error'
+			}
+			send() {}
+			close() {}
+		}
+		globalThis.WebSocket = UnreachableAhpBroker;
+		t4Cmd32?.callback?.();            // picker #1 → first load fails (broker unreachable)
+		await sleep(120);
+		const pick32a = StubModal.opened[StubModal.opened.length - 1];
+		const client32 = plugin.terminalManager?.sharedClient;
+		assert(!!client32 && client32.currentState === "error",
+			"(a) the first picker open with an unreachable broker leaves the shared client in state 'error'");
+		assert(findByClass(pick32a.contentEl, "arthur-terminal-row").length === 0,
+			"(a) the failed-load picker renders NO session rows");
+		assert(allText(pick32a.contentEl).includes("session listing failed"),
+			"(a) the failed-load picker shows the listing-failed note (not a blank modal)");
+
+		// Restore a reachable broker and open the picker AGAIN — no settings
+		// change, no unload. The SAME client instance re-runs load() + connects.
+		globalThis.WebSocket = RealAhpBroker;
+		t4Cmd32?.callback?.();            // picker #2 → acquireClient retries the error client
+		await sleep(250);
+		const pick32a2 = StubModal.opened[StubModal.opened.length - 1];
+		assert(plugin.terminalManager?.sharedClient === client32,
+			"(a) recovery reuses the SAME shared client instance (no settings change / unload)");
+		assert(plugin.terminalManager?.sharedClient?.currentState === "ready",
+			"(a) the retried client connected → state 'ready' once the broker is reachable");
+		const rows32a = findByClass(pick32a2.contentEl, "arthur-terminal-row");
+		assert(rows32a.length === 3, `(a) the recovered picker renders the 3 catalogued session rows (got ${rows32a.length})`);
+		pick32a.close();
+		pick32a2.close();
+
+		// (b) A refresh() failure AFTER a ready load() falls back to the EXIST-
+		//     ING catalogue — one slow/timed-out listSessions page must NOT
+		//     fail the modal while the connection stays ready. failListPage=1
+		//     makes the re-page reject instantly (the same throw path a 10s
+		//     REQUEST_TIMEOUT_MS takes), exercising the try/catch fallback.
+		ws28.failListPage = 1;
+		t4Cmd32?.callback?.();            // picker #3 → loadTerminalSessions refresh() rejects
+		await sleep(250);
+		const pick32b = StubModal.opened[StubModal.opened.length - 1];
+		assert(plugin.terminalManager?.sharedClient?.currentState === "ready",
+			"(b) the connection stays 'ready' after the refresh failure (no error state)");
+		const rows32b = findByClass(pick32b.contentEl, "arthur-terminal-row");
+		assert(rows32b.length === 3, `(b) the picker falls back to the existing catalogue and renders 3 rows (got ${rows32b.length})`);
+		assert(allText(pick32b.contentEl).includes("session listing failed") === false,
+			"(b) no listing-failed note — the load promise resolved with the fallback catalogue");
+		assert(!!rows32b.find((r) => r.getAttribute("data-terminal-session") === "ahp-session:/a"),
+			"(b) the fallback catalogue row for session A is present and selectable");
+		pick32b.close();
+		ws28.failListPage = 0;
+
+		// reset for any later section
+		plugin.settings.ahpEnableTerminal = false;
+		ws28.ttyA = false;
+	})();
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();
@@ -6585,4 +6682,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / ahp-phaseT1-mock-terminal-adapter-wire+self-echo+detach-watermark+reconnect-cursor+controller+setting-gating / pi-terminal-view-register+lazy-xterm-construct+attach-wire+input-relay+close-dispose+channel-cleanup / pi-terminal-manager-multi-instance+shared-ws+3-leaves+routing+no-leakage+partial+full-teardown / pi-terminal-picker-catalogue-filter+pathA-disabled+stable-id-dedup+select-wiring+spawn-state-machine all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / ahp-phaseT1-mock-terminal-adapter-wire+self-echo+detach-watermark+reconnect-cursor+controller+setting-gating / pi-terminal-view-register+lazy-xterm-construct+attach-wire+input-relay+close-dispose+channel-cleanup / pi-terminal-manager-multi-instance+shared-ws+3-leaves+routing+no-leakage+partial+full-teardown / pi-terminal-picker-catalogue-filter+pathA-disabled+stable-id-dedup+select-wiring+spawn-state-machine / pi-terminal-picker-resilience-retry-failed-load+refresh-failure-catalogue-fallback all clean");

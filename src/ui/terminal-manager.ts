@@ -66,7 +66,26 @@ export class TerminalManager {
 	 * inside the client and surfaces as `error`, never a thrown attach.
 	 */
 	async acquireClient(): Promise<AhpClient> {
-		if (this.clientPromise) return this.clientPromise;
+		// Re-attempt after a config-class failure: a memoized client whose
+		// first `load()` never opened (state `error`/`closed`/`idle`) is retried
+		// on the next acquire — the broker may have been momentarily unreachable
+		// and the AhpClient has no backoff on a never-opened socket (L601), so
+		// without this the cached failure poisons every later picker open. The
+		// socket stays cached while healthy (`ready`); a ready/connecting/
+		// reconnecting acquire piggybacks on the in-flight promise (no duplicate
+		// attempt). Never rejects — a failed retry surfaces as `error` state.
+		if (this.client && this.clientPromise) {
+			const st = this.client.currentState;
+			if (st === "ready" || st === "connecting" || st === "reconnecting") {
+				return this.clientPromise;
+			}
+			this.clientPromise = this.client
+				.load()
+				.catch(() => undefined)
+				.then(() => this.client as AhpClient);
+			this.emitState();
+			return this.clientPromise;
+		}
 		const client = new AhpClient(this.plugin.settings.ahpEndpoint, this.plugin.settings.ahpToken, {
 			onStateChanged: () => this.emitState(),
 		});
