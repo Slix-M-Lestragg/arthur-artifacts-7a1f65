@@ -12,10 +12,10 @@ import { obsidianRequester } from "./api/transport";
 import { Poller } from "./poller";
 import { DETAIL_INTERVAL_MS } from "./util";
 import { ArthurDashboardView, VIEW_TYPE_ARTHUR_DASHBOARD } from "./ui/dashboard-view";
-import { AhpView, VIEW_TYPE_AHP } from "./ui/ahp-view";
+import { AhpView, VIEW_TYPE_AHP, controlSurface } from "./ui/ahp-view";
 import { TerminalView, VIEW_TYPE_PI_TERMINAL } from "./ui/terminal-view";
 import { TerminalManager } from "./ui/terminal-manager";
-import { TerminalPickerModal } from "./ui/terminal-picker";
+import { TerminalPickerModal, NEW_SESSION_DISABLED_TOOLTIP } from "./ui/terminal-picker";
 import type { AhpSessionSummary } from "./api/ahp";
 import { StatusBarPill, StatusBarState } from "./ui/status-bar";
 import { fmtBytes, fmtGigCompact, normalizeHost } from "./util";
@@ -947,6 +947,11 @@ export default class ArthurPlugin extends Plugin {
 	openTerminalPicker(): void {
 		const modal = new TerminalPickerModal(this.app, {
 			loadSessions: () => this.loadTerminalSessions(),
+			watchSessions: (onUpdate) => this.watchTerminalSessions(onUpdate),
+			newSession: {
+				gate: () => this.newSessionGate(),
+				create: (cwd) => this.createTerminalSession(cwd),
+			},
 			onPick: (sessionId, title) => {
 				void this.activatePiTerminal({ sessionId, title });
 			},
@@ -955,27 +960,58 @@ export default class ArthurPlugin extends Plugin {
 	}
 
 	/**
-	 * The picker's backing load: acquire the TerminalManager's LAZY shared
-	 * client (created + connected on first use — first terminal attach OR
-	 * first picker open) and re-page `listSessions` so a just-spawned session
-	 * shows up. Rejects with a displayable error while the broker is not live.
+	 * The picker's backing load — PROGRESSIVE: acquire the TerminalManager's
+	 * LAZY shared client (created + connected on first use) and resolve with
+	 * the catalogue it ALREADY holds, never blocking on the paged re-load.
+	 * The kicked background re-page commits its first page right away and
+	 * streams later pages (and any mid-paging failure) to the open modal via
+	 * `watchTerminalSessions`. A first-page failure is non-fatal (§32(b): the
+	 * existing catalogue still stands); rejects only when the broker is not
+	 * live (displayable modal error).
 	 */
 	async loadTerminalSessions(): Promise<AhpSessionSummary[]> {
 		const manager = this.terminalManager;
 		if (!manager) throw new Error("terminal manager unavailable (plugin unloading)");
 		const client = await manager.acquireClient();
 		if (client.currentState !== "ready") throw new Error(client.error ?? "AHP not connected");
-		// The shared client's `load()` already paged the catalogue; this refresh
-		// only re-pages `listSessions` to surface a just-spawned session. A
-		// slow/timed-out page (REQUEST_TIMEOUT_MS = 10s) must NOT fail the whole
-		// modal while the connection is `ready` — fall back to the existing
-		// catalogue so the picker still renders its rows.
-		try {
-			await client.refresh();
-		} catch {
-			// a stale/slow page is non-fatal: the ready catalogue still stands
-		}
+		// Non-blocking re-page: rows keep rendering from the current catalogue
+		// while page commits + listing errors arrive through the watcher.
+		void client.refresh().catch(() => undefined);
 		return client.catalogue();
+	}
+
+	/** The picker's live-catalogue subscription: rows stream in as background
+	 *  re-page commits land, and a mid-paging listing failure arrives as an
+	 *  error ALONGSIDE the surviving rows (state stays `ready`; the client's
+	 *  error surface carries the text). */
+	watchTerminalSessions(
+		onUpdate: (rows: AhpSessionSummary[], listingError: string | null) => void,
+	): () => void {
+		const manager = this.terminalManager;
+		if (!manager) return () => undefined;
+		return manager.addCatalogueListener((client) => {
+			onUpdate(client.catalogue(), client.error);
+		});
+	}
+
+	/** Gate for the picker's 'New pi session…' action — the SAME control
+	 *  surface ahp-view's create-session row renders behind (the
+	 *  `ahpEnableControl` setting AND the live controller role), plus a live
+	 *  connection: null = available, else the disabled-action tooltip. */
+	private newSessionGate(): string | null {
+		const client = this.terminalManager?.sharedClient ?? null;
+		if (!client || client.currentState !== "ready") return NEW_SESSION_DISABLED_TOOLTIP;
+		return controlSurface(client, this.settings.ahpEnableControl) ? null : NEW_SESSION_DISABLED_TOOLTIP;
+	}
+
+	/** Create a hosted pi session through the shared client — `createSession`
+	 *  mints the ahp-session:/ URI client-side and always asks for provider
+	 *  'pi' (the hosted backend). Any rejection (client-side role gate or
+	 *  broker error) propagates to the picker's inline error line. */
+	private async createTerminalSession(cwd: string): Promise<string> {
+		const client = this.terminalManager?.sharedClient;
+		if (!client) throw new Error("terminal manager unavailable (plugin unloading)");
+		return await client.createSession(cwd);
 	}
 
 	/** For docs/debugging: human summary of the last light tick. */

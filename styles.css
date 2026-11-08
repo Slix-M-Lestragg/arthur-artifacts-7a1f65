@@ -1973,6 +1973,33 @@
 	font-style: normal;
 }
 
+/* 'New pi session…' control row (picker FEATURE 1) — always visible at the
+   top; the cwd prompt unfolds below it while the flow runs. */
+.arthur-terminal-new {
+	display: flex;
+	flex-direction: column;
+	gap: 0.4em;
+	margin-bottom: 0.6em;
+}
+
+.arthur-terminal-new-row {
+	display: flex;
+	gap: 0.4em;
+}
+
+.arthur-terminal-new-cwd {
+	flex: 1;
+	min-width: 0;
+}
+
+/* Created-but-unregistered row: stays highlighted after the terminal poll
+   times out so the user can attach later (picker FEATURE 1). */
+.arthur-terminal-row--new {
+	outline: 1px solid var(--interactive-accent);
+	outline-offset: -1px;
+	background: var(--background-modifier-hover);
+}
+
 /* ---------------------------------------------------------------- v0.12.x
    plugin-UX round: user-disabled ai-toolkit, running-vs-active pi cues,
    device session archives

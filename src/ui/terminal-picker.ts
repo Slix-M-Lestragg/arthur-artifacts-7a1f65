@@ -21,8 +21,26 @@
  *
  * Modal pattern mirrors PiPickerModal (src/ui/pi-picker.ts): the modal owns
  * query/state/render; backing calls arrive through the opts bag —
- * `loadSessions` (main.ts) acquires the manager's shared client and re-pages
- * the catalogue, `onPick` routes the selection back into the manager.
+ * `loadSessions` (main.ts) acquires the manager's shared client and returns
+ * its CURRENT catalogue (never blocking on the paged re-load),
+ * `watchSessions` streams later pages + listing errors into the open modal,
+ * `onPick` routes the selection back into the manager.
+ *
+ * FEATURE 1 ("New pi session…"): an always-visible top action gated by the
+ * SAME control surface ahp-view's create-session row uses (the
+ * `ahpEnableControl` setting AND the live controller role — re-checked on
+ * every paint AND on click, so a disabled render can never leak a create).
+ * The flow reveals a cwd prompt, calls the shared client's `createSession`
+ * (client-minted ahp-session:/ URI, provider 'pi'), then re-catalogues on a
+ * bounded poll until the new summary carries a registered terminal channel —
+ * success attaches via `onPick` and closes; a timeout keeps the picker open
+ * with the new row highlighted and a note (attach later). Rejections render
+ * as one inline error line — never a thrown stack or Notice spam.
+ *
+ * FEATURE 2 (progressive rendering): rows paint as the shared client's paged
+ * catalogue commits (the initial load plus live `watchSessions` ticks); a
+ * listing error renders as an inline note over whatever rows already
+ * rendered — never a blanked list (§32 fallback semantics).
  */
 import { App, Modal } from "obsidian";
 
@@ -35,11 +53,44 @@ import { el, truncate } from "../util";
 export const NO_TERMINAL_TOOLTIP =
 	"no terminal channel — this session has no ahp-terminal:/<id> registration to attach. A tmux (Path A) spawn never registers one; run `pi-ahp-tty --working-dir <cwd>` on the device (Path B) to make it terminal-capable.";
 
+/** Tooltip on the DISABLED 'New pi session…' action while control is off —
+ *  the same gate ahp-view's create-session control renders behind. */
+export const NEW_SESSION_DISABLED_TOOLTIP =
+	"creating a pi session requires the AHP control setting AND a live controller connection to the broker";
+
+/** 'New pi session…' poll pacing: re-catalogue every second, give the host
+ *  device up to 15s to register `ahp-terminal:/<id>` (pi-ahp-tty Path B). */
+const NEW_SESSION_POLL_INTERVAL_MS = 1_000;
+const NEW_SESSION_POLL_TIMEOUT_MS = 15_000;
+
+/** The 'New pi session…' control surface — main.ts wires it to the shared
+ *  AhpClient; absent, the action renders disabled. */
+export interface TerminalPickerNewSession {
+	/** Live gate: null = creation is available right now, else the tooltip
+	 *  rendered on the disabled action. Re-checked on every paint AND click. */
+	gate(): string | null;
+	/** Create a hosted pi session in `cwd` — resolves the client-minted
+	 *  ahp-session:/<id> URI (only ever called after gate() returned null). */
+	create(cwd: string): Promise<string>;
+	/** Poll pacing override (smoke): re-catalogue interval / total budget. */
+	poll?: { intervalMs?: number; timeoutMs?: number };
+}
+
 export interface TerminalPickerOpts {
 	/** Load the catalogue — main.ts acquires the TerminalManager's shared
-	 *  client (connecting it lazily) and re-pages `listSessions` so a just-
-	 *  spawned session shows up. Rejects with an error the modal displays. */
+	 *  client and resolves with the catalogue it ALREADY holds (progressive:
+	 *  never blocks on the paged re-load). Rejects with an error the modal
+	 *  displays. */
 	loadSessions(): Promise<AhpSessionSummary[]>;
+	/** Subscribe to LIVE catalogue updates while the modal is open: rows
+	 *  stream in as background pages commit, plus a listingError (the
+	 *  client's error surface — state stays `ready` on a mid-paging failure).
+	 *  Returns an unsubscribe function (invoked onClose). */
+	watchSessions?(
+		onUpdate: (rows: AhpSessionSummary[], listingError: string | null) => void,
+	): () => void;
+	/** The new-session control (absent → the action renders disabled). */
+	newSession?: TerminalPickerNewSession;
 	/** A selectable (terminal-registered) session was chosen. */
 	onPick(sessionId: string, title: string): void;
 }
@@ -103,6 +154,13 @@ function dedupeByResource(sessions: AhpSessionSummary[]): AhpSessionSummary[] {
 export class TerminalPickerModal extends Modal {
 	/** Rows container (rebuilt on every paint), built in onOpen. */
 	private bodyEl: HTMLElement | null = null;
+	/** Top control row container ('New pi session…' + cwd prompt/state). */
+	private controlEl: HTMLElement | null = null;
+	/** Live catalogue subscription (watchSessions) — dropped onClose. */
+	private unsubWatch: (() => void) | null = null;
+	/** Watcher tick counter — a tick DURING an in-flight load already delivered
+	 *  fresher rows than the load's pre-commit capture (race guard). */
+	private watchTick = 0;
 	private query = "";
 	private loading = true;
 	private loadError: string | null = null;
@@ -110,6 +168,17 @@ export class TerminalPickerModal extends Modal {
 	private rows: AhpSessionSummary[] = [];
 	/** Stale-response guard for the async load chain (pi-picker pattern). */
 	private seq = 0;
+	// 'New pi session…' flow state (FEATURE 1).
+	private createOpen = false;
+	private createBusy: "create" | "wait" | null = null;
+	private createError: string | null = null;
+	private createNote: string | null = null;
+	private cwdDraft = "";
+	/** Resource whose row renders highlighted after a poll timeout. */
+	private newResource: string | null = null;
+	/** Last built control-row state signature (focus-preserving rebuild guard:
+	 *  live catalogue ticks repaint without stealing the cwd input's focus). */
+	private controlSig = "";
 
 	constructor(
 		app: App,
@@ -122,6 +191,9 @@ export class TerminalPickerModal extends Modal {
 		this.titleEl.setText("pi terminal — choose a session");
 		this.contentEl.empty();
 		this.contentEl.addClass("arthur-terminal-picker");
+		// The 'New pi session…' action sits at the TOP — always visible, even
+		// while the listing below is still loading (FEATURE 1).
+		this.controlEl = this.contentEl.createEl("div", { cls: "arthur-terminal-new" });
 		// Fuzzy filter input (top): matches title + workingDirectory.
 		const filter = document.createElement("input");
 		filter.className = "arthur-terminal-filter";
@@ -139,6 +211,18 @@ export class TerminalPickerModal extends Modal {
 		});
 		this.contentEl.append(filter);
 		this.bodyEl = this.contentEl.createEl("div", { cls: "arthur-terminal-picker-body" });
+		// Live catalogue (FEATURE 2): rows stream in as background pages commit
+		// and a mid-paging failure arrives as listingError over the SURVIVING
+		// rows — never a blanked list.
+		this.unsubWatch =
+			this.opts.watchSessions?.((rows, listingError) => {
+				if (!this.bodyEl) return; // closed — orphan the tick
+				this.watchTick++;
+				this.rows = dedupeByResource(rows ?? []);
+				this.loadError = listingError;
+				if (this.rows.length > 0 || listingError !== null) this.loading = false;
+				this.paint();
+			}) ?? null;
 		void this.refresh();
 	}
 
@@ -150,12 +234,17 @@ export class TerminalPickerModal extends Modal {
 		this.loadError = null;
 		this.paint();
 		try {
+			const watchTickAtLoad = this.watchTick;
 			const sessions = await this.opts.loadSessions();
 			if (seq !== this.seq) return;
-			this.rows = dedupeByResource(sessions);
+			// Race guard: a live watcher tick during the load already delivered
+			// fresher rows (page commits beat the load promise's continuation) —
+			// never overwrite them with the pre-commit capture.
+			if (this.watchTick === watchTickAtLoad) this.rows = dedupeByResource(sessions);
 		} catch (err) {
 			if (seq !== this.seq) return;
-			this.rows = [];
+			// §32 fallback: a failed (re)load NEVER blanks rendered rows — the
+			// note renders over whatever the catalogue already showed.
 			this.loadError = err instanceof Error ? err.message : String(err);
 		} finally {
 			if (seq === this.seq) this.loading = false;
@@ -188,27 +277,190 @@ export class TerminalPickerModal extends Modal {
 		this.close();
 	}
 
-	/** Full repaint (small modal — rebuild is cheap and keeps state linear). */
+	/** Full repaint (small modal — rebuild is cheap and keeps state linear).
+	 *  The top control row repaints on every tick too, but only rebuilds its
+	 *  DOM when its visible state changed (sig guard) so a live catalogue
+	 *  tick never steals focus from the cwd input mid-typing. */
 	private paint(): void {
 		if (!this.bodyEl) return; // onOpen not finished yet (early refresh tick)
+		this.paintControl();
 		this.bodyEl.empty();
 		const list = this.bodyEl.createEl("div", { cls: "arthur-terminal-list" });
-		if (this.loading) {
+		if (this.loading && this.rows.length === 0) {
 			list.append(note("loading sessions…"));
-		} else if (this.loadError) {
-			list.append(note(`session listing failed — ${this.loadError}`, "arthur-terminal-note--err"));
 		} else {
+			// A listing error renders OVER the surviving rows (first-load failure:
+			// rows are empty, so the note stands alone — exactly §32(a)).
+			if (this.loadError) {
+				list.append(note(`session listing failed — ${this.loadError}`, "arthur-terminal-note--err"));
+			}
 			const rows = this.visibleRows();
 			if (rows.length === 0) {
-				list.append(
-					note(this.rows.length === 0 ? "no pi sessions in the catalogue" : "no sessions match the filter"),
-				);
+				if (!this.loadError) {
+					list.append(
+						note(
+							this.rows.length === 0 ? "no pi sessions in the catalogue" : "no sessions match the filter",
+						),
+					);
+				}
+			} else {
+				for (const summary of rows) list.append(this.rowFor(summary));
 			}
-			for (const summary of rows) list.append(this.rowFor(summary));
 		}
 		const buttons = this.bodyEl.createEl("div", { cls: "arthur-modal-buttons" });
 		const cancel = buttons.createEl("button", { text: "Cancel" });
 		cancel.addEventListener("click", () => this.close());
+	}
+
+	/** The top control row: the always-visible 'New pi session…' action plus
+	 *  the cwd prompt / state lines once the flow starts (FEATURE 1). */
+	private paintControl(): void {
+		const control = this.controlEl;
+		if (!control) return;
+		const ns = this.opts.newSession;
+		const deny = ns ? ns.gate() : NEW_SESSION_DISABLED_TOOLTIP;
+		const sig = JSON.stringify([
+			deny !== null,
+			this.createOpen,
+			this.createBusy,
+			this.createError,
+			this.createNote,
+		]);
+		if (sig === this.controlSig) return; // nothing visible changed — keep DOM (and focus)
+		this.controlSig = sig;
+		control.empty();
+		const btn = document.createElement("button");
+		btn.addClass("arthur-btn", "arthur-btn--tiny", "arthur-terminal-new-btn");
+		btn.textContent = "New pi session…";
+		btn.setAttribute("title", deny ?? "Create a new pi session in a working directory (controller connection)");
+		btn.disabled = deny !== null || this.createBusy !== null;
+		btn.addEventListener("click", () => {
+			// Re-evaluate the LIVE gate on click: roles/settings can change under
+			// a stale render, and a disabled action must leak NOTHING.
+			const cur = this.opts.newSession;
+			if (!cur || cur.gate() !== null || this.createBusy !== null) return;
+			this.createOpen = true;
+			this.createError = null;
+			this.paint();
+		});
+		control.append(btn);
+		if (!this.createOpen && this.createBusy === null && this.createError === null && this.createNote === null) {
+			return;
+		}
+		const row = control.createEl("div", { cls: "arthur-terminal-new-row" });
+		const cwd = document.createElement("input");
+		cwd.type = "text";
+		cwd.addClass("arthur-terminal-new-cwd");
+		cwd.placeholder = "working directory for the new pi session";
+		cwd.setAttribute("title", "The new pi session starts in this directory");
+		cwd.value = this.cwdDraft;
+		if (this.createBusy !== null || deny !== null) cwd.disabled = true;
+		cwd.addEventListener("input", () => {
+			this.cwdDraft = cwd.value ?? "";
+		});
+		cwd.addEventListener("keydown", (e: KeyboardEvent) => {
+			if (e.key === "Enter") {
+				e.preventDefault();
+				this.onCreate();
+			}
+		});
+		row.append(cwd);
+		const create = document.createElement("button");
+		create.addClass("arthur-btn", "arthur-btn--tiny", "arthur-terminal-new-create");
+		create.textContent = "create";
+		create.setAttribute("title", "Create the pi session, then attach its terminal once the channel registers");
+		create.disabled = this.createBusy !== null || deny !== null;
+		create.addEventListener("click", () => this.onCreate());
+		row.append(create);
+		control.append(row);
+		if (this.createBusy === "create") control.append(note("creating session…"));
+		else if (this.createBusy === "wait") control.append(note("waiting for terminal…"));
+		if (this.createError) control.append(note(this.createError, "arthur-terminal-note--err"));
+		else if (this.createNote) control.append(note(this.createNote));
+	}
+
+	/** Create the session from the cwd prompt: gate + draft re-checked here
+	 *  (never trust a stale render), then the bounded terminal poll runs. */
+	private onCreate(): void {
+		const ns = this.opts.newSession;
+		if (!ns || this.createBusy !== null) return;
+		if (ns.gate() !== null) return; // control vanished (roles/setting) — send NOTHING
+		const cwd = this.cwdDraft.trim();
+		if (!cwd) {
+			this.createError = "enter a working directory to create a pi session";
+			this.paint();
+			return;
+		}
+		this.createOpen = true;
+		void this.runCreate(ns, cwd);
+	}
+
+	/** One create → poll cycle: surface rejections as a single inline error
+	 *  line (never a thrown stack / Notice), then re-catalogue on a bounded
+	 *  poll until the new summary carries a registered terminal channel. */
+	private async runCreate(ns: TerminalPickerNewSession, cwd: string): Promise<void> {
+		this.createBusy = "create";
+		this.createError = null;
+		this.createNote = null;
+		this.newResource = null;
+		this.paint();
+		let channel: string;
+		try {
+			channel = String((await ns.create(cwd)) ?? "").trim();
+		} catch (err) {
+			this.createBusy = null;
+			this.createError = truncate(
+				err instanceof Error ? err.message : String(err ?? "createSession failed"),
+				200,
+			);
+			this.paint();
+			return;
+		}
+		if (!channel) {
+			this.createBusy = null;
+			this.createError = "createSession returned no session resource";
+			this.paint();
+			return;
+		}
+		if (!this.bodyEl) return; // closed while the create was in flight
+		this.createBusy = "wait";
+		this.paint();
+		await this.pollNewSession(ns, channel);
+	}
+
+	/** Bounded poll for the new session's terminal channel: re-catalogue on an
+	 *  interval until `hasTerminalChannel` holds for the minted resource (→
+	 *  attach + close), or the budget runs out (→ picker stays open, row
+	 *  highlighted, note shown — the user can retry / attach later). */
+	private async pollNewSession(ns: TerminalPickerNewSession, channel: string): Promise<void> {
+		const interval = ns.poll?.intervalMs ?? NEW_SESSION_POLL_INTERVAL_MS;
+		const timeout = ns.poll?.timeoutMs ?? NEW_SESSION_POLL_TIMEOUT_MS;
+		const deadline = Date.now() + timeout;
+		for (;;) {
+			try {
+				await this.refresh(); // re-catalogue — a listing failure just shows its note
+			} catch {
+				// keep polling: the host device may register the channel later
+			}
+			if (!this.bodyEl) return; // modal closed mid-poll — never attach late
+			const found = this.rows.find((r) => r.resource === channel);
+			if (found && hasTerminalChannel(found)) {
+				this.createBusy = null;
+				this.createOpen = false;
+				this.opts.onPick(sessionIdFromResource(channel), (found.title ?? "").trim());
+				this.close();
+				return;
+			}
+			if (Date.now() >= deadline) break;
+			await new Promise<void>((resolve) => window.setTimeout(resolve, interval));
+			if (!this.bodyEl) return;
+		}
+		// Timeout: keep the picker open with the new row highlighted + a note.
+		this.createBusy = null;
+		this.newResource = channel;
+		this.createNote =
+			"session created — its terminal channel isn't registered yet; the row stays highlighted, attach later once pi-ahp-tty registers it";
+		this.paint();
 	}
 
 	/** One catalogue row: title + working directory; terminal-capable rows are
@@ -216,10 +468,14 @@ export class TerminalPickerModal extends Modal {
 	private rowFor(summary: AhpSessionSummary): HTMLElement {
 		const title = titleOf(summary);
 		const hasTerminal = hasTerminalChannel(summary);
+		const isNew = summary.resource === this.newResource;
 		const row = el("div", {
-			cls: `arthur-terminal-row${hasTerminal ? "" : " arthur-terminal-row--disabled"}`,
+			cls: `arthur-terminal-row${hasTerminal ? "" : " arthur-terminal-row--disabled"}${
+				isNew ? " arthur-terminal-row--new" : ""
+			}`,
 			attrs: {
 				"data-terminal-session": summary.resource,
+				...(isNew ? { "data-terminal-new": "true" } : {}),
 				...(hasTerminal
 					? { role: "button", title: `Attach the pi terminal to ${truncate(title, 64)}` }
 					: { "aria-disabled": "true", title: NO_TERMINAL_TOOLTIP }),
@@ -239,9 +495,21 @@ export class TerminalPickerModal extends Modal {
 
 	onClose(): void {
 		this.seq++; // orphan any in-flight load
+		this.unsubWatch?.(); // stop live catalogue ticks
+		this.unsubWatch = null;
 		this.contentEl.empty();
 		this.bodyEl = null;
+		this.controlEl = null;
+		this.controlSig = "";
 		this.query = "";
+		// New-session flow reset: bodyEl null already stops an in-flight poll
+		// from attaching late (its next step checks before acting).
+		this.createBusy = null;
+		this.createOpen = false;
+		this.createError = null;
+		this.createNote = null;
+		this.newResource = null;
+		this.cwdDraft = "";
 	}
 }
 

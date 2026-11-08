@@ -92,8 +92,10 @@ interface AhpControlSurface {
 
 /** The control surface for this connection, or null: gate = plugin setting ON
  *  AND live client `canControl === true` AND (when roles are exposed and
- *  populated) an actual 'controller' role AND the mutation methods present. */
-function controlSurface(client: AhpClient | null, enabled: boolean): AhpControlSurface | null {
+ *  populated) an actual 'controller' role AND the mutation methods present.
+ *  Exported for main.ts's terminal-picker 'New pi session…' gate — the SAME
+ *  create-session gating this view renders behind. */
+export function controlSurface(client: AhpClient | null, enabled: boolean): AhpControlSurface | null {
 	const surface = client as unknown as AhpControlSurface | null;
 	if (!surface || !enabled || surface.canControl !== true) return null;
 	if (Array.isArray(surface.roles) && surface.roles.length > 0 && !surface.roles.some((r) => String(r) === "controller")) {

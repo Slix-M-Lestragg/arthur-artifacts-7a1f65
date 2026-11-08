@@ -50,6 +50,10 @@ export class TerminalManager {
 	private clientPromise: Promise<AhpClient> | null = null;
 	/** Shared-client state-change listeners (each open terminal view registers one). */
 	private readonly stateListeners = new Set<(client: AhpClient | null) => void>();
+	/** Catalogue listeners (the picker's progressive rendering): fired on every
+	 *  catalogue commit AND state transition (a mid-paging listing failure
+	 *  parks its error on the client without a state change of its own). */
+	private readonly catalogueListeners = new Set<(client: AhpClient) => void>();
 
 	constructor(private readonly plugin: ArthurPlugin) {}
 
@@ -87,7 +91,11 @@ export class TerminalManager {
 			return this.clientPromise;
 		}
 		const client = new AhpClient(this.plugin.settings.ahpEndpoint, this.plugin.settings.ahpToken, {
-			onStateChanged: () => this.emitState(),
+			onStateChanged: () => {
+				this.emitState();
+				this.emitCatalogue(); // a state-carried error (mid-paging failure) reaches the picker
+			},
+			onCatalogue: () => this.emitCatalogue(),
 		});
 		this.client = client;
 		// Swallow load failures: the state line carries the error (a blank/
@@ -123,6 +131,16 @@ export class TerminalManager {
 
 	removeStateListener(fn: (client: AhpClient | null) => void): void {
 		this.stateListeners.delete(fn);
+	}
+
+	/** Subscribe to shared-client catalogue updates (the picker's progressive
+	 *  rendering: rows stream in as background pages commit). Returns an
+	 *  unsubscribe function; safe to call before any client exists. */
+	addCatalogueListener(fn: (client: AhpClient) => void): () => void {
+		this.catalogueListeners.add(fn);
+		return () => {
+			this.catalogueListeners.delete(fn);
+		};
 	}
 
 	/**
@@ -197,6 +215,7 @@ export class TerminalManager {
 	closeAll(): void {
 		this.leaves.clear();
 		this.stateListeners.clear();
+		this.catalogueListeners.clear();
 		if (this.client) {
 			this.client.close();
 			this.client = null;
@@ -221,5 +240,11 @@ export class TerminalManager {
 
 	private emitState(): void {
 		for (const fn of this.stateListeners) fn(this.client);
+	}
+
+	private emitCatalogue(): void {
+		const client = this.client;
+		if (!client) return;
+		for (const fn of this.catalogueListeners) fn(client);
 	}
 }

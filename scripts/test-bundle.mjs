@@ -6664,6 +6664,199 @@ try {
 		ws28.ttyA = false;
 	})();
 
+	// ---- 33. terminal picker NEW-SESSION action + progressive rendering ---
+	//      (a) gate: viewer role / ahpEnableControl OFF → disabled + tooltip,
+	//      (b) create → refresh → poll → hasTerminalChannel → attach + close,
+	//      (c) poll timeout → highlighted row + note, open, no onPick,
+	//      (d) page-1 rows before page 2 / live append / mid-paging note,
+	//      (e) viewer role leaks NO createSession frame --------------------
+	console.log("== 33. terminal picker new-session (gate / create→poll→attach / timeout) + progressive rendering ==");
+	await (async () => {
+		// Fresh plugin lifecycle + clean mock posture (32 left its modes reset).
+		await plugin.onunload();
+		await plugin.onload();
+		ws28.roles = ["viewer"]; // start READ-ONLY — gate case 1
+		ws28.mismatch = false;
+		ws28.replayActions = [];
+		ws28.reconnectResult = null;
+		ws28.emptyCatalogue = false;
+		ws28.failListPage = 0;
+		ws28.holdListPage = 0;
+		ws28.dupePages = false;
+		ws28.ttySpawn = false;
+		ws28.ttyA = false;
+		ws28.createdSessions.length = 0;
+		ws28.createdCwds.length = 0;
+		ws28.createdProviders.length = 0;
+		ws28.pausedMap = {};
+		ws28.listCalls.length = 0;
+		ws28.mutCalls.createSession.length = 0;
+		ws28.heldListReleases.splice(0);
+		plugin.settings.ahpEndpoint = "100.75.249.5:4500";
+		plugin.settings.ahpToken = "smoke-token";
+		plugin.settings.ahpEnableTerminal = true;
+		plugin.settings.ahpEnableControl = true;
+		StubModal.reset();
+
+		const t4Cmd33 = plugin.commands.get("open-pi-terminal");
+		const T4TYPE33 = "arthur-pi-terminal";
+
+		// (a) gating: a viewer-role connection renders the action DISABLED with
+		//     the control/controller tooltip (same gate ahp-view renders behind).
+		t4Cmd33?.callback?.();
+		await sleep(250);
+		const pickA33 = StubModal.opened[StubModal.opened.length - 1];
+		const btnA33 = findButton(pickA33.contentEl, "New pi session");
+		assert(!!btnA33, "(a) the 'New pi session…' action renders at the TOP of the picker");
+		assert(btnA33?.disabled === true, "(a) viewer role (control setting ON) → the action renders DISABLED");
+		assert(String(btnA33?.attributes.get("title") ?? "").includes("controller"),
+			"(a) the disabled action's tooltip names the control/controller requirement");
+		pickA33.close();
+
+		// (a) case 2: controller role but ahpEnableControl OFF → still disabled.
+		plugin.settings.ahpEnableControl = false;
+		ws28.roles = ["viewer", "controller"];
+		plugin.terminalManager?.rebuildClient(); // fresh handshake grants controller
+		t4Cmd33?.callback?.();
+		await sleep(250);
+		const pickA34 = StubModal.opened[StubModal.opened.length - 1];
+		const btnA34 = findButton(pickA34.contentEl, "New pi session");
+		assert(!!btnA34 && btnA34.disabled === true,
+			"(a) ahpEnableControl OFF (controller role) → the action renders DISABLED");
+		assert(String(btnA34?.attributes.get("title") ?? "").includes("control setting"),
+			"(a) the setting-gated action carries the control tooltip");
+		pickA34.close();
+		plugin.settings.ahpEnableControl = true; // (b) fully-enabled posture
+
+		// (b) happy path: create (provider 'pi' + cwd) → re-catalogue → poll →
+		//     hasTerminalChannel → openTerminal(MINTED id) + modal closed.
+		t4Cmd33?.callback?.();
+		await sleep(250);
+		const pickB33 = StubModal.opened[StubModal.opened.length - 1];
+		const btnB33 = findButton(pickB33.contentEl, "New pi session");
+		assert(!!btnB33 && btnB33.disabled !== true,
+			"(b) controller + setting ON → the action renders ENABLED");
+		btnB33?.handlers.get("click")[0]?.();
+		const cwdB33 = findByClass(pickB33.contentEl, "arthur-terminal-new-cwd")[0];
+		assert(!!cwdB33, "(b) clicking the action reveals the cwd prompt row");
+		cwdB33.value = "/tmp/newpi";
+		cwdB33.handlers.get("input")[0]?.(); // arm the draft
+		ws28.ttySpawn = true; // the created session's terminal channel registers
+		findButton(pickB33.contentEl, "create")?.handlers.get("click")[0]?.();
+		await sleep(700);
+		assert(ws28.mutCalls.createSession.length === 1, "(b) exactly ONE createSession request was sent");
+		const paramsB33 = ws28.mutCalls.createSession[0]; // the mock records frame.params
+		assert(typeof paramsB33?.channel === "string" && paramsB33.channel.startsWith("ahp-session:/"),
+			"(b) the client minted the ahp-session:/ URI");
+		assert(paramsB33?.provider === "pi", "(b) the create asks for the hosted provider 'pi'");
+		assert(paramsB33?.workingDirectory === "/tmp/newpi", "(b) the entered cwd rode along");
+		assert(pickB33._closed === true, "(b) the successful terminal poll CLOSES the picker");
+		const sid33 = String(paramsB33?.channel ?? "").replace(/^ahp-session:\//, "");
+		const leaf33 = app.workspace.getLeavesOfType(T4TYPE33).find((l) => l.view?.boundSessionId === sid33);
+		assert(!!leaf33 && leaf33.view?.terminal != null && leaf33.view?.adapter?.attached === true,
+			"(b) openTerminal bound the MINTED session id (xterm + adapter live)");
+		assert(ws28.subscribeCalls.includes(`ahp-terminal:/${sid33}`),
+			"(b) the attach subscribed ahp-terminal:/<minted id> on the shared socket");
+		ws28.ttySpawn = false;
+
+		// (c) poll timeout (direct-opts modal, fast poll pacing): the new row
+		//     stays HIGHLIGHTED with a note, the picker stays open, and onPick
+		//     (the modal's ONLY route to openTerminal) never fires.
+		const rows33c = [{ resource: "ahp-session:/b", title: "session B", provider: "pi" }];
+		let picks33c = 0;
+		const late33 = "ahp-session:/smoke-late";
+		const modal33c = new bundle.TerminalPickerModal(app, {
+			loadSessions: async () => rows33c.slice(),
+			newSession: {
+				gate: () => null,
+				create: async () => {
+					rows33c.push({ resource: late33, title: "fresh session", provider: "pi", workingDirectory: "/tmp/late" });
+					return late33;
+				},
+				poll: { intervalMs: 50, timeoutMs: 250 },
+			},
+			onPick: () => { picks33c++; },
+		});
+		modal33c.open();
+		await sleep(120);
+		findButton(modal33c.contentEl, "New pi session")?.handlers.get("click")[0]?.();
+		const cwd33c = findByClass(modal33c.contentEl, "arthur-terminal-new-cwd")[0];
+		assert(!!cwd33c, "(c) clicking the action reveals the cwd prompt (direct-opts modal)");
+		cwd33c.value = "/tmp/late";
+		cwd33c.handlers.get("input")[0]?.();
+		findButton(modal33c.contentEl, "create")?.handlers.get("click")[0]?.();
+		await sleep(800); // > the 250ms poll budget → bounded timeout
+		assert(modal33c._closed !== true, "(c) a poll timeout leaves the picker OPEN");
+		assert(picks33c === 0, "(c) onPick (→ openTerminal) NEVER fired on timeout");
+		const lateRow33 = findByClass(modal33c.contentEl, "arthur-terminal-row")
+			.find((r) => r.getAttribute("data-terminal-session") === late33);
+		assert(!!lateRow33 && lateRow33.hasClass("arthur-terminal-row--new"),
+			"(c) the new row renders HIGHLIGHTED after the timeout");
+		assert(allText(modal33c.contentEl).includes("isn't registered yet"),
+			"(c) the timeout note says the terminal channel isn't registered yet");
+		modal33c.close();
+
+		// (d) progressive rendering: page-1 rows render while page 2 is held,
+		//     the released page 2 STREAMS into the open modal, and a mid-paging
+		//     failure keeps the rendered rows + shows the listing-failed note.
+		ws28.createdSessions.length = 0;
+		ws28.createdCwds.length = 0;
+		ws28.createdProviders.length = 0;
+		ws28.holdListPage = 2;
+		t4Cmd33?.callback?.();
+		await sleep(250);
+		const pickD33 = StubModal.opened[StubModal.opened.length - 1];
+		const rowsD33 = findByClass(pickD33.contentEl, "arthur-terminal-row");
+		assert(rowsD33.length === 2, `(d) page-1 rows render while page 2 is held (got ${rowsD33.length})`);
+		assert(!allText(pickD33.contentEl).includes("session C"),
+			"(d) the held page-2 session is NOT rendered yet");
+		ws28.holdListPage = 0;
+		ws28.heldListReleases.shift()?.(); // release page 2 → live append
+		await sleep(300);
+		const rowsD34 = findByClass(pickD33.contentEl, "arthur-terminal-row");
+		assert(rowsD34.length === 3 && allText(pickD33.contentEl).includes("session C"),
+			"(d) the released page 2 STREAMS into the already-open modal");
+		pickD33.close();
+
+		ws28.failListPage = 2; // page 1 lands, page 2 errors
+		t4Cmd33?.callback?.();
+		await sleep(300);
+		const pickF33 = StubModal.opened[StubModal.opened.length - 1];
+		const rowsF33 = findByClass(pickF33.contentEl, "arthur-terminal-row");
+		assert(rowsF33.length >= 1 && !!rowsF33.find((r) => r.getAttribute("data-terminal-session") === "ahp-session:/a"),
+			`(d) a mid-paging failure PRESERVES the rendered rows (got ${rowsF33.length})`);
+		assert(allText(pickF33.contentEl).includes("session listing failed"),
+			"(d) the mid-paging failure renders the inline listing-failed note");
+		pickF33.close();
+		ws28.failListPage = 0;
+
+		// (e) viewer-role clients leak NOTHING: the control setting stays ON but
+		//     only viewer roles are granted — disabled render, click opens no
+		//     prompt, and NO createSession frame reaches the broker.
+		const createsBefore33 = ws28.mutCalls.createSession.length;
+		ws28.roles = ["viewer"];
+		plugin.terminalManager?.rebuildClient();
+		t4Cmd33?.callback?.();
+		await sleep(250);
+		const pickE33 = StubModal.opened[StubModal.opened.length - 1];
+		const btnE33 = findButton(pickE33.contentEl, "New pi session");
+		assert(!!btnE33 && btnE33.disabled === true,
+			"(e) viewer role (control setting ON) → the action renders DISABLED");
+		btnE33?.handlers.get("click")[0]?.(); // stub clicks ignore `disabled` — the handler re-gates
+		assert(findByClass(pickE33.contentEl, "arthur-terminal-new-cwd").length === 0,
+			"(e) clicking the disabled action opens NO cwd prompt (gate re-checked on click)");
+		assert(ws28.mutCalls.createSession.length === createsBefore33,
+			"(e) NO createSession frame was sent to the broker from a viewer-role client");
+		assert(plugin.terminalManager?.sharedClient?.canControl === false,
+			"(e) the shared client holds no controller role (local gate)");
+		pickE33.close();
+
+		// reset for any later section
+		plugin.settings.ahpEnableControl = false;
+		plugin.settings.ahpEnableTerminal = false;
+		ws28.ttyA = false;
+	})();
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();
@@ -6682,4 +6875,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / ahp-phaseT1-mock-terminal-adapter-wire+self-echo+detach-watermark+reconnect-cursor+controller+setting-gating / pi-terminal-view-register+lazy-xterm-construct+attach-wire+input-relay+close-dispose+channel-cleanup / pi-terminal-manager-multi-instance+shared-ws+3-leaves+routing+no-leakage+partial+full-teardown / pi-terminal-picker-catalogue-filter+pathA-disabled+stable-id-dedup+select-wiring+spawn-state-machine / pi-terminal-picker-resilience-retry-failed-load+refresh-failure-catalogue-fallback all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / ahp-phaseT1-mock-terminal-adapter-wire+self-echo+detach-watermark+reconnect-cursor+controller+setting-gating / pi-terminal-view-register+lazy-xterm-construct+attach-wire+input-relay+close-dispose+channel-cleanup / pi-terminal-manager-multi-instance+shared-ws+3-leaves+routing+no-leakage+partial+full-teardown / pi-terminal-picker-catalogue-filter+pathA-disabled+stable-id-dedup+select-wiring+spawn-state-machine / pi-terminal-picker-resilience-retry-failed-load+refresh-failure-catalogue-fallback / pi-terminal-picker-new-session-gate+create-poll-attach+timeout+progressive-rendering all clean");
