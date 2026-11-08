@@ -335,6 +335,11 @@ export class AhpClient {
 	 *  `reconnect` + `lastSeenServerSeq` path instead of a fresh initialize). */
 	private everConnected = false;
 	private loadBusy: number | null = null;
+	/** Monotonic catalogue-reload epoch: every refresh() bumps it and close()
+	 *  bumps it too; a paging loop that captured an older epoch aborts instead
+	 *  of committing — a superseded (stale) page response NEVER writes into
+	 *  the catalogue of the load that replaced it. */
+	private loadEpoch = 0;
 
 	constructor(endpoint: string, token: string, callbacks: AhpCallbacks = {}) {
 		this.token = String(token ?? "");
@@ -414,8 +419,10 @@ export class AhpClient {
 
 	/**
 	 * Connect (or reuse a live/connecting/reconnecting socket) and reload the
-	 * full catalogue by paging `listSessions`. The single entry point the view
-	 * uses; idempotent while an attempt of the same kind is already running.
+	 * catalogue by paging `listSessions` — progressively: the FIRST page
+	 * commits (and renders) immediately, the remaining pages continue in the
+	 * background. The single entry point the view uses; idempotent while an
+	 * attempt of the same kind is already running.
 	 */
 	async load(): Promise<void> {
 		if (this.loadBusy !== null) return;
@@ -437,6 +444,7 @@ export class AhpClient {
 	 */
 	close(): void {
 		this.closing = true;
+		this.loadEpoch++; // any in-flight background pagination must stop committing now
 		this.clearBackoff();
 		this.currentAttempt = null;
 		if (this.ws !== null && this.ws.readyState === 1) {
@@ -655,29 +663,82 @@ export class AhpClient {
 		this.setState("ready");
 	}
 
-	/** Page the catalogue through listSessions until nextCursor is exhausted. */
+	/**
+	 * Page the catalogue through listSessions — PROGRESSIVE, the backlog fix:
+	 * the FIRST page commits alone (map replace + onCatalogue) so the first
+	 * cards render right away instead of after the whole store is paged, then
+	 * pageInBackground() merges the remaining pages. The first page's replace
+	 * re-establishes the server's fresh order at every manual reload; later
+	 * pages APPEND in server order (map key = resource, so duplicate
+	 * resources across pages dedupe) — the stable-order contract is exactly
+	 * the pre-streaming full reload's, committed incrementally.
+	 */
 	async refresh(): Promise<void> {
 		if (this.state !== "ready") throw new Error(this.lastError ?? "not connected");
+		const epoch = ++this.loadEpoch; // cancels any previous background pagination of THIS client
 		const fresh = new Map<string, AhpSessionSummary>();
-		let cursor: string | null = null;
-		let pages = 0;
-		do {
-			const params: Record<string, unknown> = { channel: AHP_ROOT_CHANNEL, limit: LIST_PAGE_LIMIT };
-			if (cursor !== null) params.cursor = cursor;
-			const res = (await this.request("listSessions", params)) as {
-				items?: unknown[];
-				nextCursor?: unknown;
-			} | null;
-			if (res === null || typeof res !== "object") throw new Error("listSessions: malformed response");
-			for (const item of Array.isArray(res.items) ? res.items : []) {
-				const summary = coerceSummary(item);
-				if (summary) fresh.set(summary.resource, summary);
-			}
-			cursor = typeof res.nextCursor === "string" && res.nextCursor !== "" ? res.nextCursor : null;
-			if (++pages >= MAX_LIST_PAGES) cursor = null;
-		} while (cursor !== null);
+		const first = (await this.request("listSessions", {
+			channel: AHP_ROOT_CHANNEL,
+			limit: LIST_PAGE_LIMIT,
+		})) as {
+			items?: unknown[];
+			nextCursor?: unknown;
+		} | null;
+		if (this.loadEpoch !== epoch || this.closing || this.state !== "ready") return; // superseded — commit nothing
+		if (first === null || typeof first !== "object") throw new Error("listSessions: malformed response");
+		for (const item of Array.isArray(first.items) ? first.items : []) {
+			const summary = coerceSummary(item);
+			if (summary) fresh.set(summary.resource, summary);
+		}
+		let cursor = typeof first.nextCursor === "string" && first.nextCursor !== "" ? first.nextCursor : null;
+		if (1 >= MAX_LIST_PAGES) cursor = null;
+		if (this.lastError !== null) this.lastError = null; // a fresh reload clears a previous page error
 		this.catalogueMap = fresh; // listSessions is the authoritative catalogue
-		this.callbacks.onCatalogue?.();
+		this.callbacks.onCatalogue?.(); // the first cards NOW (the view coalesces)
+		if (cursor !== null) void this.pageInBackground(epoch, fresh, cursor, 1);
+	}
+
+	/** The background half of a progressive reload: pages 2+ merge into the
+	 *  SAME fresh map (it IS the live catalogue since the first page) in
+	 *  server page order — the stable order holds, resources dedupe by key,
+	 *  and every merged page emits onCatalogue (the view coalesces the burst
+	 *  into bounded repaints). A LATER-PAGE failure keeps every page committed
+	 *  so far (the catalogue is never blanked) and surfaces the error text in
+	 *  the ready state line; a stale epoch (a newer reload took over) or a
+	 *  closed client makes the loop STOP SILENTLY — a superseded page
+	 *  response must never commit. */
+	private async pageInBackground(
+		epoch: number,
+		map: Map<string, AhpSessionSummary>,
+		startCursor: string,
+		startPages: number,
+	): Promise<void> {
+		let cursor: string | null = startCursor;
+		let pages = startPages;
+		try {
+			do {
+				const params: Record<string, unknown> = { channel: AHP_ROOT_CHANNEL, limit: LIST_PAGE_LIMIT, cursor };
+				const res = (await this.request("listSessions", params)) as {
+					items?: unknown[];
+					nextCursor?: unknown;
+				} | null;
+				if (this.loadEpoch !== epoch || this.closing || this.state !== "ready") return;
+				if (res === null || typeof res !== "object") throw new Error("listSessions: malformed response");
+				for (const item of Array.isArray(res.items) ? res.items : []) {
+					const summary = coerceSummary(item);
+					if (summary) map.set(summary.resource, summary);
+				}
+				cursor = typeof res.nextCursor === "string" && res.nextCursor !== "" ? res.nextCursor : null;
+				if (++pages >= MAX_LIST_PAGES) cursor = null; // the runaway-guard cap still applies
+				this.callbacks.onCatalogue?.();
+			} while (cursor !== null);
+		} catch (err) {
+			if (this.loadEpoch !== epoch || this.closing) return; // stale — the newer load owns the catalogue
+			// Without a state transition (the connection stays ready): the
+			// error line renders next to 'live' over the SURVIVING pages.
+			this.lastError = err instanceof Error ? err.message : String(err ?? "listSessions failed");
+			this.callbacks.onStateChanged?.(this);
+		}
 	}
 
 	// ------------------------------------------------------------- controller

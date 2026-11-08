@@ -4144,6 +4144,14 @@ try {
 		// 28e: listSessions returns ZERO items (the stale-detail regression's
 		// "refresh emptied the catalogue" mode).
 		emptyCatalogue: false,
+		// 28f progressive-streaming modes: holdListPage = a page whose REPLY
+		// stays in flight (released manually via heldListReleases[]);
+		// heldListPageResult = the content a released hold serves (null = the
+		// normal page); failListPage = a page the broker answers with an ERROR.
+		holdListPage: 0,
+		heldListReleases: [],
+		heldListPageResult: null,
+		failListPage: 0,
 	};
 	class MockAhpBroker {
 		constructor(url) {
@@ -4268,6 +4276,12 @@ try {
 						this.serve({ jsonrpc: "2.0", id: frame.id, result: { items: [] } });
 						return;
 					}
+					const pageNo = frame.params.cursor === undefined ? 1 : 2;
+					if (ws28.failListPage === pageNo) {
+						// 28f mode: this page fails AFTER earlier pages committed.
+						this.serve({ jsonrpc: "2.0", id: frame.id, error: { code: -32603, message: "listSessions boom (late page failure test)" } });
+						return;
+					}
 					const cursor = typeof frame.params.cursor === "string" ? Number(frame.params.cursor) : 0;
 					// Controller-created sessions land server-side too (page 1); the
 					// mock models the verified relay-vs-hosted split: provider 'pi' →
@@ -4283,17 +4297,31 @@ try {
 							...(ws28.pausedMap[ch] === true ? { paused: true } : {}),
 						};
 					});
+					let reply;
 					if (cursor === 0) {
-						this.serve({ jsonrpc: "2.0", id: frame.id, result: { items: [
-							{ resource: "ahp-session:/a", title: "session A", provider: "pi", model: "glm-5", tokensIn: 1200, tokensOut: 300, cost: 0.02, childChatCount: 2, waitingOnCount: 1, kind: "hosted", modifiedAt: "2026-11-07T10:00:00Z" },
-							{ resource: "ahp-session:/b", title: "session B", provider: "pi", model: "mimo", tokensIn: 10, tokensOut: 2, cost: 0.0002, childChatCount: 0, kind: "hosted", modifiedAt: "2026-11-07T09:00:00Z" },
-							...created,
-						], nextCursor: "2" } });
+						reply = {
+							jsonrpc: "2.0",
+							id: frame.id,
+							result: { items: [
+								{ resource: "ahp-session:/a", title: "session A", provider: "pi", model: "glm-5", tokensIn: 1200, tokensOut: 300, cost: 0.02, childChatCount: 2, waitingOnCount: 1, kind: "hosted", modifiedAt: "2026-11-07T10:00:00Z" },
+								{ resource: "ahp-session:/b", title: "session B", provider: "pi", model: "mimo", tokensIn: 10, tokensOut: 2, cost: 0.0002, childChatCount: 0, kind: "hosted", modifiedAt: "2026-11-07T09:00:00Z" },
+								...created,
+							], nextCursor: "2" },
+						};
 					} else {
-						this.serve({ jsonrpc: "2.0", id: frame.id, result: {
+						reply = { jsonrpc: "2.0", id: frame.id, result: {
 							items: [{ resource: "ahp-session:/c", title: "session C", provider: "pi", modifiedAt: "2026-11-07T08:00:00Z" }],
-						} });
+						} };
 					}
+					if (ws28.holdListPage === pageNo) {
+						// 28f mode: the reply stays IN FLIGHT — progressive-render and
+						// stale-client tests release it manually; heldListPageResult
+						// resolves at release time (a stale socket gets fed a distinct
+						// payload that must NEVER land in the new client's catalogue).
+						ws28.heldListReleases.push(() => this.serve(ws28.heldListPageResult ?? reply));
+						return;
+					}
+					this.serve(reply);
 					return;
 				}
 				case "reconnect": {
@@ -5389,10 +5417,99 @@ try {
 	plugin.settings.ahpEnableControl = false;
 	ws28.roles = undefined;
 	await app.workspace.detachLeavesOfType("arthur-ahp");
-
 	// restore the smoke defaults the other sections assume
 	plugin.settings.ahpEndpoint = "100.75.249.5:4500";
 	plugin.settings.ahpToken = "";
+
+	// ---- 28f. AHP progressive catalogue streaming: the FIRST page renders ---
+	//          immediately, later pages append in the background, a stale -----
+	//          client's slow page reply never overwrites a newer Refresh, and --
+	//          a late page failure keeps the already-committed pages. ----------
+	console.log("== 28f. AHP progressive streaming (first page first / background append / stale pages ignored / late-failure keeps data) ==");
+
+	ws28.createdSessions = [];
+	ws28.createdCwds = [];
+	ws28.createdProviders = [];
+	ws28.holdMutation = null;
+	ws28.heldMutationReleases = [];
+	ws28.holdListPage = 0;
+	ws28.heldListPageResult = null;
+	ws28.failListPage = 0;
+	ws28.heldListReleases.splice(0); // drop any leftover holds
+
+	await plugin.activateAhpView();
+	const viewF = app.workspace.getLeavesOfType("arthur-ahp")[0]?.view;
+	assert(!!viewF, "(ah) the 28f view attached");
+	const cardsF = () => (viewF.listEl?.children ?? []).filter((c) => c.attributes?.get?.("data-ahp-session"));
+	const w28shiftF = () => ws28.heldListReleases.shift()?.(); // FIFO single-item release
+
+	// (ah) FIRST page renders BEFORE page 2 resolves: hold page 2 in flight —
+	//      page 1 must already be committed + visible (the voyage backlog fix).
+	ws28.holdListPage = 2;
+	const listCallsAh0 = ws28.listCalls.length;
+	findButton(viewF.contentEl, "Refresh")?.handlers.get("click")[0]?.();
+	await sleep(80);
+	const clientF1 = viewF.client;
+	assert(clientF1?.currentState === "ready", "(ah) the client is ready from the first page alone");
+	assert(ws28.listCalls.length - listCallsAh0 === 2, "(ah) page 1 served; page 2 was requested (and is held in flight)");
+	assert(ws28.heldListReleases.length === 1, "(ah) exactly ONE page reply is held (page 2) while page 1 landed");
+	assert(cardsF().length === 2, "(ah) the FIRST page's 2 session cards render while page 2 is still unresolved");
+	assert(JSON.stringify(cardsF().map((c) => c.attributes.get("data-ahp-session"))) === '["ahp-session:/a","ahp-session:/b"]',
+		"(ah) the first page renders the server's page-1 order (A, B — not waiting for C)");
+	assert(!allText(viewF.listEl).includes("session C"), "(ah) page 2's session C is NOT rendered yet");
+	// Release page 2 → it appends IN THE BACKGROUND: same map, server order.
+	w28shiftF();
+	await sleep(300);
+	assert(cardsF().length === 3 && allText(viewF.listEl).includes("session C"),
+		"(ah) the released page 2 APPENDED (session C rendered after the first page already showed)");
+	assert(JSON.stringify(cardsF().map((c) => c.attributes.get("data-ahp-session"))) === '["ahp-session:/a","ahp-session:/b","ahp-session:/c"]',
+		"(ah) the background append preserves the stable server order (A, B, C)");
+
+	// (ai) Refresh replaces the client: the STALE client's page-2 reply is
+	//      still in flight when ANOTHER Refresh swaps in a fresh client —
+	//      releasing the stale reply (with a DISTINCT payload) must never
+	//      touch the new client's catalogue; only the new client's own page
+	//      appends.
+	findButton(viewF.contentEl, "Refresh")?.handlers.get("click")[0]?.(); // client s — its page 2 lands held
+	await sleep(80);
+	const clientStale = viewF.client;
+	findButton(viewF.contentEl, "Refresh")?.handlers.get("click")[0]?.(); // ANOTHER Refresh swaps in a fresh client
+	await sleep(80);
+	const clientFresh = viewF.client;
+	assert(clientStale && clientFresh && clientFresh !== clientStale && clientStale.currentState === "closed",
+		"(ai) a second Refresh built a FRESH client and closed the one whose page reply is still in flight");
+	assert(ws28.heldListReleases.length === 2,
+		"(ai) BOTH the stale client's and the fresh client's page-2 replies are held (stale first, FIFO)");
+	assert(JSON.stringify(cardsF().map((c) => c.attributes.get("data-ahp-session"))) === '["ahp-session:/a","ahp-session:/b"]',
+		"(ai) the fresh client's first page is visible while both page-2 replies stay in flight");
+	ws28.heldListPageResult = { jsonrpc: "2.0", id: 0, result: { items: [{ resource: "ahp-session:/zap", title: "STALE ZAP PAGE", provider: "pi" }] } };
+	w28shiftF(); // release the STALE client's slow page-2 reply
+	await sleep(300);
+	assert(JSON.stringify(cardsF().map((c) => c.attributes.get("data-ahp-session"))) === '["ahp-session:/a","ahp-session:/b"]',
+		"(ai) the stale slow reply of the REPLACED client did NOT overwrite the new catalogue (no zap page, no reshuffle)");
+	assert(!allText(viewF.listEl).includes("STALE ZAP"), "(ai) the stale page's distinct payload never rendered");
+	ws28.heldListPageResult = null;
+	ws28.holdListPage = 0;
+	w28shiftF(); // the FRESH client's own page-2 reply lands normally
+	await sleep(300);
+	assert(JSON.stringify(cardsF().map((c) => c.attributes.get("data-ahp-session"))) === '["ahp-session:/a","ahp-session:/b","ahp-session:/c"]',
+		"(ai) the NEW client's own background page still appends: the fresh catalogue is intact (A, B, C)");
+
+	// (aj) LATER-page failure keeps the committed pages: page 2 errors AFTER
+	//      page 1 committed — the catalogue is never blanked, the error text
+	//      surfaces next to the live state, and state stays ready.
+	ws28.failListPage = 2;
+	findButton(viewF.contentEl, "Refresh")?.handlers.get("click")[0]?.();
+	await sleep(80);
+	assert(viewF.client?.currentState === "ready", "(aj) the connection stays live after a later-page failure");
+	assert(cardsF().length === 2, "(aj) the FIRST page SURVIVED the page-2 failure (never blanked)");
+	assert(JSON.stringify(cardsF().map((c) => c.attributes.get("data-ahp-session"))) === '["ahp-session:/a","ahp-session:/b"]',
+		"(aj) the surviving page keeps its order");
+	assert(viewF.client?.error?.includes("boom"), "(aj) the late page failure is parked on the client's error surface");
+	assert(allText(viewF.stateEl).includes("live") && allText(viewF.stateEl).includes("boom"),
+		"(aj) the state line shows live + the late-page error together (data and error, not one or the other)");
+	ws28.failListPage = 0;
+	await app.workspace.detachLeavesOfType("arthur-ahp");
 
 	// ---- cleanup ----------------------------------------------------------
 	try {
