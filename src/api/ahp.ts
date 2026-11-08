@@ -233,8 +233,9 @@ const BASE_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 30_000;
 /** Consecutive failed connects before the socket settles at the 30s cap. */
 const MAX_CONSECUTIVE_FAILS = 3;
-/** listSessions page size (server cap 500; default 100). */
-const LIST_PAGE_LIMIT = 100;
+/** listSessions page size — the server cap itself (offset pages are the
+ *  single largest driver of the progressive reload's round trips). */
+const LIST_PAGE_LIMIT = 500;
 /** Runaway guard against a nextCursor loop on a misbehaving broker. */
 const MAX_LIST_PAGES = 500;
 /** Per-request reply timeout. */
@@ -271,6 +272,22 @@ interface AhpPending {
 	reject: (err: Error) => void;
 	timerId: number | null;
 	method: string;
+}
+
+/** One progressive listSessions pass, for end-of-pass reconciliation. The
+ *  server's offset cursor can DRIFT: the store changes between page fetches,
+ *  so an item can duplicate across two pages (harmless — the map key
+ *  dedupes) and pages can serve stale rows. `seen` records what this pass's
+ *  pages actually served; `added`/`removed` tombstone the LIVE root/* churn
+ *  observed since the pass started (sessionAdded → genuinely live sessions
+ *  survive reconciliation; sessionRemoved → a stale drifted page must never
+ *  resurrect them). A COMPLETED pass (cursor exhausted — not a late-page
+ *  failure) then drops catalogue entries absent from it minus live-added
+ *  ones. */
+interface AhpListPass {
+	seen: Set<string>;
+	added: Set<string>;
+	removed: Set<string>;
 }
 
 export class AhpClient {
@@ -331,6 +348,13 @@ export class AhpClient {
 	private currentAttempt: Promise<void> | null = null;
 	/** true while close() is driving teardown — suppresses auto-reconnect. */
 	private closing = false;
+	/** True once the SELECTED session's snapshot — with its `chats` list, an
+	 *  EMPTY one included — has been applied. The view shows `no chat activity`
+	 *  for a zero-chat session instead of the pre-snapshot
+	 *  `subscribing chat detail…` (the zero-chat wedge). Reset on every
+	 *  selection change/deselect/config failure; a snapshot-mode reconnect
+	 *  re-applies it from the server's fresh chats list. */
+	private snapshotApplied = false;
 	/** True once a handshake on this client succeeded (re-opens then use the
 	 *  `reconnect` + `lastSeenServerSeq` path instead of a fresh initialize). */
 	private everConnected = false;
@@ -340,6 +364,9 @@ export class AhpClient {
 	 *  of committing — a superseded (stale) page response NEVER writes into
 	 *  the catalogue of the load that replaced it. */
 	private loadEpoch = 0;
+	/** The in-flight progressive listSessions pass (root/* tombstone
+	 *  bookkeeping); null while no pass is active. */
+	private listPass: AhpListPass | null = null;
 
 	constructor(endpoint: string, token: string, callbacks: AhpCallbacks = {}) {
 		this.token = String(token ?? "");
@@ -381,6 +408,12 @@ export class AhpClient {
 	 *  gate for every mutation below. viewer/hostAgent never imply it. */
 	get canControl(): boolean {
 		return this.roleSet.has("controller");
+	}
+
+	/** True once the selected session's snapshot (chats list, empty included)
+	 *  has been applied — see `snapshotApplied`. */
+	get selectedSnapshotApplied(): boolean {
+		return this.snapshotApplied;
 	}
 
 	/** The catalogue snapshot in STABLE order: the order a full listSessions
@@ -656,6 +689,9 @@ export class AhpClient {
 		if (Array.isArray(res.missing) && this.state === "ready") {
 			for (const channel of (res.missing as unknown[]).map(String)) {
 				if (channel && channel !== AHP_ROOT_CHANNEL && this.subscribedDetail.has(channel)) {
+					// A selected session the server could NOT restore loses its
+					// snapshot truth too (its detail is untrustworthy now).
+					if (channel === this.selectedResource) this.snapshotApplied = false;
 					this.forgetDetailChannel(channel);
 				}
 			}
@@ -676,6 +712,12 @@ export class AhpClient {
 	async refresh(): Promise<void> {
 		if (this.state !== "ready") throw new Error(this.lastError ?? "not connected");
 		const epoch = ++this.loadEpoch; // cancels any previous background pagination of THIS client
+		const pass: AhpListPass = { seen: new Set(), added: new Set(), removed: new Set() };
+		this.listPass = pass;
+		// Live root/sessionAdded churn between the pass start and the first
+		// page's reply lands in the PRIOR map — copied forward at the commit
+		// below so the authoritative replace never swallows a live addition.
+		const prior = this.catalogueMap;
 		const fresh = new Map<string, AhpSessionSummary>();
 		const first = (await this.request("listSessions", {
 			channel: AHP_ROOT_CHANNEL,
@@ -688,14 +730,23 @@ export class AhpClient {
 		if (first === null || typeof first !== "object") throw new Error("listSessions: malformed response");
 		for (const item of Array.isArray(first.items) ? first.items : []) {
 			const summary = coerceSummary(item);
-			if (summary) fresh.set(summary.resource, summary);
+			if (!summary || pass.removed.has(summary.resource)) continue; // stale drifted row of a live-removed session
+			pass.seen.add(summary.resource);
+			fresh.set(summary.resource, summary);
 		}
 		let cursor = typeof first.nextCursor === "string" && first.nextCursor !== "" ? first.nextCursor : null;
 		if (1 >= MAX_LIST_PAGES) cursor = null;
 		if (this.lastError !== null) this.lastError = null; // a fresh reload clears a previous page error
+		for (const resource of pass.added) {
+			if (!pass.removed.has(resource)) {
+				const added = prior.get(resource);
+				if (added) fresh.set(resource, added); // pre-commit live additions survive the replace
+			}
+		}
 		this.catalogueMap = fresh; // listSessions is the authoritative catalogue
 		this.callbacks.onCatalogue?.(); // the first cards NOW (the view coalesces)
-		if (cursor !== null) void this.pageInBackground(epoch, fresh, cursor, 1);
+		if (cursor !== null) void this.pageInBackground(epoch, fresh, cursor, 1, pass);
+		else if (this.listPass === pass) this.listPass = null; // single-page pass: nothing left to reconcile
 	}
 
 	/** The background half of a progressive reload: pages 2+ merge into the
@@ -712,6 +763,7 @@ export class AhpClient {
 		map: Map<string, AhpSessionSummary>,
 		startCursor: string,
 		startPages: number,
+		pass: AhpListPass,
 	): Promise<void> {
 		let cursor: string | null = startCursor;
 		let pages = startPages;
@@ -726,7 +778,9 @@ export class AhpClient {
 				if (res === null || typeof res !== "object") throw new Error("listSessions: malformed response");
 				for (const item of Array.isArray(res.items) ? res.items : []) {
 					const summary = coerceSummary(item);
-					if (summary) map.set(summary.resource, summary);
+					if (!summary || pass.removed.has(summary.resource)) continue; // offset drift: no resurrection
+					pass.seen.add(summary.resource);
+					map.set(summary.resource, summary); // map key = duplicate offset pages dedupe
 				}
 				cursor = typeof res.nextCursor === "string" && res.nextCursor !== "" ? res.nextCursor : null;
 				if (++pages >= MAX_LIST_PAGES) cursor = null; // the runaway-guard cap still applies
@@ -738,7 +792,21 @@ export class AhpClient {
 			// error line renders next to 'live' over the SURVIVING pages.
 			this.lastError = err instanceof Error ? err.message : String(err ?? "listSessions failed");
 			this.callbacks.onStateChanged?.(this);
+			return; // the pass is INCOMPLETE — no end-of-pass reconciliation
 		}
+		if (this.listPass === pass) this.listPass = null;
+		// End-of-pass reconciliation over the COMPLETED pass: drop entries no
+		// page served (offset drift holes) and any resurrection a stale page
+		// slipped in, but keep genuinely live-added sessions (root/sessionAdded
+		// mid-pass with no page listing) — removals only, never resurrection.
+		let dropped = 0;
+		for (const resource of map.keys()) {
+			if (pass.removed.has(resource) || (!pass.seen.has(resource) && !pass.added.has(resource))) {
+				map.delete(resource);
+				dropped++;
+			}
+		}
+		if (dropped > 0) this.callbacks.onCatalogue?.();
 	}
 
 	// ------------------------------------------------------------- controller
@@ -932,6 +1000,14 @@ export class AhpClient {
 			case "root/sessionAdded": {
 				const summary = coerceSummary(params.summary);
 				if (summary) {
+					// Progressive-pass tombstones: a live addition mid-pass must
+					// survive the end-of-pass reconciliation (even when no offset
+					// page lists it) — and it un-tombstones a prior removal.
+					const pass = this.listPass;
+					if (pass) {
+						pass.added.add(summary.resource);
+						pass.removed.delete(summary.resource);
+					}
 					mergeSummary(this.catalogueMap, summary);
 					this.callbacks.onCatalogue?.();
 				}
@@ -952,6 +1028,13 @@ export class AhpClient {
 			case "root/sessionRemoved": {
 				const target = typeof params.session === "string" ? params.session : "";
 				if (!target) return;
+				// Progressive-pass tombstone: the live removal must stick even
+				// when a stale drifted page still lists the session.
+				const pass = this.listPass;
+				if (pass) {
+					pass.removed.add(target);
+					pass.added.delete(target);
+				}
 				const dropped = this.catalogueMap.delete(target);
 				// A removed SELECTED session (the disposeSession flow: the server
 				// deletes the session and pushes sessionRemoved, possibly BEFORE
@@ -1135,7 +1218,12 @@ export class AhpClient {
 			// reduced envelopes; skip (reconnect ordering guard).
 			return;
 		}
-		if (channel === this.selectedResource && this.state === "ready") {
+		if (channel === this.selectedResource) {
+			// The selected session's snapshot applies on EVERY applied snapshot
+			// source — a snapshot-mode reconnect too (the loop runs while state is
+			// still 'reconnecting', so the old ready-only guard skipped it and a
+			// zero-chat selection wedged on the pre-snapshot message after
+			// reconnect): the server's fresh chats list is authoritative.
 			this.applySessionSnapshot(snap.state);
 		} else {
 			const detail = this.detailChats.get(channel);
@@ -1147,6 +1235,7 @@ export class AhpClient {
 	/** Session snapshot: replace the chats list, keep existing live turns. */
 	private applySessionSnapshot(state: Record<string, unknown> | null): void {
 		if ((state?.chats ?? null) === null) return;
+		this.snapshotApplied = true; // the chats list is known — even the empty (zero-chat) one
 		const refs = Array.isArray(state?.chats)
 			? (state.chats as unknown[]).map(coerceChatRef).filter((c): c is AhpChatRef => c !== null)
 			: [];
@@ -1298,6 +1387,7 @@ export class AhpClient {
 	 *  restores the subscriptions and the watermarks stay the valid cutoffs. */
 	private releaseDetailState(): void {
 		this.selectedResource = null;
+		this.snapshotApplied = false; // the old selection's snapshot truth dies with it
 		this.dropWatermarks([
 			...this.subscribedDetail,
 			...this.detailChats.keys(),

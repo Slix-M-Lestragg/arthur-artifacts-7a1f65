@@ -4315,10 +4315,16 @@ try {
 					}
 					if (ws28.holdListPage === pageNo) {
 						// 28f mode: the reply stays IN FLIGHT — progressive-render and
-						// stale-client tests release it manually; heldListPageResult
-						// resolves at release time (a stale socket gets fed a distinct
-						// payload that must NEVER land in the new client's catalogue).
-						ws28.heldListReleases.push(() => this.serve(ws28.heldListPageResult ?? reply));
+						// stale-client tests release it manually; heldListPageResult (a
+						// {result|error} body) replaces the reply BODY at release time,
+						// spliced with the REAL request frame id — a release must reach
+						// the client that asked (a body-only payload with a dead id is
+						// silently dropped as an unknown-id frame).
+						ws28.heldListReleases.push(() => this.serve(
+							ws28.heldListPageResult
+								? { jsonrpc: "2.0", id: frame.id, ...ws28.heldListPageResult }
+								: reply,
+						));
 						return;
 					}
 					this.serve(reply);
@@ -5482,7 +5488,7 @@ try {
 		"(ai) BOTH the stale client's and the fresh client's page-2 replies are held (stale first, FIFO)");
 	assert(JSON.stringify(cardsF().map((c) => c.attributes.get("data-ahp-session"))) === '["ahp-session:/a","ahp-session:/b"]',
 		"(ai) the fresh client's first page is visible while both page-2 replies stay in flight");
-	ws28.heldListPageResult = { jsonrpc: "2.0", id: 0, result: { items: [{ resource: "ahp-session:/zap", title: "STALE ZAP PAGE", provider: "pi" }] } };
+	ws28.heldListPageResult = { result: { items: [{ resource: "ahp-session:/zap", title: "STALE ZAP PAGE", provider: "pi" }] } };
 	w28shiftF(); // release the STALE client's slow page-2 reply
 	await sleep(300);
 	assert(JSON.stringify(cardsF().map((c) => c.attributes.get("data-ahp-session"))) === '["ahp-session:/a","ahp-session:/b"]',
@@ -5509,7 +5515,168 @@ try {
 	assert(allText(viewF.stateEl).includes("live") && allText(viewF.stateEl).includes("boom"),
 		"(aj) the state line shows live + the late-page error together (data and error, not one or the other)");
 	ws28.failListPage = 0;
+
+	// (ak) offset-page drift + end-of-pass reconciliation: the offset cursor
+	//      can DRIFT (the store changes between page fetches) — a resource
+	//      duplicates across pages (deduped into one row), a session removed
+	//      LIVE mid-pass stays removed even when a stale drifted page still
+	//      lists it, a session added LIVE mid-pass survives the reconciliation
+	//      (it may be on no page at all), and a pre-pass live addition absent
+	//      from the completed pass goes. Every page requests the 500-row cap.
+	ws28.holdListPage = 2;
+	findButton(viewF.contentEl, "Refresh")?.handlers.get("click")[0]?.();
+	await sleep(80);
+	const brokerAk = ws28.instances[ws28.instances.length - 1];
+	assert(viewF.client?.currentState === "ready" && brokerAk?.readyState === 1,
+		"(ak) the drift pass is live from its first page");
+	assert(JSON.stringify(ws28.listCalls.slice(-2).map((p) => p.limit)) === "[500,500]",
+		"(ak) both pass pages request the 500-row server cap (limit500)");
+	assert(JSON.stringify(cardsF().map((c) => c.attributes.get("data-ahp-session"))) === '["ahp-session:/a","ahp-session:/b"]',
+		"(ak) the first page (A, B) committed while page 2 is held");
+	// Mid-pass live churn on the CURRENT pass: A removed, Z added (Z exists on
+	// NO listSessions page at all — a pure live addition).
+	brokerAk.push("root/sessionRemoved", { session: "ahp-session:/a" });
+	brokerAk.push("root/sessionAdded", { summary: { resource: "ahp-session:/z", title: "LIVE Z", provider: "pi" } });
+	await sleep(150);
+	assert(JSON.stringify(cardsF().map((c) => c.attributes.get("data-ahp-session"))) === '["ahp-session:/b","ahp-session:/z"]',
+		"(ak) mid-pass live removal of A + live addition of Z applied while the pass is open");
+	// The stale drifted page 2: C, a DUPLICATE B, and the REMOVED A — but no Z.
+	ws28.heldListPageResult = { result: { items: [
+		{ resource: "ahp-session:/c", title: "session C", provider: "pi" },
+		{ resource: "ahp-session:/b", title: "session B", provider: "pi" },
+		{ resource: "ahp-session:/a", title: "session A RESURRECTED", provider: "pi" },
+	] } };
+	ws28.holdListPage = 0;
+	w28shiftF();
+	await sleep(400);
+	// the released page-2 reply is spliced with the real request frame id (see the mock)
+	assert(JSON.stringify(cardsF().map((c) => c.attributes.get("data-ahp-session"))) === '["ahp-session:/b","ahp-session:/z","ahp-session:/c"]',
+		"(ak) duplicate offset pages dedupe (one B row) and the removed A was NOT resurrected by the stale page");
+	assert(!allText(viewF.listEl).includes("RESURRECTED"), "(ak) the drifted stale A row never rendered");
+	// The live-added Z survives the END-OF-PASS reconciliation: Z is on NO
+	// page — its pass.added tombstone is exactly what protects it.
+	brokerAk.push("root/sessionAdded", { summary: { resource: "ahp-session:/ghost", title: "PRE-PASS GHOST", provider: "pi" } });
+	await sleep(350);
+	assert(allText(viewF.listEl).includes("PRE-PASS GHOST"),
+		"(ak) a between-pass live addition renders normally (no pass active → no tombstone bookkeeping)");
+	findButton(viewF.contentEl, "Refresh")?.handlers.get("click")[0]?.(); // ghost's NOT in the broker store
+	await sleep(600);
+	assert(JSON.stringify(cardsF().map((c) => c.attributes.get("data-ahp-session"))) === '["ahp-session:/a","ahp-session:/b","ahp-session:/c"]',
+		"(ak) end-of-pass reconciliation removed the entry ABSENT from the completed pass (ghost gone, Z pattern held mid-pass)");
+	assert(!allText(viewF.listEl).includes("PRE-PASS GHOST"), "(ak) the absent-from-pass ghost does not survive the completed pass");
 	await app.workspace.detachLeavesOfType("arthur-ahp");
+
+	// ---- 28g. AHP zero-chat wedge + snapshot-applied flag: a session whose ---
+	//          snapshot carries chats:[] flips the detail to "no chat ---------
+//          activity" (never the pre-snapshot "subscribing chat detail…"); ---
+//          the pending message shows ONLY pre-snapshot; reselection resets --
+	//          the flag; a snapshot-mode reconnect re-applies chats:[]; and a --
+	//          create session still auto-selects through the reconciling loader.
+	console.log("== 28g. AHP zero-chat snapshot flag (no chat activity after chats:[] / pending pre-snapshot only / reset-reselect / reconnect re-apply / create auto-select) ==");
+
+	ws28.createdSessions = ["ahp-session:/zero"];
+	ws28.createdCwds = ["/tmp/zero"];
+	ws28.createdProviders = ["pi"];
+	ws28.roles = ["viewer", "controller"];
+	plugin.settings.ahpEnableControl = true;
+	plugin.settings.ahpEndpoint = "100.75.249.5:4500";
+	plugin.settings.ahpToken = "smoke-token";
+	ws28.serverModel = {
+		counts: new Map(),
+		chanSeq: new Map(),
+		states: new Map([["ahp-session:/zero", { chats: [] }]]),
+		defer: null,
+		held: [],
+	};
+	ws28.reconnectResult = null;
+	ws28.holdListPage = 0;
+	ws28.heldListPageResult = null;
+	ws28.heldListReleases.splice(0); // drop any leftover holds
+
+	await plugin.activateAhpView();
+	const viewG = app.workspace.getLeavesOfType("arthur-ahp")[0]?.view;
+	assert(!!viewG, "(al) the 28g view attached");
+	const cardsG = () => (viewG.listEl?.children ?? []).filter((c) => c.attributes?.get?.("data-ahp-session"));
+	const clickG = (r) => cardsG().find((c) => c.attributes.get("data-ahp-session") === r)?.handlers?.get("click")?.[0]?.();
+	const releaseG = () => { for (const release of ws28.serverModel.held.splice(0)) release(); };
+
+	findButton(viewG.contentEl, "Refresh")?.handlers.get("click")[0]?.();
+	await sleep(120);
+	const brokerG = ws28.instances[ws28.instances.length - 1];
+	assert(brokerG?.readyState === 1 && viewG.client?.currentState === "ready", "(al) the 28g pass is live through the modeled broker");
+	assert(cardsG().some((c) => c.attributes.get("data-ahp-session") === "ahp-session:/zero"),
+		"(al) the zero-chat session card renders from page 1");
+
+	// (am) pre-snapshot ONLY: hold the /zero subscribe reply — the pending
+	//      message is the correct pre-snapshot state (flag false).
+	ws28.serverModel.defer = new Set(["ahp-session:/zero"]);
+	clickG("ahp-session:/zero");
+	await sleep(0);
+	assert(viewG.client?.selected === "ahp-session:/zero", "(am) the zero-chat session selected while its subscribe reply is held");
+	assert(allText(viewG.detailEl).includes("subscribing chat detail…"),
+		"(am) the pending message shows ONLY pre-snapshot (no snapshot → no applied flag)");
+	assert(viewG.client?.selectedSnapshotApplied === false, "(am) the applied flag tracks false before the snapshot lands");
+	releaseG();
+	await sleep(320);
+	assert(viewG.client?.selectedSnapshotApplied === true, "(an) the applied flag tracked true once the chats:[] snapshot applied");
+	assert(!allText(viewG.detailEl).includes("subscribing chat detail"),
+		"(an) the zero-chat WEDGE broken: no pending message after chats:[] applied");
+	assert(allText(viewG.detailEl).includes("no chat activity"), "(an) the zero-chat detail reads 'no chat activity'");
+
+	// (ao) reselection RESETS the flag: pending shows again pre-snapshot.
+	findButton(viewG.contentEl, "close detail")?.handlers?.get("click")?.[0]?.();
+	await sleep(150);
+	assert(viewG.client?.selected === null, "(ao) deselect closed the zero-chat detail (flag reset with the selection)");
+	assert(viewG.client?.selectedSnapshotApplied === false, "(ao) deselect reset the applied flag");
+	ws28.serverModel.defer = new Set(["ahp-session:/zero"]);
+	clickG("ahp-session:/zero");
+	await sleep(0);
+	assert(allText(viewG.detailEl).includes("subscribing chat detail…"),
+		"(ao) reselection shows the pending message again pre-snapshot (flag reset, not resurreced state)");
+	releaseG();
+	await sleep(320);
+	assert(allText(viewG.detailEl).includes("no chat activity"), "(ao) the second epoch's chats:[] snapshot re-applied the zero-chat truth");
+
+	// (ap) snapshot-mode reconnect re-applies the session snapshot (chats:[])
+	//      — the old ready-only guard skipped it on the reconnect path and a
+	//      zero-chat selection would wedge after the reconnect.
+	ws28.reconnectResult = {
+		type: "snapshot",
+		snapshots: [{ resource: "ahp-session:/zero", state: { chats: [] }, fromSeq: 900 }],
+	};
+	brokerG.drop();
+	await sleep(1700);
+	assert(ws28.instances[ws28.instances.length - 1].sent.some((f) => f.method === "reconnect"),
+		"(ap) the drop drove a reconnect handshake");
+	assert(viewG.client?.currentState === "ready" && viewG.client?.selected === "ahp-session:/zero",
+		"(ap) the zero-chat selection survived reconnect (ready, still selected)");
+	assert(allText(viewG.detailEl).includes("no chat activity") && !allText(viewG.detailEl).includes("subscribing chat detail"),
+		"(ap) the reconnected snapshot-mode chats:[] re-applied (still 'no chat activity', no wedge)");
+
+	// (aq) create auto-select still correct through the reconciling loader.
+	const cwdInputG = findByClass(viewG.contentEl, "arthur-ahp-cwd-input")[0];
+	assert(!!cwdInputG, "(aq) the new-session cwd input renders (controller role + setting on)");
+	cwdInputG.value = "/tmp/zero-create";
+	cwdInputG.handlers.get("input")[0]?.();
+	const createdBaseG = ws28.createdSessions.length;
+	const listBaseG = ws28.listCalls.length;
+	findButton(viewG.contentEl, "new session")?.handlers.get("click")[0]?.();
+	await sleep(700);
+	const createdG = ws28.createdSessions[createdBaseG];
+	assert(!!createdG && createdG.startsWith("ahp-session:/arthur-"), "(aq) createSession reached the broker (client-minted channel)");
+	assert(ws28.listCalls.length >= listBaseG + 2,
+		"(aq) the create reloaded the catalogue authoritatively (both pass pages requested)");
+	assert(viewG.client?.catalogue()?.some((s) => s.resource === createdG) === true,
+		"(aq) the created session landed in the pass catalogue (page-served → reconcile keeps it)");
+	assert(viewG.client?.selected === createdG, "(aq) the created session auto-selected once the catalogue knew it");
+
+	await app.workspace.detachLeavesOfType("arthur-ahp");
+	plugin.settings.ahpEnableControl = false;
+	plugin.settings.ahpToken = "";
+	ws28.serverModel = null;
+	ws28.roles = undefined;
+	ws28.reconnectResult = null;
+	ws28.createdSessions = [];
 
 	// ---- cleanup ----------------------------------------------------------
 	try {
@@ -5529,4 +5696,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect all clean");

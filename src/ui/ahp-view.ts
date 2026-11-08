@@ -393,7 +393,14 @@ export class AhpView extends ItemView {
 		}
 		const chats = client.selectedChats;
 		if (chats.length === 0) {
-			detailEl.append(el("p", { cls: "arthur-note", text: "subscribing chat detail…" }));
+			// Pending message ONLY before the session snapshot applied: a zero-chat
+			// session (snapshot chats:[]) must not wedge on "subscribing…" forever.
+			detailEl.append(
+				el("p", {
+					cls: "arthur-note",
+					text: client.selectedSnapshotApplied ? "no chat activity" : "subscribing chat detail…",
+				}),
+			);
 			return;
 		}
 		for (const chat of chats.slice(0, MAX_CHAT_SECTIONS)) {
