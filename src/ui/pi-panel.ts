@@ -34,7 +34,15 @@
  *                   (piRenderableSession, shared with the queue).
  *   expanded card — the session's subagent runs (agent name, task preview,
  *                   state icon: running → spinner, done → check, failed →
- *                   red cross, canceled → grey dash). The badge + expansion
+ *                   red cross, canceled → grey dash), and — when the feed
+ *                   carries producer progress (pi-arthur ≥0.1.7 additives:
+ *                   structured progress counts / detail / usage /
+ *                   heartbeatAt) — an accessible progress line UNDER the row:
+ *                   bar width from valid done/total counts only, percent +
+ *                   current/note text + heartbeat age, a visible 'stale'
+ *                   label once the heartbeat is >90s old, an indeterminate
+ *                   'no plan' bar without counts, and distinct static/muted
+ *                   endings for the terminal states (see piSubProgressLine). The badge + expansion
  *                   render as soon as the status feed carries entries whose
  *                   parentSessionId matches the session id (the in-pi pi-arthur
  *                   live-run listener populates them).
@@ -44,7 +52,14 @@
  * additionally surface in the JOB QUEUE (dashboard-view) as parent job
  * cards; the block keeps showing every session regardless of active state.
  */
-import type { AgentPiDevice, AgentPiSession, AgentPiStatus, AgentPiSubagent, AgentPiTail } from "../api/agent";
+import type {
+	AgentPiDevice,
+	AgentPiSession,
+	AgentPiStatus,
+	AgentPiSubagent,
+	AgentPiSubProgress,
+	AgentPiTail,
+} from "../api/agent";
 import { injectServiceIcon, serviceLabel } from "../icons";
 import { el, fmtDuration, truncate } from "../util";
 
@@ -126,6 +141,142 @@ export interface PiSubGroups {
 
 const TERMINAL_SUB_STATES = new Set(["done", "failed", "canceled"]);
 
+// ------------------------------------------------------------------
+// subagent progress line (pi-arthur v0.1.7 additive optional fields)
+// ------------------------------------------------------------------
+
+/** Heartbeat staleness budget (ms) — mirrors pi-agents' STALE_MS: a running
+ *  run whose last heartbeat/progress report is older than this renders a
+ *  visible 'stale' label (never color-only). */
+export const PI_SUB_STALE_MS = 90_000;
+
+/** ms epoch of a numeric value, else 0. */
+function numMs(n: unknown): number {
+	return typeof n === "number" && Number.isFinite(n) ? n : 0;
+}
+
+/** The run's VALID structured progress (total > 0, done a finite number ≥ 0
+ *  — anything else simply has no plan to draw a bar from), else null. */
+export function piSubProgressOf(sub: AgentPiSubagent): AgentPiSubProgress | null {
+	const p: unknown = (sub as { progress?: unknown }).progress;
+	if (!p || typeof p !== "object") return null;
+	const { total, done } = p as Record<"total" | "done", unknown>;
+	if (!Number.isFinite(total) || !Number.isFinite(done)) return null;
+	if ((total as number) <= 0 || (done as number) < 0) return null;
+	return p as AgentPiSubProgress;
+}
+
+/** Compact heartbeat age: "8s" / "2m" / "1h" (pi-agents' formatHeartbeatAge). */
+export function piSubHeartbeatAge(ageMs: number): string {
+	const s = Math.max(0, Math.round(ageMs / 1000));
+	if (s < 60) return `${s}s`;
+	const m = Math.floor(s / 60);
+	if (m < 60) return `${m}m`;
+	return `${Math.floor(m / 60)}h`;
+}
+
+/** Clamped plan percent from valid progress counts (0..100). */
+function piSubPct(p: AgentPiSubProgress): number {
+	return Math.min(100, Math.max(0, Math.round((Math.min(p.done, p.total) / p.total) * 100)));
+}
+
+/**
+ * The progress line rendered UNDER one subagent row (plain DOM, a11y-
+ * annotated — the status words are plain text, never color-only):
+ *
+ *  - valid `progress` counts → a bar whose fill width is done/total (the
+ *    ONLY trustable source) + the percent, the current/note step text and
+ *    the heartbeat age; a heartbeat older than {@link PI_SUB_STALE_MS}
+ *    switches the line to a visible 'stale …' label (--stale class);
+ *  - RUNNING with no usable progress → an INDETERMINATE bar + the explicit
+ *    'no plan' word (the producer's compact `detail` line as fallback info);
+ *  - terminal states render distinctly: done keeps its (usually full)
+ *    STATIC bar, failed/canceled show a muted static bar at the frozen
+ *    width, and terminal rows NEVER show heartbeat-age/'stale' text (the
+ *    feed never stamps those on terminal runs).
+ *
+ * Null = nothing worth showing (a terminal run with no progress, detail
+ * AND usage keeps its row exactly as before — old feeds are untouched).
+ */
+export function piSubProgressLine(sub: AgentPiSubagent, now: number): HTMLElement | null {
+	const p = piSubProgressOf(sub);
+	const running = sub.state === "running";
+	const detail = (sub.detail ?? "").trim();
+	const usage = (sub.usage ?? "").trim();
+	const pct = p ? piSubPct(p) : null;
+
+	// Heartbeat only means something on RUNNING runs (terminal entries never
+	// carry heartbeatAt); a recent progress report counts as a heartbeat too.
+	const hbMs = running ? Math.max(tsMs(sub.heartbeatAt), numMs(p?.updatedAt)) : 0;
+	const stale = running && hbMs > 0 && now - hbMs > PI_SUB_STALE_MS;
+
+	if (!running && !p && !detail && !usage) return null;
+	const line = el("div", {
+		cls: `arthur-pi-subline arthur-pi-subline--${sub.state}${stale ? " arthur-pi-subline--stale" : ""}`,
+	});
+
+	const partBits = p ? [p.current?.trim() ?? "", p.note?.trim() ?? ""].filter((s) => s) : [];
+	if (p) {
+		const bar = el("div", {
+			cls: `arthur-bar arthur-pi-subline-bar${stale ? " arthur-pi-subline-bar--stale" : ""}`,
+			attrs: {
+				role: "progressbar",
+				"aria-valuemin": "0",
+				"aria-valuemax": "100",
+				"aria-valuenow": String(pct),
+				"aria-valuetext": `${pct}%${partBits.length > 0 ? ` — ${partBits.join(" — ")}` : ""}`,
+				"aria-label": `${sub.agent} — plan progress`,
+			},
+		});
+		const fill = el("div", {
+			cls: `arthur-bar-fill arthur-pi-subline-fill${running || sub.state === "done" ? "" : " arthur-pi-subline-fill--muted"}`,
+		});
+		fill.style.width = `${pct}%`;
+		bar.append(fill);
+		line.append(bar);
+	} else if (running) {
+		// No usable plan → indeterminate bar + the explicit 'no plan' word.
+		const bar = el("div", {
+			cls: "arthur-bar arthur-pi-subline-bar arthur-pi-subline-bar--indeterminate",
+			attrs: {
+				role: "progressbar",
+				"aria-valuemin": "0",
+				"aria-valuemax": "100",
+				"aria-valuetext": "no plan",
+				"aria-label": `${sub.agent} — no plan reported yet`,
+			},
+		});
+		bar.append(el("div", { cls: "arthur-bar-fill arthur-bar-fill--indeterminate arthur-pi-subline-fill" }));
+		line.append(bar);
+	}
+
+	const parts: string[] = [];
+	if (running && p) {
+		parts.push(`${pct}%`);
+		parts.push(...partBits.map((s) => truncate(s, 72)));
+	} else if (running) {
+		parts.push("no plan");
+		if (detail) parts.push(truncate(detail, 72));
+	} else if (p) {
+		parts.push(sub.state === "done" ? `${pct}% complete` : `${Math.min(p.done, p.total)}/${p.total} of plan, ${sub.state}`);
+	}
+	if (!running) {
+		// Terminal states: distinct muted final line — never a heartbeat/'stale'.
+		if (detail) parts.push(truncate(detail, 72));
+	}
+	if (running && hbMs > 0) {
+		parts.push(
+			stale
+				? `stale — heartbeat ${piSubHeartbeatAge(now - hbMs)} ago`
+				: `heartbeat ${piSubHeartbeatAge(now - hbMs)} ago`,
+		);
+	}
+	if (usage) parts.push(truncate(usage, 72));
+	if (line.children.length === 0 && parts.length === 0) return null;
+	line.append(el("span", { cls: "arthur-pi-subline-meta", text: parts.join(" · ") }));
+	return line;
+}
+
 /** The entry's usable batchId (trimmed non-empty string), else null. */
 function piSubBatchOf(sub: AgentPiSubagent): string | null {
 	const raw = (sub as { batchId?: unknown }).batchId;
@@ -194,19 +345,25 @@ export function piSubBadgeText(groups: PiSubGroups): string {
 /**
  * One subagent run row (shared by the session panel and the queue parent
  * cards): state icon, agent name, task preview, live duration (running:
- * now − startedAt; finished: finishedAt − startedAt).
+ * now − startedAt; finished: finishedAt − startedAt) and — below — the
+ * producer's progress line ({@link piSubProgressLine}) when the run carries
+ * anything worth showing (pi-arthur v0.1.7 additive fields).
  */
 export function piSubRow(sub: AgentPiSubagent, now: number, cls: string): HTMLElement {
 	const startMs = tsMs(sub.startedAt);
 	const endMs = tsMs(sub.finishedAt) || (sub.state === "running" ? now : 0);
 	const dur = startMs > 0 && endMs > startMs ? fmtDuration((endMs - startMs) / 1000) : null;
 	const row = el("div", { cls: `${cls} ${cls}--${sub.state}` });
-	row.append(
+	const head = el("div", { cls: `${cls}-line` });
+	head.append(
 		piStateIcon(sub.state),
 		el("span", { cls: `${cls}-agent`, text: truncate(sub.agent, 24) }),
 		el("span", { cls: `arthur-card-meta ${cls}-task`, text: truncate(sub.taskPreview ?? "", 64), attrs: { title: sub.taskPreview ?? "" } }),
 		dur ? el("span", { cls: "arthur-card-meta arthur-pi-duration", text: dur }) : el("span"),
 	);
+	row.append(head);
+	const prog = piSubProgressLine(sub, now);
+	if (prog) row.append(prog);
 	return row;
 }
 

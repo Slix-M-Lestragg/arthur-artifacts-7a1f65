@@ -1,7 +1,7 @@
 # Arthur + AHP / obsidian-pi integration — research and delivery plan
 
 - **Date**: 2026-11-07
-- **Status**: **Phase 0 preserved + Phase 1 slice 1 implemented, mock-tested, and sandbox-validated; Phase 2 PLUGIN side implemented and mock-tested** (roles gate + opt-in controls + exact mutation wire, gate green) — **backend roles work lives on a separate remote broker branch (81 tests passing, since superseded: the roles + command gate landed at broker `b6e26148`, 82 tests, DEPLOYED — see §10c; production roll-out EXECUTED, see §11b)**; **live Phase 2 interactive sandbox EXECUTED (linux-obsidian-73323, see Status snapshot / E15) with one BLOCKER found & FIXED (`createSession` `provider:'pi'`) and the focused live retest of the fixed wrapper PASS (`linux-obsidian-74310`, E17 — UI-created HOSTED pi session, `AHP_PHASE2_CREATE_OK`, pause/resume/dispose, 0 plugin errors, cleanup verified)**; **INLINE dispose confirmation hardening implemented + mock-tested (native `window.confirm` removed, E18) — since LIVE-revalidated end-to-end in the final sandbox (§11d/E23)**; question_user answering remains mock-only; **production role deployment EXECUTED and COMPLETE (broker `b6e26148` live, all protocol role probes PASS, ALL clients recovered — see §11b + §11c); interactive production UI validation ATTEMPTED — FAILED at hosted create (`spawn /home/ulysse/.local/bin/pi` ENOENT, zero plugin console errors, no session created; root cause since CLARIFIED, E22: **missing spawn workingDirectory on ulysse, NOT a missing pi binary** — the absolute pi on ulysse exists and is executable v1.4.0, and a DIRECT production create/prompt/dispose probe with valid cwd `/home/ulysse` PASSED `PROBE_OK` with no broker restart; the final interactive plugin UI validation with a valid cwd has since PASSED (final sandbox `ahp-prod-ui-final`, §11d/E23) — **interactive deployment COMPLETE**; Phases 3–5 still [PROPOSED]
+- **Status**: **Phase 0 preserved + Phase 1 slice 1 implemented, mock-tested, and sandbox-validated; Phase 2 PLUGIN side implemented and mock-tested** (roles gate + opt-in controls + exact mutation wire, gate green) — **backend roles work lives on a separate remote broker branch (81 tests passing, since superseded: the roles + command gate landed at broker `b6e26148`, 82 tests, DEPLOYED — see §10c; production roll-out EXECUTED, see §11b)**; **live Phase 2 interactive sandbox EXECUTED (linux-obsidian-73323, see Status snapshot / E15) with one BLOCKER found & FIXED (`createSession` `provider:'pi'`) and the focused live retest of the fixed wrapper PASS (`linux-obsidian-74310`, E17 — UI-created HOSTED pi session, `AHP_PHASE2_CREATE_OK`, pause/resume/dispose, 0 plugin errors, cleanup verified)**; **INLINE dispose confirmation hardening implemented + mock-tested (native `window.confirm` removed, E18) — since LIVE-revalidated end-to-end in the final sandbox (§11d/E23)**; question_user answering remains mock-only; **production role deployment EXECUTED and COMPLETE (broker `b6e26148` live, all protocol role probes PASS, ALL clients recovered — see §11b + §11c); interactive production UI validation ATTEMPTED — FAILED at hosted create (`spawn /home/ulysse/.local/bin/pi` ENOENT, zero plugin console errors, no session created; root cause since CLARIFIED, E22: **missing spawn workingDirectory on ulysse, NOT a missing pi binary** — the absolute pi on ulysse exists and is executable v1.4.0, and a DIRECT production create/prompt/dispose probe with valid cwd `/home/ulysse` PASSED `PROBE_OK` with no broker restart; the final interactive plugin UI validation with a valid cwd has since PASSED (final sandbox `ahp-prod-ui-final`, §11d/E23) — **interactive deployment COMPLETE**; the OPTIONAL pi-panel subagent progress UI (producer pi-arthur v0.1.7 additive fields, no AHP wire change, backward-compatible no-plan/stale/terminal states) is implemented + mock-tested (1076 gate, §12) — validation mock-only until a live feed reload; Phases 3–5 still [PROPOSED]
 - **Scope**: planning record + delivery evidence for Phase 0 and Phase 1 slice 1. No canonical `docs/PLAN.md`, manifest, or ROADMAP/TESTING changes.
 
 ### Status snapshot (2026-11-07)
@@ -957,5 +957,63 @@ artifacts change with this record. Facts verified live at record time.
 | E22 | **ENOENT root-cause clarification + direct production probe PASS (2026-11-07, §11c)**: the `spawn /home/ulysse/.local/bin/pi ENOENT` was NOT a missing binary — the absolute pi on ulysse EXISTS, EXECUTABLE, v1.4.0; actual cause: the spawn ran with a MISSING workingDirectory (cwd) on ulysse (spawn-config defect, not the plugin); direct (non-plugin) production create → prompt → dispose with valid cwd `/home/ulysse` PASSED — transcript marker `PROBE_OK`, clean dispose, **NO broker restart**; pi-voice RECOVERED on the restarted broker immediately after its `/reload`; all client recovery COMPLETE except client `1897872` (stopped intentionally, offline); residue: **8 orphan probe `.jsonl` files** identified for careful LATER cleanup, **no pre-existing sessions deleted**; final interactive arthur-plugin UI validation with a valid cwd PENDING | ulysse live state + direct probe record (delivery record) |
 
 | E23 | **Interactive deployment close-out (2026-11-07, §11d)**: final production UI sandbox `ahp-prod-ui-final` PASS against live broker PID 175271/4500 (`b6e26148`) — plugin-driven hosted create with valid cwd `/home/ulysse`, one prompt answered, hardened INLINE dispose cancel+confirm exercised live (E18 hardening live-revalidated), detail/row clear + Refresh responsive, **zero plugin-caused console errors**, sandbox deleted after; **interactive deployment COMPLETE**; client recovery COMPLETE except client `1897872` (stopped intentionally, verified still stopped/offline post-closeout); the 8 orphan probe `.jsonl` files removed after per-file re-verification (test/probe naming, one-line `session/creationFailed` ENOENT, no matching `.json`; store 4798→4790, backups intact), stale `/tmp/ahp-*` residue cleared, hung probe process terminated; production healthy (live sessions 0), `:4501`/`:8189` untouched, no active session deleted; remaining non-blockers recorded: pi-voice max-payload reconnect, stale glyphs (future cleanup) | ulysse live state + final sandbox run record (delivery record) |
+
+---
+
+## 12. Optional pi-panel subagent progress UI (producer pi-arthur v0.1.7) — implemented + mock-tested [2026-11-07]
+
+A separate, OPTIONAL surface change on the **pi panel** (the arthur-agent
+pi-sync-fed panel — NOT the AHP view): expanded pi sessions and queue parent
+cards now render a plain-DOM **progress line under each subagent run row**
+when the feed carries the producer's pi-arthur **v0.1.7 additive optional
+fields** (`progress` {total, done, current?, note?, updatedAt}, `detail`,
+`usage`, `heartbeatAt`).
+
+- **No AHP wire change** [RULE kept]: `src/api/ahp.ts`, the AHP view, and the
+  broker protocol are untouched — this rides the existing pi-sync status pipe
+  (`status/<Device>.sessions.json`) passed through verbatim by arthur-agent;
+  the plugin's `AgentPiSubagent` type gained the additive fields as OPTIONAL.
+- **Backward-compatible by construction**: pre-0.1.7 feeds omit the fields
+  entirely; a subagent row renders exactly as before unless the run carries
+  something worth showing. The backward-compatible states:
+  - **no plan** (running, no valid `progress` counts — total must be finite
+    and > 0, done finite and ≥ 0, else there is no plan to draw a bar from):
+    an INDETERMINATE bar + a visible `'no plan'` word (the producer's compact
+    `detail` line as fallback info) — never a fake width;
+  - **stale**: a RUNNING run whose effective heartbeat (`heartbeatAt`, or the
+    last `progress.updatedAt` — a fresh progress report counts as one) is
+    older than 90 s (mirrors pi-agents' STALE_MS) renders a visible
+    `'stale — heartbeat <age> ago'` label; terminal rows NEVER carry
+    heartbeat/`'stale'` text (the feed never stamps those on them);
+  - **terminal states render distinctly**: done keeps its (usually full)
+    STATIC bar at its final width, failed/canceled render a muted frozen bar
+    at the last plan width (or, without any plan counts, no bar at all —
+    detail-text only); a terminal run with no progress AND no detail AND no
+    usage renders NO line at all — the pre-0.1.7 row exactly.
+- **Where**: `src/api/agent.ts` (`AgentPiSubProgress` + optional
+  `progress`/`detail`/`usage`/`heartbeatAt` on `AgentPiSubagent`),
+  `src/ui/pi-panel.ts` (`piSubProgressOf` / `piSubProgressLine` /
+  `piSubHeartbeatAge` / `PI_SUB_STALE_MS`, rendered by the shared
+  `piSubRow`), `styles.css` (`.arthur-pi-subline*`, row-head
+  `.arthur-pi-sub-line` / `.arthur-pi-child-line`), and smoke coverage in
+  `scripts/test-bundle.mjs` (suite 22(f2)).
+- **Bar width comes ONLY from valid done/total counts** [RULE]; status words
+  are plain text, never color-only (a11y — `role="progressbar"` with
+  `aria-valuenow`/`aria-valuetext`).
+- **Test gate**: `npm run typecheck && npm run build && npm run smoke` green
+  — **1076 asserted checks** (the progressive-loader suites incl. cd209fd /
+  4cd47bd intact; suite 22(f2) asserts the valid-plan bar + percent +
+  current/note + heartbeat age, the COMPLETE static done bar, the
+  indeterminate `'no plan'` bar, the muted frozen canceled bar, the
+  detail-only failed line, terminal rows' absence of heartbeat/`'stale'`
+  text, shared `piSubRow` rendering in the queue children, and the >90 s
+  `'stale'` flip).
+- **Validation is MOCK-ONLY so far** — the pi-arthur v0.1.7 publisher has
+  shipped the producer side, but a live feed reload (a real publishing pi
+  session updating a running run end-to-end through the pi-sync pipe into
+  the panel) has NOT been exercised in a sandbox yet. Until that
+  feed-reload validation, do not count the progress line as
+  live-validated; the panel's pre-0.1.7 rendering paths are the unchanged,
+  already-validated baseline.
 
 *End of plan.*

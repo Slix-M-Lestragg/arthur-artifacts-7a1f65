@@ -185,6 +185,25 @@ export interface AgentPiSession {
 	running?: boolean;
 }
 
+/**
+ * Structured plan/step progress of one subagent run (producer pi-arthur v0.1.7,
+ * additive/optional — pre-0.1.7 feeds omit the field entirely; the producer
+ * drops unusable payloads rather than fabricating values). Mirrors pi-agents'
+ * `RunProgress`.
+ */
+export interface AgentPiSubProgress {
+	/** Total planned steps — > 0 is what makes the bar trustworthy. */
+	total: number;
+	/** Completed steps; the UI clamps to [0, total]. */
+	done: number;
+	/** Current step label (producer-validated, ≤200 chars). */
+	current?: string | null;
+	/** Free-form progress note (producer-validated, ≤200 chars). */
+	note?: string | null;
+	/** ms epoch — refreshed on every progress update. */
+	updatedAt?: number | null;
+}
+
 /** One pi subagent run (child job of its parentSessionId). */
 export interface AgentPiSubagent {
 	runId: string;
@@ -195,6 +214,19 @@ export interface AgentPiSubagent {
 	parentSessionId: string;
 	startedAt?: string | null;
 	finishedAt?: string | null;
+	/** pi-arthur v0.1.7 additive optional fields (absent on older feeds — the
+	 *  agent passes subagent dicts through verbatim):
+	 *  progress     — structured done/total plan counts (drives the bar width)
+	 *                 + current/note step text + updatedAt (ms epoch);
+	 *  detail       — the producer's compact progress line (≤200 chars);
+	 *  usage        — its formatted usage rollup (e.g. "3 turns ↑24k $0.008");
+	 *  heartbeatAt  — ISO, restamped on every publish of this process's RUNNING
+	 *                 runs; a stale one means the producer stopped publishing.
+	 *                 Terminal runs never carry it. */
+	progress?: AgentPiSubProgress | null;
+	detail?: string | null;
+	usage?: string | null;
+	heartbeatAt?: string | null;
 }
 
 /** One pi-sync device (pi instances are NOT hardware-bound — they render

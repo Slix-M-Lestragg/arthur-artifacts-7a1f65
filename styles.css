@@ -1397,11 +1397,18 @@
 }
 
 .arthur-pi-sub {
+	min-width: 0;
+	font-size: var(--font-ui-small);
+	/* the row is a COLUMN: the head line (icon/agent/task/duration) + the
+	   progress line underneath (pi-arthur ≥0.1.7 piSubProgressLine) */
+}
+
+.arthur-pi-sub-line,
+.arthur-pi-child-line {
 	display: flex;
 	align-items: center;
 	gap: 0.45em;
 	min-width: 0;
-	font-size: var(--font-ui-small);
 }
 
 .arthur-pi-sub-agent {
@@ -1420,6 +1427,66 @@
 .arthur-pi-note {
 	font-style: italic;
 	color: var(--text-muted);
+}
+
+/* progress line UNDER each subagent row (producer ≥0.1.7): the bar fill
+   width comes ONLY from valid done/total progress counts; 'stale' and the
+   other status words are visible plain text — never color-only (a11y) */
+.arthur-pi-subline {
+	display: flex;
+	align-items: center;
+	gap: 0.5em;
+	min-width: 0;
+	padding: 0.05em 0 0.15em 1.55em; /* clears the head line's state glyph */
+	font-size: var(--font-ui-smaller);
+}
+
+.arthur-pi-subline-bar {
+	flex: 0 0 6.5em;
+	height: 5px;
+}
+
+.arthur-pi-subline-bar--indeterminate {
+	flex: 0 0 4.5em;
+}
+
+.arthur-pi-subline-fill {
+	width: 0%;
+}
+
+/* terminal states render distinctly: done → static full-width success bar,
+   failed/canceled → muted frozen bar, and NEVER a heartbeat/'stale' text */
+.arthur-pi-subline--done .arthur-pi-subline-fill {
+	background: var(--text-success, var(--interactive-accent));
+}
+
+.arthur-pi-subline-fill--muted {
+	opacity: 0.55;
+}
+
+.arthur-pi-subline--stale .arthur-pi-subline-fill {
+	background: var(--text-warning, var(--text-error));
+}
+
+.arthur-pi-subline-meta {
+	color: var(--text-muted);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	min-width: 0;
+}
+
+.arthur-pi-subline--stale .arthur-pi-subline-meta {
+	color: var(--text-warning, var(--text-error));
+}
+
+.arthur-pi-subline--failed,
+.arthur-pi-subline--canceled {
+	opacity: 0.8;
+}
+
+.arthur-pi-subline--failed .arthur-pi-subline-meta {
+	color: var(--text-error);
 }
 
 /* peek mini-log: last 10 tail entries, preview text only */
@@ -1529,12 +1596,10 @@
 }
 
 .arthur-pi-child {
-	display: flex;
-	align-items: center;
-	gap: 0.5em;
 	min-width: 0;
 	font-size: var(--font-ui-small);
 	padding: 0.1em 0;
+	/* same column shape as .arthur-pi-sub (head line + progress line) */
 }
 
 .arthur-pi-child-agent {

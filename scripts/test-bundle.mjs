@@ -2920,10 +2920,23 @@ try {
 					{ id: "sess-d", path: "  ", cwd: "/srv/live-shot", name: "live one-shot", model: "MiMo", provider: "x", startedAt: iso(60000), lastActivity: iso(10000), active: true },
 				],
 				subagents: [
-					{ runId: "r1", batchId: "b1", agent: "worker", taskPreview: "fix the pi badge", state: "running", parentSessionId: "sess-a", startedAt: iso(60000), finishedAt: null },
-					{ runId: "r2", batchId: "b1", agent: "reviewer", taskPreview: "review the diff", state: "done", parentSessionId: "sess-a", startedAt: iso(600000), finishedAt: iso(300000) },
-					{ runId: "r3", batchId: "b2", agent: "scout", taskPreview: "find styles", state: "failed", parentSessionId: "sess-b", startedAt: iso(600000), finishedAt: iso(590000) },
-					{ runId: "r4", batchId: "b2", agent: "planner", taskPreview: "plan pi", state: "canceled", parentSessionId: "sess-b", startedAt: iso(600000), finishedAt: iso(580000) },
+					// v0.1.7 producer additive progress fields (piSubProgressLine): r1
+					// carries a VALID plan (1/4) + fresh heartbeat, r2 a COMPLETE plan,
+					// r3 a plain detail line, r4 a frozen partial plan (canceled).
+					{ runId: "r1", batchId: "b1", agent: "worker", taskPreview: "fix the pi badge", state: "running", parentSessionId: "sess-a", startedAt: iso(60000), finishedAt: null,
+						usage: "3 turns $0.01",
+						progress: { total: 4, done: 1, current: "editing pi-panel.ts", note: "step 2 of 4", updatedAt: Date.now() - 15000 },
+						heartbeatAt: iso(5000) },
+					{ runId: "r2", batchId: "b1", agent: "reviewer", taskPreview: "review the diff", state: "done", parentSessionId: "sess-a", startedAt: iso(600000), finishedAt: iso(300000),
+						usage: "$0.02",
+						progress: { total: 3, done: 3, updatedAt: Date.now() - 300000 } },
+					{ runId: "r3", batchId: "b2", agent: "scout", taskPreview: "find styles", state: "failed", parentSessionId: "sess-b", startedAt: iso(600000), finishedAt: iso(590000),
+						detail: "step 2 crashed" },
+					{ runId: "r4", batchId: "b2", agent: "planner", taskPreview: "plan pi", state: "canceled", parentSessionId: "sess-b", startedAt: iso(600000), finishedAt: iso(580000),
+						progress: { total: 2, done: 1, updatedAt: Date.now() - 580000 } },
+					// sess-d gets a plan-less running run (indeterminate 'no plan' bar).
+					{ runId: "r6", batchId: "b3", agent: "research", taskPreview: "check docs", state: "running", parentSessionId: "sess-d", startedAt: iso(30000), finishedAt: null,
+						heartbeatAt: iso(8000) },
 				],
 				stale: false,
 			},
@@ -3146,6 +3159,116 @@ try {
 			"mini-log shows preview text of the newest entries only");
 		findButton(peekCard22, "Hide log").handlers.get("click")[0]?.();
 		assert(findByClass(piSection22, "arthur-pi-log-row").length === 0, "peek toggles closed");
+	}
+
+	// (f2) subagent PROGRESS LINES (pi-arthur v0.1.7 additive fields): the bar
+	//      width comes from valid done/total counts only, text percent +
+	//      current/note + heartbeat age, >90s heartbeat → visible 'stale',
+	//      plan-less running → indeterminate 'no plan' bar, terminal states
+	//      distinct (static/muted bar, NEVER a heartbeat/'stale' text)
+	{
+		// (1) re-expand sess-a: r1 (valid 1/4 plan, fresh heartbeat) topmost,
+		//     r2 (done, complete 3/3 plan) below
+		const activeCard22g = findByClass(piSection22, "arthur-pi-card").find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-a"));
+		activeCard22g.handlers.get("click")[0]?.({ target: activeCard22g });
+		const subRows22g = findByClass(piSection22, "arthur-pi-sub");
+		assert(subRows22g.length === 2, `expanded sess-a lists its 2 subagent rows (got ${subRows22g.length})`);
+		const runRow22g = subRows22g[0]; // most-recent-first → the RUNNING r1
+		assert(allText(runRow22g).includes("fix the pi badge"), "the first row is the running r1");
+		const bar22g = findByClass(runRow22g, "arthur-pi-subline-bar")[0];
+		assert(!!bar22g && (bar22g.attributes.get("role") ?? "") === "progressbar"
+			&& bar22g.attributes.get("aria-valuemin") === "0" && bar22g.attributes.get("aria-valuemax") === "100",
+			"valid-plan running row renders an a11y-annotated progressbar");
+		assert(bar22g.attributes.get("aria-valuenow") === "25"
+			&& (bar22g.attributes.get("aria-valuetext") ?? "").startsWith("25% — editing pi-panel.ts — step 2 of 4"),
+			"bar aria-valuenow/valuetext come from the VALID 1/4 plan (25%) + current — note");
+		const fill22g = findByClass(bar22g, "arthur-pi-subline-fill")[0];
+		assert(!!fill22g && fill22g.style.width === "25%", `bar fill width = done/total (1/4 → 25%, got ${fill22g?.style.width})`);
+		const meta22g = findByClass(runRow22g, "arthur-pi-subline-meta")[0];
+		assert((meta22g?.textContent ?? "").startsWith("25% · editing pi-panel.ts · step 2 of 4 · heartbeat")
+			&& /heartbeat \d+s ago/.test(meta22g.textContent)
+			&& meta22g.textContent.includes("3 turns $0.01") && allText(meta22g).includes("ago")
+			&& !runRow22g.textContent.includes("stale"),
+			"meta = percent + current + note + heartbeat age + usage; fresh heartbeat → no 'stale' word");
+		// (2) done r2: STATIC distinct final bar at its complete width, no
+		//     heartbeat/stale text (terminal rows never stamped one)
+		const doneRow22g = subRows22g[1];
+		assert(allText(doneRow22g).includes("review the diff"), "the second row is the done r2");
+		const doneBar22g = findByClass(doneRow22g, "arthur-pi-subline-bar")[0];
+		assert(!!doneBar22g && doneBar22g.attributes.get("aria-valuenow") === "100"
+			&& !doneBar22g.hasClass("arthur-pi-subline-bar--indeterminate"),
+			"done row renders a COMPLETE static bar (aria-valuenow 100, not indeterminate)");
+		assert(findByClass(doneRow22g, "arthur-pi-subline-fill")[0].style.width === "100%",
+			"done bar fill = the complete plan width (100%)");
+		const doneMeta22g = findByClass(doneRow22g, "arthur-pi-subline-meta")[0]?.textContent ?? "";
+		assert(doneMeta22g.startsWith("100% complete · $0.02") && !doneRow22g.textContent.includes("heartbeat")
+			&& !doneRow22g.textContent.includes("stale"),
+			"done meta = ''100% complete' + usage; NO heartbeat-age/stale text on terminal rows");
+		// (3) plan-LESS running run (sess-d's r6): INDETERMINATE bar + 'no plan'
+		const shotCard22g = findByClass(piSection22, "arthur-pi-card").find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-d"));
+		assert(!!shotCard22g, "the pathless+active sess-d card is present");
+		shotCard22g.handlers.get("click")[0]?.({ target: shotCard22g });
+		const planRow22g = findByClass(piSection22, "arthur-pi-sub").find((r) => allText(r).includes("check docs"));
+		assert(!!planRow22g, "sess-d's plan-less running row renders");
+		const planBar22g = findByClass(planRow22g, "arthur-pi-subline-bar")[0];
+		assert(!!planBar22g && planBar22g.hasClass("arthur-pi-subline-bar--indeterminate")
+			&& planBar22g.attributes.get("aria-valuenow") == null
+			&& (planBar22g.attributes.get("aria-valuetext") ?? "") === "no plan",
+			"plan-less running row shows an INDETERMINATE bar (aria-valuetext 'no plan', no valuenow)");
+		assert(findByClass(planRow22g, "arthur-bar-fill--indeterminate").length === 1
+			&& /^no plan/.test((findByClass(planRow22g, "arthur-pi-subline-meta")[0]?.textContent ?? "").trim()),
+			"the plan-less fill carries the shared indeterminate animation and the visible 'no plan' word");
+		// (4) terminal failed/canceled rows (sess-b) are mute/static: frozen bar
+		//     at their final width (canceled) or detail-only text (failed), the
+		//     state class on the line, and — again — never heartbeat text
+		const archCard22g = findByClass(piSection22, "arthur-pi-card").find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-b"));
+		archCard22g.handlers.get("click")[0]?.({ target: archCard22g });
+		const failedRow22g = findByClass(piSection22, "arthur-pi-sub").find((r) => allText(r).includes("find styles"));
+		assert(!!failedRow22g, "the failed r3 row renders in sess-b's expansion");
+		const failedBar22g = findByClass(failedRow22g, "arthur-pi-subline-bar")[0];
+		assert(failedBar22g == null, "failed WITHOUT any plan counts renders NO bar");
+		const failedLine22g = findByClass(failedRow22g, "arthur-pi-subline")[0];
+		assert(!!failedLine22g && failedLine22g.hasClass("arthur-pi-subline--failed")
+			&& allText(failedLine22g).includes("step 2 crashed"),
+			"failed row carries its distinct --failed subline with the detail text");
+		const canceledRow22g = findByClass(piSection22, "arthur-pi-sub").find((r) => allText(r).includes("plan pi"));
+		const canceledBar22g = findByClass(canceledRow22g, "arthur-pi-subline-bar")[0];
+		assert(!!canceledBar22g && canceledBar22g.attributes.get("aria-valuenow") === "50"
+			&& findByClass(canceledBar22g, "arthur-pi-subline-fill--muted").length === 1
+			&& findByClass(canceledBar22g, "arthur-pi-subline-fill")[0].style.width === "50%",
+			"canceled row shows a MUTED frozen bar at its last 1/2 plan width (50%)");
+		assert(!canceledRow22g.textContent.includes("heartbeat") && !canceledRow22g.textContent.includes("stale"),
+			"canceled row (terminal) shows no heartbeat-age/stale text");
+		// (5) the QUEUE child rows get the same progress lines (shared piSubRow);
+		//     sess-a's parent card expands to 2 child rows with their bars
+		const parent22g = view22.queueEl.children.filter((c) => c.hasClass?.("arthur-pi-parent")).find(
+			(c) => (c.attributes.get("data-pi-key") ?? "") === "pi:dev-lt/sess-a");
+		parent22g.handlers.get("click")[0]?.();
+		const childRows22g = findByClass(view22.queueEl, "arthur-pi-child");
+		assert(childRows22g.length === 2 && findByClass(view22.queueEl, "arthur-pi-subline-bar").length >= 2,
+			"queue child rows carry the same progress bars (shared piSubRow)");
+		parent22g.handlers.get("click")[0]?.();
+		// (6) >90s heartbeat → the visible 'stale' label (and the —stale classes)
+		//     sess-a is STILL expanded from (1) — collapse it first, mutate the
+		//     fixture's heartbeat, then re-refresh and re-expand.
+		{
+			const sessA22g = findByClass(piSection22, "arthur-pi-card").find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-a"));
+			sessA22g.handlers.get("click")[0]?.({ target: sessA22g });
+			// BOTH heartbeat sources go stale: heartbeatAt AND the last progress
+			// report (a fresh progress updatedAt counts as a fresh heartbeat).
+			const staleR1g = piStatusBody22.devices[0].subagents.find((s) => s.runId === "r1");
+			staleR1g.heartbeatAt = iso(120000);
+			staleR1g.progress.updatedAt = Date.now() - 120000;
+			await view22.refreshData();
+			const staleCard22g = findByClass(piSection22, "arthur-pi-card").find((c) => (c.attributes.get("data-pi-session") ?? "").endsWith("sess-a"));
+			staleCard22g.handlers.get("click")[0]?.({ target: staleCard22g });
+			const staleRow22g = findByClass(piSection22, "arthur-pi-sub").find((r) => allText(r).includes("fix the pi badge"));
+			const staleLine22g = findByClass(staleRow22g, "arthur-pi-subline")[0];
+			assert(!!staleLine22g && staleLine22g.hasClass("arthur-pi-subline--stale")
+				&& /stale — heartbeat 2m ago/.test(allText(staleLine22g)),
+				"a heartbeat >90s old switches the running line to the visible 'stale — heartbeat 2m ago' label");
+			staleCard22g.handlers.get("click")[0]?.({ target: staleCard22g });
+		}
 	}
 
 	// (g) devices=[] (pipe absent) → ONE muted warning line, never a crash
