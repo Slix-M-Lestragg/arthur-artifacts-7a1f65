@@ -551,10 +551,17 @@ export interface AgentPiSpawnResult {
 /** POST /api/pi/terminal-sessions — 201 result (agent v0.8.2). `spawned` is
  *  always 'pi-ahp-tty'; `detail.log` is the supervisor's log path (absolute on
  *  `self`, ~/...-relative on remote) surfaced on a poll timeout, and
- *  `detail.pid` the supervisor's PID when captured (else null). */
+ *  `detail.pid` the supervisor's PID when captured (else null).
+ *
+ *  `sessionId` (agent v0.8.3) is the EXACT `ahp-session:/<id>` URI the
+ *  supervisor resumed or minted — null when the launch log printed no
+ *  session URI inside the agent's extraction window. OPTIONAL: an older
+ *  agent omits the field entirely, so callers must tolerate its absence
+ *  (the picker falls back to its cwd-prefix heuristic). */
 export interface AgentPiTerminalSpawnDetail {
 	log: string;
 	pid: number | null;
+	sessionId?: string | null;
 }
 
 export interface AgentPiTerminalSpawnResult {

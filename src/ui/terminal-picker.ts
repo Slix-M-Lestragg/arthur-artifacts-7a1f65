@@ -33,9 +33,13 @@
  * click, so a disabled render can never leak a spawn). Clicking it opens the
  * EXISTING PiPickerModal (device + fuzzy directory picker from pi-picker.ts);
  * the chosen {device, cwd} drives `agent.piTerminalSpawn`, then a bounded
- * poll of the AHP catalogue waits for a terminal-bearing session whose
- * workingDirectory matches the chosen cwd (most recent wins) — success
- * attaches via `onPick` and closes; a timeout keeps the picker open with the
+ * poll of the AHP catalogue waits for the EXACT `ahp-session:/<id>` the
+ * 201's `detail.sessionId` names (agent v0.8.3) to gain a registered
+ * terminal channel — pi-ahp-tty RESUMES the existing pi session for a cwd,
+ * so its channel registers on the OLD session resource a cwd-prefix poll
+ * for a NEW session can never match. `sessionId` null/absent (older agent,
+ * async mint) → fall back to the cwd-prefix heuristic (most recent wins).
+ * Success attaches via `onPick` and closes; a timeout keeps the picker open with the
  * matching row highlighted and a note mentioning the supervisor log path
  * (attach later). Spawn rejections (422/503/502) surface the server's error
  * message verbatim as one inline error line — never a thrown stack or Notice.
@@ -67,11 +71,14 @@ export const NEW_SESSION_DISABLED_TOOLTIP =
 	"creating a pi terminal session requires the arthur agent to be reachable (the companion service on the server)";
 
 /** 'New pi session…' poll pacing: re-catalogue every second, give the
- *  pi-ahp-tty supervisor up to 20s to create the session and register its
- *  `ahp-terminal:/<id>` channel (the plugin polls the AHP catalogue for a
- *  terminal-bearing session whose workingDirectory matches the chosen cwd). */
+ *  pi-ahp-tty supervisor up to 45s to resume/mint the session, connect its
+ *  broker link and register the `ahp-terminal:/<id>` channel — resume +
+ *  broker connect + TUI startup legitimately takes 20-30s on a busy box.
+ *  With agent v0.8.3's `detail.sessionId` the poll targets that EXACT
+ *  catalogue resource; without it, a terminal-bearing session whose
+ *  workingDirectory matches the chosen cwd prefix is used instead. */
 const NEW_SESSION_POLL_INTERVAL_MS = 1_000;
-const NEW_SESSION_POLL_TIMEOUT_MS = 20_000;
+const NEW_SESSION_POLL_TIMEOUT_MS = 45_000;
 
 /** The 'New pi session…' control surface — main.ts wires it to the
  *  arthur agent (v0.8.2 terminal-spawn endpoint) + the PiPickerModal device
@@ -379,8 +386,9 @@ export class TerminalPickerModal extends Modal {
 
 	/** One spawn → poll cycle: spawn the pi-ahp-tty supervisor (awaited — the
 	 *  PiPickerModal closes once this resolves), then poll the AHP catalogue
-	 *  detached for a terminal-bearing session whose workingDirectory matches
-	 *  the chosen cwd. Spawn rejections (422/503/502) surface verbatim as a
+	 *  detached for the EXACT session resource `detail.sessionId` names to
+	 *  gain a terminal channel (cwd-prefix heuristic when sessionId is
+	 *  null/absent). Spawn rejections (422/503/502) surface verbatim as a
 	 *  single inline error line (never a thrown stack / Notice). */
 	private async runSpawn(
 		ns: TerminalPickerNewSession,
@@ -411,15 +419,19 @@ export class TerminalPickerModal extends Modal {
 		await this.pollNewSession(ns, cwd);
 	}
 
-	/** Bounded poll for the new terminal-bearing session: re-catalogue on an
-	 *  interval until a session whose workingDirectory matches the chosen cwd
-	 *  prefix AND carries a registered terminal channel appears (most recent
-	 *  wins → attach + close), or the budget runs out (→ picker stays open,
-	 *  the cwd-matching row highlighted, note shown mentioning the supervisor
-	 *  log path — the user can retry / attach later). */
+	/** Bounded poll for the new terminal session: re-catalogue on an interval
+	 *  until the session `detail.sessionId` names (agent v0.8.3 — normalized
+	 *  through `sessionIdFromResource` on BOTH sides, so 'ahp-session:/x' and
+	 *  bare 'x' compare equal) carries a registered terminal channel → attach
+	 *  + close. sessionId null/absent (older agent, async mint) → the previous
+	 *  heuristic: a terminal-bearing session whose workingDirectory matches
+	 *  the chosen cwd prefix (most recent wins). Budget exhausted → the picker
+	 *  stays open, the cwd-matching row highlighted, a note mentions the
+	 *  supervisor log path — the user can retry / attach later. */
 	private async pollNewSession(ns: TerminalPickerNewSession, cwd: string): Promise<void> {
 		const interval = ns.poll?.intervalMs ?? NEW_SESSION_POLL_INTERVAL_MS;
 		const timeout = ns.poll?.timeoutMs ?? NEW_SESSION_POLL_TIMEOUT_MS;
+		const targetId = sessionIdFromResource((this.spawnDetail?.sessionId ?? "").trim());
 		const deadline = Date.now() + timeout;
 		for (;;) {
 			try {
@@ -428,7 +440,11 @@ export class TerminalPickerModal extends Modal {
 				// keep polling: the supervisor may register the channel later
 			}
 			if (!this.bodyEl) return; // modal closed mid-poll — never attach late
-			const found = this.matchingTerminalSession(cwd);
+			const found = targetId
+				? this.rows.find(
+						(s) => sessionIdFromResource(s.resource) === targetId && hasTerminalChannel(s),
+				  ) ?? null
+				: this.matchingTerminalSession(cwd);
 			if (found) {
 				this.createBusy = null;
 				this.opts.onPick(sessionIdFromResource(found.resource), (found.title ?? "").trim());

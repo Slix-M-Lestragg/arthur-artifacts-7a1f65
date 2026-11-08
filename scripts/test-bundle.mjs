@@ -6748,14 +6748,18 @@ try {
 		ws28.ttyA = false;
 	})();
 
-	// ---- 34. terminal picker NEW-SESSION via pi-ahp-tty spawn (agent v0.8.2) ---
-	//      (a) happy path: spawn 201 → poll AHP catalogue for a terminal-bearing
-	//          session matching the cwd → attach + close,
-	//      (b) 422 surfaced verbatim, no attach, picker open,
-	//      (c) poll timeout → note (supervisor log path) + highlighted row,
-	//      (d) agent offline → button disabled + reachability tooltip, no
+	// ---- 34. terminal picker NEW-SESSION via pi-ahp-tty spawn (agent v0.8.3) ---
+	//      (a) happy path: spawn 201 with detail.sessionId → poll the AHP
+	//          catalogue for THAT EXACT resource (no cwd match required) →
+	//          attach + close,
+	//      (b) sessionId null → fallback to the cwd-prefix heuristic → attach,
+	//      (c) live row upgrade: a rendered non-terminal row becomes selectable
+	//          after a summary flip, without reopening the modal,
+	//      (d) 422 surfaced verbatim, no attach, picker open,
+	//      (e) poll timeout → note (supervisor log path) + highlighted row,
+	//      (f) agent offline → button disabled + reachability tooltip, no
 	//          PiPickerModal on click -----------------------------------------
-	console.log("== 34. terminal picker new-session via pi-ahp-tty spawn (201→poll→attach / 422 / timeout / agent-offline gate) ==");
+	console.log("== 34. terminal picker new-session via pi-ahp-tty spawn (201→exact-id poll→attach / sessionId-null fallback / live row upgrade / 422 / timeout / agent-offline gate) ==");
 	await (async () => {
 		await plugin.onunload();
 		await plugin.onload();
@@ -6814,7 +6818,7 @@ try {
 				const parsed = typeof opts.body === "string" ? JSON.parse(opts.body) : (opts.body ?? {});
 				termSpawnBodies34.push(parsed);
 				if (parsed.device === "Arthur" && parsed.cwd === "/home/slix") {
-					return { status: 201, body: { device: parsed.device, cwd: parsed.cwd, spawned: "pi-ahp-tty", detail: { log: spawnLog34, pid: 4242 } } };
+					return { status: 201, body: { device: parsed.device, cwd: parsed.cwd, spawned: "pi-ahp-tty", detail: { log: spawnLog34, pid: 4242, sessionId: "ahp-session:/tty-spawn-1" } } };
 				}
 				if (parsed.device === "ulysse" && parsed.cwd === "/tmp/newpi") {
 					return { status: 422, body: { error: "pi-ahp-tty not available on ulysse" } };
@@ -6830,9 +6834,9 @@ try {
 		assert(plugin.lightState.agentOnline === true, "(setup) the agent responder primed lightState.agentOnline true");
 
 		// (a) happy path: command → picker → 'New pi session…' → PiPickerModal →
-		//     'Use this directory' at the self root (/home/slix) → spawn 201 →
-		//     broker catalogue gains a terminal-bearing session for that cwd →
-		//     poll attaches + closes both pickers.
+		//     'Use this directory' at the self root (/home/slix) → spawn 201 with
+		//     detail.sessionId → poll attaches the EXACT resource (whose cwd does
+		//     NOT match the chosen one) + closes both pickers.
 		t4Cmd34?.callback?.();
 		await sleep(250);
 		const pickA34 = StubModal.opened[StubModal.opened.length - 1];
@@ -6846,12 +6850,14 @@ try {
 		const piPickA34 = StubModal.opened[StubModal.opened.length - 1];
 		assert(!!piPickA34 && piPickA34.titleEl.textContent === "Arthur — choose working directory",
 			"(a) 'New pi session…' opens the PiPickerModal pinned to the last-used device (Arthur)");
-		// arm the broker catalogue: a terminal-bearing session for /home/slix.
+		// arm the broker catalogue: the EXACT session the 201's detail.sessionId
+		// names — with a workingDirectory that does NOT match the chosen cwd (the
+		// exact-resource poll must attach WITHOUT any cwd-prefix help).
 		ws28.createdSessions.length = 0;
 		ws28.createdCwds.length = 0;
 		ws28.createdProviders.length = 0;
 		ws28.createdSessions.push("ahp-session:/tty-spawn-1");
-		ws28.createdCwds.push("/home/slix");
+		ws28.createdCwds.push("/var/elsewhere");
 		ws28.createdProviders.push("pi");
 		ws28.ttySpawn = true;
 		findButton(piPickA34.contentEl, "Use this directory")?.handlers.get("click")[0]?.();
@@ -6866,12 +6872,78 @@ try {
 			"(a) openTerminal bound the polled terminal-bearing session id (xterm + adapter live)");
 		assert(ws28.subscribeCalls.includes("ahp-terminal:/tty-spawn-1"),
 			"(a) the attach subscribed ahp-terminal:/tty-spawn-1 on the shared socket");
+		assert(ws28.createdSessions[0] === "ahp-session:/tty-spawn-1"
+			&& ws28.createdCwds[0] === "/var/elsewhere"
+			&& termSpawnBodies34[0]?.cwd === "/home/slix",
+			"(a) the armed catalogue row's workingDirectory (/var/elsewhere) does NOT match the chosen cwd (/home/slix) — yet the exact-resource poll attached it, so the poll requires NO cwd match");
 		ws28.ttySpawn = false;
 
-		// (b) 422 surfaced verbatim: direct-opts modal, mock openPicker calls
-		//     onChoose directly + spawn rejects with the server's 422 error.
+		// (b) sessionId-null fallback (older agent / async mint): the poll falls
+		//     back to the cwd-prefix heuristic — a terminal-bearing row UNDER the
+		//     chosen cwd attaches even though the 201 carried no exact id.
+		const rowsB34 = [{ resource: "ahp-session:/fallback-1", title: "fallback session", provider: "pi",
+			workingDirectory: "/home/slix/deep", hostOnline: true, terminalMode: "external", hostAgentId: "host-1" }];
 		let picksB34 = 0;
+		let pickedB34 = null;
 		const modalB34 = new bundle.TerminalPickerModal(app, {
+			loadSessions: async () => rowsB34.slice(),
+			newSession: {
+				gate: () => null,
+				openPicker: (onChoose) => { onChoose("Arthur", "/home/slix"); },
+				spawn: async () => ({ device: "Arthur", cwd: "/home/slix", spawned: "pi-ahp-tty", detail: { log: spawnLog34, pid: 77, sessionId: null } }),
+				poll: { intervalMs: 50, timeoutMs: 1500 },
+			},
+			onPick: (id) => { picksB34++; pickedB34 = id; },
+		});
+		modalB34.open();
+		await sleep(80);
+		findButton(modalB34.contentEl, "New pi session")?.handlers.get("click")[0]?.();
+		await sleep(500);
+		assert(picksB34 === 1 && pickedB34 === "fallback-1",
+			`(b) sessionId null → the cwd-prefix heuristic picks the terminal row under /home/slix (got ${pickedB34})`);
+		assert(modalB34._closed === true, "(b) the fallback poll CLOSES the picker");
+
+		// (c) live row upgrade: a rendered NON-terminal row becomes selectable
+		//     when its summary flips (root/sessionSummaryChanged → onCatalogue
+		//     → watchSessions → repaint) — WITHOUT reopening the modal.
+		ws28.createdSessions.length = 0;
+		ws28.createdCwds.length = 0;
+		ws28.createdProviders.length = 0;
+		ws28.createdSessions.push("ahp-session:/late-tty");
+		ws28.createdCwds.push("/tmp/late3");
+		ws28.createdProviders.push("pi");
+		ws28.ttySpawn = false; // not registered yet → the row renders disabled
+		t4Cmd34?.callback?.();
+		await sleep(400); // the background re-page commits the created row
+		const pickC34 = StubModal.opened[StubModal.opened.length - 1];
+		const rowPreC34 = findByClass(pickC34.contentEl, "arthur-terminal-row")
+			.find((r) => r.getAttribute("data-terminal-session") === "ahp-session:/late-tty");
+		assert(!!rowPreC34, "(c) the not-yet-registered session renders a row");
+		assert(!!rowPreC34 && rowPreC34.hasClass("arthur-terminal-row--disabled")
+			&& (rowPreC34.handlers.get("click") ?? []).length === 0,
+			"(c) before registration the row renders DISABLED (no terminal channel, no click wiring)");
+		ws28.instances[ws28.instances.length - 1].push("root/sessionSummaryChanged",
+			{ channel: "ahp-root://", session: "ahp-session:/late-tty",
+				changes: { hostOnline: true, terminalMode: "external", hostAgentId: "host-1" } });
+		await sleep(300);
+		const rowPostC34 = findByClass(pickC34.contentEl, "arthur-terminal-row")
+			.find((r) => r.getAttribute("data-terminal-session") === "ahp-session:/late-tty");
+		assert(!!rowPostC34 && !rowPostC34.hasClass("arthur-terminal-row--disabled")
+			&& rowPostC34.attributes.get("role") === "button"
+			&& (rowPostC34.handlers.get("click") ?? []).length === 1,
+			"(c) the summary flip makes the ALREADY-RENDERED row selectable without reopening the modal");
+		assert(pickC34._closed !== true, "(c) the modal stayed open through the live upgrade");
+		rowPostC34?.handlers.get("click")[0]?.();
+		await sleep(250);
+		assert(pickC34._closed === true, "(c) clicking the upgraded row attaches + closes the picker");
+		const leafC34 = app.workspace.getLeavesOfType(T4TYPE34).find((l) => l.view?.boundSessionId === "late-tty");
+		assert(!!leafC34 && leafC34.view?.terminal != null && leafC34.view?.adapter?.attached === true,
+			"(c) openTerminal bound the live-upgraded session id (xterm + adapter live)");
+
+		// (d) 422 surfaced verbatim: direct-opts modal, mock openPicker calls
+		//     onChoose directly + spawn rejects with the server's 422 error.
+		let picksD34 = 0;
+		const modalD34 = new bundle.TerminalPickerModal(app, {
 			loadSessions: async () => [],
 			newSession: {
 				gate: () => null,
@@ -6879,71 +6951,72 @@ try {
 				spawn: async () => { throw new Error("pi-ahp-tty not available on ulysse"); },
 				poll: { intervalMs: 50, timeoutMs: 250 },
 			},
-			onPick: () => { picksB34++; },
+			onPick: () => { picksD34++; },
 		});
-		modalB34.open();
+		modalD34.open();
 		await sleep(80);
-		findButton(modalB34.contentEl, "New pi session")?.handlers.get("click")[0]?.();
+		findButton(modalD34.contentEl, "New pi session")?.handlers.get("click")[0]?.();
 		await sleep(300);
-		assert(modalB34._closed !== true, "(b) a 422 spawn leaves the picker OPEN");
-		assert(picksB34 === 0, "(b) onPick (→ openTerminal) NEVER fired on 422");
-		assert(allText(modalB34.contentEl).includes("pi-ahp-tty not available on ulysse"),
-			"(b) the server's 422 error message is surfaced VERBATIM in the modal");
-		modalB34.close();
+		assert(modalD34._closed !== true, "(d) a 422 spawn leaves the picker OPEN");
+		assert(picksD34 === 0, "(d) onPick (→ openTerminal) NEVER fired on 422");
+		assert(allText(modalD34.contentEl).includes("pi-ahp-tty not available on ulysse"),
+			"(d) the server's 422 error message is surfaced VERBATIM in the modal");
+		modalD34.close();
 
-		// (c) poll timeout (direct-opts modal, fast poll pacing): the dir row
+		// (e) poll timeout (direct-opts modal, fast poll pacing; the spawn detail
+		//     carries NO sessionId key — the older-agent shape): the dir row
 		//     matching the cwd stays HIGHLIGHTED with a note naming the supervisor
 		//     log path, the picker stays open, and onPick never fires.
-		const rowsC34 = [{ resource: "ahp-session:/pending", title: "pending session", provider: "pi", workingDirectory: "/tmp/late" }];
-		let picksC34 = 0;
-		const modalC34 = new bundle.TerminalPickerModal(app, {
-			loadSessions: async () => rowsC34.slice(),
+		const rowsE34 = [{ resource: "ahp-session:/pending", title: "pending session", provider: "pi", workingDirectory: "/tmp/late" }];
+		let picksE34 = 0;
+		const modalE34 = new bundle.TerminalPickerModal(app, {
+			loadSessions: async () => rowsE34.slice(),
 			newSession: {
 				gate: () => null,
 				openPicker: (onChoose) => { onChoose("Arthur", "/tmp/late"); },
 				spawn: async () => ({ device: "Arthur", cwd: "/tmp/late", spawned: "pi-ahp-tty", detail: { log: spawnLog34, pid: 99 } }),
 				poll: { intervalMs: 50, timeoutMs: 250 },
 			},
-			onPick: () => { picksC34++; },
+			onPick: () => { picksE34++; },
 		});
-		modalC34.open();
+		modalE34.open();
 		await sleep(80);
-		findButton(modalC34.contentEl, "New pi session")?.handlers.get("click")[0]?.();
+		findButton(modalE34.contentEl, "New pi session")?.handlers.get("click")[0]?.();
 		await sleep(800); // > the 250ms poll budget → bounded timeout
-		assert(modalC34._closed !== true, "(c) a poll timeout leaves the picker OPEN");
-		assert(picksC34 === 0, "(c) onPick (→ openTerminal) NEVER fired on timeout");
-		const lateRowC34 = findByClass(modalC34.contentEl, "arthur-terminal-row")
+		assert(modalE34._closed !== true, "(e) a poll timeout leaves the picker OPEN");
+		assert(picksE34 === 0, "(e) onPick (→ openTerminal) NEVER fired on timeout");
+		const lateRowE34 = findByClass(modalE34.contentEl, "arthur-terminal-row")
 			.find((r) => r.getAttribute("data-terminal-session") === "ahp-session:/pending");
-		assert(!!lateRowC34 && lateRowC34.hasClass("arthur-terminal-row--new"),
-			"(c) the cwd-matching row renders HIGHLIGHTED after the timeout");
-		assert(allText(modalC34.contentEl).includes("isn't registered yet"),
-			"(c) the timeout note says the terminal channel isn't registered yet");
-		assert(allText(modalC34.contentEl).includes(spawnLog34),
-			"(c) the timeout note mentions the supervisor log path (detail.log)");
-		modalC34.close();
+		assert(!!lateRowE34 && lateRowE34.hasClass("arthur-terminal-row--new"),
+			"(e) the cwd-matching row renders HIGHLIGHTED after the timeout");
+		assert(allText(modalE34.contentEl).includes("isn't registered yet"),
+			"(e) the timeout note says the terminal channel isn't registered yet");
+		assert(allText(modalE34.contentEl).includes(spawnLog34),
+			"(e) the timeout note mentions the supervisor log path (detail.log)");
+		modalE34.close();
 
-		// (d) agent offline → the action renders DISABLED with the reachability
+		// (f) agent offline → the action renders DISABLED with the reachability
 		//     tooltip, and clicking it opens NO PiPickerModal (gate re-checked
 		//     on click → openPicker never called).
 		httpResponder = null; // agent offline
 		plugin.clients?.lightPoller.pollNow();
 		await sleep(400);
-		assert(plugin.lightState.agentOnline === false, "(d) the agent-offline poll flipped lightState.agentOnline false");
-		const piModalsBeforeD34 = StubModal.opened.filter((m) => /— choose working directory$/.test(m.titleEl.textContent ?? "")).length;
+		assert(plugin.lightState.agentOnline === false, "(f) the agent-offline poll flipped lightState.agentOnline false");
+		const piModalsBeforeF34 = StubModal.opened.filter((m) => /— choose working directory$/.test(m.titleEl.textContent ?? "")).length;
 		t4Cmd34?.callback?.();
 		await sleep(250);
-		const pickD34 = StubModal.opened[StubModal.opened.length - 1];
-		const btnD34 = findButton(pickD34.contentEl, "New pi session");
-		assert(!!btnD34 && btnD34.disabled === true,
-			"(d) agent offline → the 'New pi session…' action renders DISABLED");
-		assert(String(btnD34?.attributes.get("title") ?? "").includes("arthur agent"),
-			"(d) the disabled action's tooltip names the arthur-agent reachability requirement");
-		btnD34?.handlers.get("click")[0]?.(); // stub clicks ignore `disabled` — the handler re-gates
+		const pickF34 = StubModal.opened[StubModal.opened.length - 1];
+		const btnF34 = findButton(pickF34.contentEl, "New pi session");
+		assert(!!btnF34 && btnF34.disabled === true,
+			"(f) agent offline → the 'New pi session…' action renders DISABLED");
+		assert(String(btnF34?.attributes.get("title") ?? "").includes("arthur agent"),
+			"(f) the disabled action's tooltip names the arthur-agent reachability requirement");
+		btnF34?.handlers.get("click")[0]?.(); // stub clicks ignore `disabled` — the handler re-gates
 		await sleep(150);
-		const piModalsAfterD34 = StubModal.opened.filter((m) => /— choose working directory$/.test(m.titleEl.textContent ?? "")).length;
-		assert(piModalsAfterD34 === piModalsBeforeD34,
-			"(d) clicking the disabled (agent-offline) action opens NO PiPickerModal");
-		pickD34.close();
+		const piModalsAfterF34 = StubModal.opened.filter((m) => /— choose working directory$/.test(m.titleEl.textContent ?? "")).length;
+		assert(piModalsAfterF34 === piModalsBeforeF34,
+			"(f) clicking the disabled (agent-offline) action opens NO PiPickerModal");
+		pickF34.close();
 
 		// reset for the cleanup section
 		plugin.settings.ahpEnableControl = false;
@@ -6970,4 +7043,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / ahp-phaseT1-mock-terminal-adapter-wire+self-echo+detach-watermark+reconnect-cursor+controller+setting-gating / pi-terminal-view-register+lazy-xterm-construct+attach-wire+input-relay+close-dispose+channel-cleanup / pi-terminal-manager-multi-instance+shared-ws+3-leaves+routing+no-leakage+partial+full-teardown / pi-terminal-picker-catalogue-filter+pathA-disabled+stable-id-dedup+select-wiring+spawn-state-machine / pi-terminal-picker-resilience-retry-failed-load+refresh-failure-catalogue-fallback / pi-terminal-picker-new-session-gate+create-poll-attach+timeout+progressive-rendering all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / ahp-phaseT1-mock-terminal-adapter-wire+self-echo+detach-watermark+reconnect-cursor+controller+setting-gating / pi-terminal-view-register+lazy-xterm-construct+attach-wire+input-relay+close-dispose+channel-cleanup / pi-terminal-manager-multi-instance+shared-ws+3-leaves+routing+no-leakage+partial+full-teardown / pi-terminal-picker-catalogue-filter+pathA-disabled+stable-id-dedup+select-wiring+spawn-state-machine / pi-terminal-picker-resilience-retry-failed-load+refresh-failure-catalogue-fallback / pi-terminal-picker-new-session-gate+exact-id-poll+sessionid-null-fallback+live-row-upgrade+create-poll-attach+timeout+progressive-rendering all clean");
