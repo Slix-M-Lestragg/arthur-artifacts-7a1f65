@@ -26,16 +26,21 @@
  * `watchSessions` streams later pages + listing errors into the open modal,
  * `onPick` routes the selection back into the manager.
  *
- * FEATURE 1 ("New pi session…"): an always-visible top action gated by the
- * SAME control surface ahp-view's create-session row uses (the
- * `ahpEnableControl` setting AND the live controller role — re-checked on
- * every paint AND on click, so a disabled render can never leak a create).
- * The flow reveals a cwd prompt, calls the shared client's `createSession`
- * (client-minted ahp-session:/ URI, provider 'pi'), then re-catalogues on a
- * bounded poll until the new summary carries a registered terminal channel —
- * success attaches via `onPick` and closes; a timeout keeps the picker open
- * with the new row highlighted and a note (attach later). Rejections render
- * as one inline error line — never a thrown stack or Notice spam.
+ * FEATURE 1 ("New pi session…"): an always-visible top action gated by
+ * arthur-agent reachability (the spawn goes through the agent's v0.8.2
+ * POST /api/pi/terminal-sessions endpoint, NOT the AHP broker — so the gate
+ * is the companion service being reachable, re-checked on every paint AND on
+ * click, so a disabled render can never leak a spawn). Clicking it opens the
+ * EXISTING PiPickerModal (device + fuzzy directory picker from pi-picker.ts);
+ * the chosen {device, cwd} drives `agent.piTerminalSpawn`, then a bounded
+ * poll of the AHP catalogue waits for a terminal-bearing session whose
+ * workingDirectory matches the chosen cwd (most recent wins) — success
+ * attaches via `onPick` and closes; a timeout keeps the picker open with the
+ * matching row highlighted and a note mentioning the supervisor log path
+ * (attach later). Spawn rejections (422/503/502) surface the server's error
+ * message verbatim as one inline error line — never a thrown stack or Notice.
+ * The AHP-broker createSession path is intentionally NOT used here: it cannot
+ * produce a terminal channel (only pi-ahp-tty registers terminal/registerExternal).
  *
  * FEATURE 2 (progressive rendering): rows paint as the shared client's paged
  * catalogue commits (the initial load plus live `watchSessions` ticks); a
@@ -45,6 +50,7 @@
 import { App, Modal } from "obsidian";
 
 import type { AhpSessionSummary } from "../api/ahp";
+import type { AgentPiTerminalSpawnDetail, AgentPiTerminalSpawnResult } from "../api/agent";
 import { el, truncate } from "../util";
 
 /** Tooltip on a session WITHOUT a terminal channel — the Path A/Path B split
@@ -53,25 +59,38 @@ import { el, truncate } from "../util";
 export const NO_TERMINAL_TOOLTIP =
 	"no terminal channel — this session has no ahp-terminal:/<id> registration to attach. A tmux (Path A) spawn never registers one; run `pi-ahp-tty --working-dir <cwd>` on the device (Path B) to make it terminal-capable.";
 
-/** Tooltip on the DISABLED 'New pi session…' action while control is off —
- *  the same gate ahp-view's create-session control renders behind. */
+/** Tooltip on the DISABLED 'New pi session…' action while the arthur agent
+ *  is unreachable — the spawn goes through the agent's v0.8.2
+ *  POST /api/pi/terminal-sessions endpoint (NOT the AHP broker), so the
+ *  gate is agent reachability, not the AHP controller role / ahpEnableControl. */
 export const NEW_SESSION_DISABLED_TOOLTIP =
-	"creating a pi session requires the AHP control setting AND a live controller connection to the broker";
+	"creating a pi terminal session requires the arthur agent to be reachable (the companion service on the server)";
 
-/** 'New pi session…' poll pacing: re-catalogue every second, give the host
- *  device up to 15s to register `ahp-terminal:/<id>` (pi-ahp-tty Path B). */
+/** 'New pi session…' poll pacing: re-catalogue every second, give the
+ *  pi-ahp-tty supervisor up to 20s to create the session and register its
+ *  `ahp-terminal:/<id>` channel (the plugin polls the AHP catalogue for a
+ *  terminal-bearing session whose workingDirectory matches the chosen cwd). */
 const NEW_SESSION_POLL_INTERVAL_MS = 1_000;
-const NEW_SESSION_POLL_TIMEOUT_MS = 15_000;
+const NEW_SESSION_POLL_TIMEOUT_MS = 20_000;
 
-/** The 'New pi session…' control surface — main.ts wires it to the shared
- *  AhpClient; absent, the action renders disabled. */
+/** The 'New pi session…' control surface — main.ts wires it to the
+ *  arthur agent (v0.8.2 terminal-spawn endpoint) + the PiPickerModal device
+ *  + directory picker; absent, the action renders disabled. */
 export interface TerminalPickerNewSession {
 	/** Live gate: null = creation is available right now, else the tooltip
-	 *  rendered on the disabled action. Re-checked on every paint AND click. */
+	 *  rendered on the disabled action. Re-checked on every paint AND click.
+	 *  Gated on arthur-agent reachability (NOT AHP controller role). */
 	gate(): string | null;
-	/** Create a hosted pi session in `cwd` — resolves the client-minted
-	 *  ahp-session:/<id> URI (only ever called after gate() returned null). */
-	create(cwd: string): Promise<string>;
+	/** Open the device + directory picker (PiPickerModal). The callback fires
+	 *  with the chosen {device, cwd} — the picker then spawns the pi-ahp-tty
+	 *  supervisor via `spawn` and polls the AHP catalogue for the new
+	 *  terminal-bearing session. Only ever called after gate() returned null. */
+	openPicker(onChoose: (device: string, cwd: string) => void): void;
+	/** Spawn the pi-ahp-tty terminal supervisor on the device (POST
+	 *  /api/pi/terminal-sessions). Resolves the 201 result (its `detail.log`
+	 *  path is surfaced on a poll timeout); rejects with the server's error
+	 *  message on 4xx/5xx (422/503/502 — surfaced verbatim in the modal). */
+	spawn(device: string, cwd: string): Promise<AgentPiTerminalSpawnResult>;
 	/** Poll pacing override (smoke): re-catalogue interval / total budget. */
 	poll?: { intervalMs?: number; timeoutMs?: number };
 }
@@ -168,14 +187,18 @@ export class TerminalPickerModal extends Modal {
 	private rows: AhpSessionSummary[] = [];
 	/** Stale-response guard for the async load chain (pi-picker pattern). */
 	private seq = 0;
-	// 'New pi session…' flow state (FEATURE 1).
-	private createOpen = false;
+	// 'New pi session…' flow state (FEATURE 1) — the spawn+poll runs detached
+	// after the PiPickerModal closes on a 201; the terminal picker stays open
+	// showing 'waiting for terminal…' until the catalogue gains a
+	// terminal-bearing session for the chosen cwd (attach + close) or the
+	// poll budget runs out (note + highlighted row).
 	private createBusy: "create" | "wait" | null = null;
 	private createError: string | null = null;
 	private createNote: string | null = null;
-	private cwdDraft = "";
-	/** Resource whose row renders highlighted after a poll timeout. */
-	private newResource: string | null = null;
+	/** The pi-ahp-tty spawn detail (carries the log path surfaced on timeout). */
+	private spawnDetail: AgentPiTerminalSpawnDetail | null = null;
+	/** cwd whose matching row renders highlighted after a poll timeout. */
+	private newCwd: string | null = null;
 	/** Last built control-row state signature (focus-preserving rebuild guard:
 	 *  live catalogue ticks repaint without stealing the cwd input's focus). */
 	private controlSig = "";
@@ -280,7 +303,7 @@ export class TerminalPickerModal extends Modal {
 	/** Full repaint (small modal — rebuild is cheap and keeps state linear).
 	 *  The top control row repaints on every tick too, but only rebuilds its
 	 *  DOM when its visible state changed (sig guard) so a live catalogue
-	 *  tick never steals focus from the cwd input mid-typing. */
+	 *  tick never disturbs the control row mid-flow. */
 	private paint(): void {
 		if (!this.bodyEl) return; // onOpen not finished yet (early refresh tick)
 		this.paintControl();
@@ -313,7 +336,9 @@ export class TerminalPickerModal extends Modal {
 	}
 
 	/** The top control row: the always-visible 'New pi session…' action plus
-	 *  the cwd prompt / state lines once the flow starts (FEATURE 1). */
+	 *  the spawn/poll status lines (FEATURE 1). Clicking the action opens the
+	 *  PiPickerModal (device + directory picker); the cwd no longer lives in
+	 *  this modal. */
 	private paintControl(): void {
 		const control = this.controlEl;
 		if (!control) return;
@@ -321,7 +346,6 @@ export class TerminalPickerModal extends Modal {
 		const deny = ns ? ns.gate() : NEW_SESSION_DISABLED_TOOLTIP;
 		const sig = JSON.stringify([
 			deny !== null,
-			this.createOpen,
 			this.createBusy,
 			this.createError,
 			this.createNote,
@@ -332,107 +356,68 @@ export class TerminalPickerModal extends Modal {
 		const btn = document.createElement("button");
 		btn.addClass("arthur-btn", "arthur-btn--tiny", "arthur-terminal-new-btn");
 		btn.textContent = "New pi session…";
-		btn.setAttribute("title", deny ?? "Create a new pi session in a working directory (controller connection)");
+		btn.setAttribute("title", deny ?? "Create a new pi terminal session (spawns pi-ahp-tty on a device and attaches its terminal)");
 		btn.disabled = deny !== null || this.createBusy !== null;
 		btn.addEventListener("click", () => {
-			// Re-evaluate the LIVE gate on click: roles/settings can change under
+			// Re-evaluate the LIVE gate on click: the agent can go offline under
 			// a stale render, and a disabled action must leak NOTHING.
 			const cur = this.opts.newSession;
 			if (!cur || cur.gate() !== null || this.createBusy !== null) return;
-			this.createOpen = true;
 			this.createError = null;
+			this.createNote = null;
 			this.paint();
+			cur.openPicker((device, cwd) => {
+				void this.runSpawn(cur, device, cwd);
+			});
 		});
 		control.append(btn);
-		if (!this.createOpen && this.createBusy === null && this.createError === null && this.createNote === null) {
-			return;
-		}
-		const row = control.createEl("div", { cls: "arthur-terminal-new-row" });
-		const cwd = document.createElement("input");
-		cwd.type = "text";
-		cwd.addClass("arthur-terminal-new-cwd");
-		cwd.placeholder = "working directory for the new pi session";
-		cwd.setAttribute("title", "The new pi session starts in this directory");
-		cwd.value = this.cwdDraft;
-		if (this.createBusy !== null || deny !== null) cwd.disabled = true;
-		cwd.addEventListener("input", () => {
-			this.cwdDraft = cwd.value ?? "";
-		});
-		cwd.addEventListener("keydown", (e: KeyboardEvent) => {
-			if (e.key === "Enter") {
-				e.preventDefault();
-				this.onCreate();
-			}
-		});
-		row.append(cwd);
-		const create = document.createElement("button");
-		create.addClass("arthur-btn", "arthur-btn--tiny", "arthur-terminal-new-create");
-		create.textContent = "create";
-		create.setAttribute("title", "Create the pi session, then attach its terminal once the channel registers");
-		create.disabled = this.createBusy !== null || deny !== null;
-		create.addEventListener("click", () => this.onCreate());
-		row.append(create);
-		control.append(row);
-		if (this.createBusy === "create") control.append(note("creating session…"));
+		if (this.createBusy === "create") control.append(note("spawning pi-ahp-tty…"));
 		else if (this.createBusy === "wait") control.append(note("waiting for terminal…"));
 		if (this.createError) control.append(note(this.createError, "arthur-terminal-note--err"));
 		else if (this.createNote) control.append(note(this.createNote));
 	}
 
-	/** Create the session from the cwd prompt: gate + draft re-checked here
-	 *  (never trust a stale render), then the bounded terminal poll runs. */
-	private onCreate(): void {
-		const ns = this.opts.newSession;
-		if (!ns || this.createBusy !== null) return;
-		if (ns.gate() !== null) return; // control vanished (roles/setting) — send NOTHING
-		const cwd = this.cwdDraft.trim();
-		if (!cwd) {
-			this.createError = "enter a working directory to create a pi session";
-			this.paint();
-			return;
-		}
-		this.createOpen = true;
-		void this.runCreate(ns, cwd);
-	}
-
-	/** One create → poll cycle: surface rejections as a single inline error
-	 *  line (never a thrown stack / Notice), then re-catalogue on a bounded
-	 *  poll until the new summary carries a registered terminal channel. */
-	private async runCreate(ns: TerminalPickerNewSession, cwd: string): Promise<void> {
+	/** One spawn → poll cycle: spawn the pi-ahp-tty supervisor (awaited — the
+	 *  PiPickerModal closes once this resolves), then poll the AHP catalogue
+	 *  detached for a terminal-bearing session whose workingDirectory matches
+	 *  the chosen cwd. Spawn rejections (422/503/502) surface verbatim as a
+	 *  single inline error line (never a thrown stack / Notice). */
+	private async runSpawn(
+		ns: TerminalPickerNewSession,
+		device: string,
+		cwd: string,
+	): Promise<void> {
 		this.createBusy = "create";
 		this.createError = null;
 		this.createNote = null;
-		this.newResource = null;
+		this.newCwd = null;
+		this.spawnDetail = null;
 		this.paint();
-		let channel: string;
 		try {
-			channel = String((await ns.create(cwd)) ?? "").trim();
+			const res = await ns.spawn(device, cwd);
+			this.spawnDetail = res.detail ?? null;
 		} catch (err) {
 			this.createBusy = null;
 			this.createError = truncate(
-				err instanceof Error ? err.message : String(err ?? "createSession failed"),
+				err instanceof Error ? err.message : String(err ?? "pi-ahp-tty spawn failed"),
 				200,
 			);
 			this.paint();
-			return;
+			return; // error inlined; the dir picker already closed on resolve
 		}
-		if (!channel) {
-			this.createBusy = null;
-			this.createError = "createSession returned no session resource";
-			this.paint();
-			return;
-		}
-		if (!this.bodyEl) return; // closed while the create was in flight
+		if (!this.bodyEl) return; // closed while the spawn was in flight
 		this.createBusy = "wait";
 		this.paint();
-		await this.pollNewSession(ns, channel);
+		await this.pollNewSession(ns, cwd);
 	}
 
-	/** Bounded poll for the new session's terminal channel: re-catalogue on an
-	 *  interval until `hasTerminalChannel` holds for the minted resource (→
-	 *  attach + close), or the budget runs out (→ picker stays open, row
-	 *  highlighted, note shown — the user can retry / attach later). */
-	private async pollNewSession(ns: TerminalPickerNewSession, channel: string): Promise<void> {
+	/** Bounded poll for the new terminal-bearing session: re-catalogue on an
+	 *  interval until a session whose workingDirectory matches the chosen cwd
+	 *  prefix AND carries a registered terminal channel appears (most recent
+	 *  wins → attach + close), or the budget runs out (→ picker stays open,
+	 *  the cwd-matching row highlighted, note shown mentioning the supervisor
+	 *  log path — the user can retry / attach later). */
+	private async pollNewSession(ns: TerminalPickerNewSession, cwd: string): Promise<void> {
 		const interval = ns.poll?.intervalMs ?? NEW_SESSION_POLL_INTERVAL_MS;
 		const timeout = ns.poll?.timeoutMs ?? NEW_SESSION_POLL_TIMEOUT_MS;
 		const deadline = Date.now() + timeout;
@@ -440,14 +425,13 @@ export class TerminalPickerModal extends Modal {
 			try {
 				await this.refresh(); // re-catalogue — a listing failure just shows its note
 			} catch {
-				// keep polling: the host device may register the channel later
+				// keep polling: the supervisor may register the channel later
 			}
 			if (!this.bodyEl) return; // modal closed mid-poll — never attach late
-			const found = this.rows.find((r) => r.resource === channel);
-			if (found && hasTerminalChannel(found)) {
+			const found = this.matchingTerminalSession(cwd);
+			if (found) {
 				this.createBusy = null;
-				this.createOpen = false;
-				this.opts.onPick(sessionIdFromResource(channel), (found.title ?? "").trim());
+				this.opts.onPick(sessionIdFromResource(found.resource), (found.title ?? "").trim());
 				this.close();
 				return;
 			}
@@ -455,12 +439,42 @@ export class TerminalPickerModal extends Modal {
 			await new Promise<void>((resolve) => window.setTimeout(resolve, interval));
 			if (!this.bodyEl) return;
 		}
-		// Timeout: keep the picker open with the new row highlighted + a note.
+		// Timeout: keep the picker open with the cwd-matching row highlighted +
+		// a note mentioning the supervisor's log path (from the spawn detail).
 		this.createBusy = null;
-		this.newResource = channel;
-		this.createNote =
-			"session created — its terminal channel isn't registered yet; the row stays highlighted, attach later once pi-ahp-tty registers it";
+		this.newCwd = cwd;
+		const log = this.spawnDetail?.log;
+		this.createNote = log
+			? `pi-ahp-tty launched — its terminal channel isn't registered yet; the matching row stays highlighted, attach later once it registers (supervisor log: ${log})`
+			: "pi-ahp-tty launched — its terminal channel isn't registered yet; the matching row stays highlighted, attach later once it registers";
 		this.paint();
+	}
+
+	/** True when `wd` is the chosen cwd or a path beneath it (prefix match with
+	 *  a trailing-slash boundary so '/home/slix' does NOT match '/home/slixar'). */
+	private static cwdMatches(wd: string | undefined, cwd: string): boolean {
+		const w = (wd ?? "").trim();
+		if (!w) return false;
+		if (w === cwd) return true;
+		const prefix = cwd.endsWith("/") ? cwd : cwd + "/";
+		return w.startsWith(prefix);
+	}
+
+	/** The terminal-bearing session whose workingDirectory matches the chosen
+	 *  cwd prefix — most recent (by modifiedAt) wins. null when none match. */
+	private matchingTerminalSession(cwd: string): AhpSessionSummary | null {
+		const matches = this.rows.filter(
+			(s) => hasTerminalChannel(s) && TerminalPickerModal.cwdMatches(s.workingDirectory, cwd),
+		);
+		if (matches.length === 0) return null;
+		if (matches.length === 1) return matches[0];
+		matches.sort((a, b) => {
+			const ma = (a.modifiedAt ?? "").trim();
+			const mb = (b.modifiedAt ?? "").trim();
+			if (ma === mb) return 0;
+			return ma < mb ? 1 : -1; // descending — most recent first
+		});
+		return matches[0];
 	}
 
 	/** One catalogue row: title + working directory; terminal-capable rows are
@@ -468,7 +482,7 @@ export class TerminalPickerModal extends Modal {
 	private rowFor(summary: AhpSessionSummary): HTMLElement {
 		const title = titleOf(summary);
 		const hasTerminal = hasTerminalChannel(summary);
-		const isNew = summary.resource === this.newResource;
+		const isNew = this.newCwd != null && TerminalPickerModal.cwdMatches(summary.workingDirectory, this.newCwd);
 		const row = el("div", {
 			cls: `arthur-terminal-row${hasTerminal ? "" : " arthur-terminal-row--disabled"}${
 				isNew ? " arthur-terminal-row--new" : ""
@@ -505,11 +519,10 @@ export class TerminalPickerModal extends Modal {
 		// New-session flow reset: bodyEl null already stops an in-flight poll
 		// from attaching late (its next step checks before acting).
 		this.createBusy = null;
-		this.createOpen = false;
 		this.createError = null;
 		this.createNote = null;
-		this.newResource = null;
-		this.cwdDraft = "";
+		this.newCwd = null;
+		this.spawnDetail = null;
 	}
 }
 

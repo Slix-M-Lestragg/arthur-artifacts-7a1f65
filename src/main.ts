@@ -12,10 +12,12 @@ import { obsidianRequester } from "./api/transport";
 import { Poller } from "./poller";
 import { DETAIL_INTERVAL_MS } from "./util";
 import { ArthurDashboardView, VIEW_TYPE_ARTHUR_DASHBOARD } from "./ui/dashboard-view";
-import { AhpView, VIEW_TYPE_AHP, controlSurface } from "./ui/ahp-view";
+import { AhpView, VIEW_TYPE_AHP } from "./ui/ahp-view";
 import { TerminalView, VIEW_TYPE_PI_TERMINAL } from "./ui/terminal-view";
 import { TerminalManager } from "./ui/terminal-manager";
 import { TerminalPickerModal, NEW_SESSION_DISABLED_TOOLTIP } from "./ui/terminal-picker";
+import { PiPickerModal, piDeviceRoot } from "./ui/pi-picker";
+import type { AgentPiDeviceEntry, AgentPiTerminalSpawnResult } from "./api/agent";
 import type { AhpSessionSummary } from "./api/ahp";
 import { StatusBarPill, StatusBarState } from "./ui/status-bar";
 import { fmtBytes, fmtGigCompact, normalizeHost } from "./util";
@@ -950,7 +952,8 @@ export default class ArthurPlugin extends Plugin {
 			watchSessions: (onUpdate) => this.watchTerminalSessions(onUpdate),
 			newSession: {
 				gate: () => this.newSessionGate(),
-				create: (cwd) => this.createTerminalSession(cwd),
+				openPicker: (onChoose) => this.openPiTerminalDirPicker(onChoose),
+				spawn: (device, cwd) => this.spawnPiTerminal(device, cwd),
 			},
 			onPick: (sessionId, title) => {
 				void this.activatePiTerminal({ sessionId, title });
@@ -994,24 +997,70 @@ export default class ArthurPlugin extends Plugin {
 		});
 	}
 
-	/** Gate for the picker's 'New pi session…' action — the SAME control
-	 *  surface ahp-view's create-session row renders behind (the
-	 *  `ahpEnableControl` setting AND the live controller role), plus a live
-	 *  connection: null = available, else the disabled-action tooltip. */
+	/** Gate for the picker's 'New pi session…' action — arthur-agent
+	 *  reachability (the spawn goes through the agent's v0.8.2
+	 *  POST /api/pi/terminal-sessions endpoint, NOT the AHP broker). null =
+	 *  available, else the disabled-action tooltip. The light poll's
+	 *  `agentOnline` flag is the plugin-wide reachability signal. */
 	private newSessionGate(): string | null {
-		const client = this.terminalManager?.sharedClient ?? null;
-		if (!client || client.currentState !== "ready") return NEW_SESSION_DISABLED_TOOLTIP;
-		return controlSurface(client, this.settings.ahpEnableControl) ? null : NEW_SESSION_DISABLED_TOOLTIP;
+		if (!this.clients?.agent) return NEW_SESSION_DISABLED_TOOLTIP;
+		if (this.lightState.agentOnline !== true) return NEW_SESSION_DISABLED_TOOLTIP;
+		return null;
 	}
 
-	/** Create a hosted pi session through the shared client — `createSession`
-	 *  mints the ahp-session:/ URI client-side and always asks for provider
-	 *  'pi' (the hosted backend). Any rejection (client-side role gate or
-	 *  broker error) propagates to the picker's inline error line. */
-	private async createTerminalSession(cwd: string): Promise<string> {
-		const client = this.terminalManager?.sharedClient;
-		if (!client) throw new Error("terminal manager unavailable (plugin unloading)");
-		return await client.createSession(cwd);
+	/** Open the device + directory picker (PiPickerModal) for the spawn flow.
+	 *  The device is chosen with the SAME heuristic the service-bar pi button
+	 *  uses (last-used → only online → first online); the picker's confirm
+	 *  hands the chosen {device, cwd} back to the terminal picker's spawn+poll
+	 *  cycle via `onChoose`. */
+	private openPiTerminalDirPicker(onChoose: (device: string, cwd: string) => void): void {
+		const agent = this.clients?.agent;
+		if (!agent) return;
+		void this.pickPiDeviceAndOpenDirPicker(agent, onChoose);
+	}
+
+	/** Fetch the agent's device list and open the PiPickerModal pinned to the
+	 *  chosen device (mirrors dashboard-view's piOpenNewSession heuristic). */
+	private async pickPiDeviceAndOpenDirPicker(
+		agent: ArthurAgentClient,
+		onChoose: (device: string, cwd: string) => void,
+	): Promise<void> {
+		let entries: AgentPiDeviceEntry[];
+		try {
+			const res = await agent.piDevices();
+			entries = Array.isArray(res.devices) ? res.devices : [];
+		} catch {
+			return; // agent went offline between the gate and the click — abort
+		}
+		const online = entries.filter((d) => d.online || d.reachable);
+		const last = (this.settings.lastUsedPiDevice ?? "").trim();
+		let dev = last ? online.find((d) => d.id === last) ?? null : null;
+		if (!dev && online.length > 0) dev = online[0]; // deterministic: agent order
+		if (!dev) return; // no online device — the gate would have caught a fully-offline agent
+		const device = { id: dev.id, hostname: dev.hostname, self: dev.self, ssh: dev.ssh };
+		new PiPickerModal(this.app, {
+			device,
+			initialPath: piDeviceRoot(device),
+			fetchDirs: (deviceId, path) => agent.piDirs(deviceId, path),
+			onUse: async (deviceId, cwd) => {
+				this.settings.lastUsedPiDevice = deviceId;
+				void this.saveSettings();
+				// runSpawn awaits the SPAWN only (resolves here → the dir picker
+				// closes); the catalogue poll continues detached in the terminal
+				// picker until the terminal channel registers.
+				await onChoose(deviceId, cwd);
+			},
+		}).open();
+	}
+
+	/** POST /api/pi/terminal-sessions {device, cwd} via the arthur agent —
+	 *  launches the pi-ahp-tty supervisor. Rejects with a typed ArthurApiError
+	 *  carrying the server's error message on 4xx/5xx (422/503/502), surfaced
+	 *  verbatim in the terminal picker. */
+	private async spawnPiTerminal(device: string, cwd: string): Promise<AgentPiTerminalSpawnResult> {
+		const agent = this.clients?.agent;
+		if (!agent) throw new Error("arthur agent unavailable (plugin unloading)");
+		return agent.piTerminalSpawn(device, cwd);
 	}
 
 	/** For docs/debugging: human summary of the last light tick. */
