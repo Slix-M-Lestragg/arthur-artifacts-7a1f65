@@ -20,5 +20,9 @@
 		"obsidian": "^1.5.0",
 		"tslib": "1.14.1",
 		"typescript": "^5.4.0"
+	},
+	"dependencies": {
+		"@xterm/addon-fit": "^0.11.0",
+		"@xterm/xterm": "^6.0.0"
 	}
 }

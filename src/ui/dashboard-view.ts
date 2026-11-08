@@ -1355,6 +1355,11 @@ export class ArthurDashboardView extends ItemView {
 			openAhp: () => {
 				void this.plugin.activateAhpView();
 			},
+			// T4 bridge: the panel's terminal button opens the fuzzy terminal
+			// picker (same opts-callback contract as openAhp).
+			openTerminal: () => {
+				this.plugin.openTerminalPicker();
+			},
 		});
 
 		// 'GPUs' sub-container below (column headers + header-click collapse unchanged).

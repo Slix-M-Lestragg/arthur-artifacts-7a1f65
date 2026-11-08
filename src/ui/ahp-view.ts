@@ -48,6 +48,7 @@ import {
 } from "../api/ahp";
 import { el, fmtDuration, truncate } from "../util";
 import { fmtTokens, fmtUsd } from "./pi-panel";
+import { hasTerminalChannel, sessionIdFromResource } from "./terminal-picker";
 
 export const VIEW_TYPE_AHP = "arthur-ahp";
 
@@ -318,7 +319,14 @@ export class AhpView extends ItemView {
 		}
 		const shown = sessions.slice(0, MAX_CARDS);
 		for (const summary of shown) {
-			const card = sessionCard(summary, client?.selected === summary.resource);
+			const card = sessionCard(summary, client?.selected === summary.resource, (target) => {
+				// The terminal action routes through the shared TerminalManager:
+				// re-attach to a session already open focuses its leaf (T3 dedup).
+				void this.plugin.terminalManager?.openTerminal(
+					sessionIdFromResource(target.resource),
+					(target.title ?? "").trim(),
+				);
+			});
 			card.addEventListener("click", () => {
 				// The captured resource is the click target forever: a live repaint
 				// can never silently change which session a visible click hits.
@@ -780,8 +788,9 @@ export class AhpView extends ItemView {
 	}
 }
 
-/** Human text of a client state for the state line. */
-function stateText(state: string): string {
+/** Human text of a client state for the state line (shared with the
+ *  pi terminal view — same connecting/live/error/closed vocabulary). */
+export function stateText(state: string): string {
 	switch (state) {
 		case "connecting":
 			return "connecting…";
@@ -800,8 +809,16 @@ function stateText(state: string): string {
 
 /** One catalogue row: title, meta line (model · provider · tokens · cost ·
  *  subagent chats · waiting-on), parent/paused cues, modified age. Clickable
- *  when the client is live; `selected` marks the detail-subscribed session. */
-function sessionCard(summary: AhpSessionSummary, selected = false): HTMLElement {
+ *  when the client is live; `selected` marks the detail-subscribed session.
+ *  `onTerminal` (optional) adds the T4 terminal action — rendered ONLY when
+ *  the summary indicates a registered terminal channel (`hostOnline` /
+ *  `terminalMode` / `hostAgentId`, §3/T4); the click stopPropagates so it
+ *  never also selects the card. */
+function sessionCard(
+	summary: AhpSessionSummary,
+	selected = false,
+	onTerminal?: (summary: AhpSessionSummary) => void,
+): HTMLElement {
 	const title =
 		(summary.title ?? "").trim() ||
 		(summary.workingDirectory ?? "").trim().split("/").filter(Boolean).pop() ||
@@ -859,6 +876,18 @@ function sessionCard(summary: AhpSessionSummary, selected = false): HTMLElement 
 		);
 	}
 	if (badges.children.length > 0) card.append(badges);
+	if (onTerminal && hasTerminalChannel(summary)) {
+		const termBtn = el("button", {
+			cls: "arthur-btn arthur-btn--tiny arthur-ahp-terminal-open",
+			text: "terminal",
+			attrs: { title: "Attach the pi terminal to this session (registered channel)" },
+		});
+		termBtn.addEventListener("click", (e) => {
+			e?.stopPropagation?.(); // never also select the card
+			onTerminal(summary);
+		});
+		card.append(termBtn);
+	}
 	return card;
 }
 

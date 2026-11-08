@@ -88,6 +88,9 @@ export interface PiPanelOpts {
 	/** Optional 'pi sessions (AHP)' affordance (slice 1 wiring: dashboard-view
 	 *  bridges it to the plugin's open-AHP command/view activation path). */
 	openAhp?: () => void;
+	/** Optional 'pi terminal' affordance (T4 wiring: dashboard-view bridges it
+	 *  to the plugin's fuzzy terminal-picker activation path). */
+	openTerminal?: () => void;
 }
 
 export interface PiPanelData {
@@ -571,6 +574,19 @@ export class PiPanel {
 				opts.openAhp?.();
 			});
 			this.rootEl.append(ahpBtn);
+		}
+		// T4 terminal affordance (same opts-bag contract as openAhp): opens the
+		// fuzzy picker over registered terminals; the panel owns no AHP client.
+		if (opts.openTerminal) {
+			const termBtn = document.createElement("button");
+			termBtn.addClass("arthur-btn", "arthur-btn--tiny", "arthur-pi-terminal-open");
+			termBtn.textContent = "pi terminal";
+			termBtn.setAttribute("title", "Open the fuzzy pi-terminal picker (attach to a registered terminal)");
+			termBtn.addEventListener("click", (e) => {
+				e?.stopPropagation?.();
+				opts.openTerminal?.();
+			});
+			this.rootEl.append(termBtn);
 		}
 		this.warningEl = el("p", {
 			cls: "arthur-note arthur-pi-warning",

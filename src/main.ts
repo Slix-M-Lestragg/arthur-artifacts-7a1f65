@@ -13,6 +13,10 @@ import { Poller } from "./poller";
 import { DETAIL_INTERVAL_MS } from "./util";
 import { ArthurDashboardView, VIEW_TYPE_ARTHUR_DASHBOARD } from "./ui/dashboard-view";
 import { AhpView, VIEW_TYPE_AHP } from "./ui/ahp-view";
+import { TerminalView, VIEW_TYPE_PI_TERMINAL } from "./ui/terminal-view";
+import { TerminalManager } from "./ui/terminal-manager";
+import { TerminalPickerModal } from "./ui/terminal-picker";
+import type { AhpSessionSummary } from "./api/ahp";
 import { StatusBarPill, StatusBarState } from "./ui/status-bar";
 import { fmtBytes, fmtGigCompact, normalizeHost } from "./util";
 
@@ -37,6 +41,17 @@ export type { PiSessionState, PiDeviceSessionGroups } from "./ui/pi-panel";
 // lifecycle against the compiled main.js export surface).
 export { VIEW_TYPE_AHP, AhpView } from "./ui/ahp-view";
 export { AhpClient, ahpWsUrl, AHP_PROTOCOL_VERSION } from "./api/ahp";
+export { AhpTerminalAdapter, AHP_TERMINAL_CHANNEL_PREFIX } from "./api/ahp-terminal";
+export type { AhpTerminalCallbacks, AhpTerminalEnabledGate } from "./api/ahp-terminal";
+// pi terminal view (T2 smoke): registration + lifecycle asserted against the
+// compiled main.js export surface. Not used at runtime beyond registerView.
+export { VIEW_TYPE_PI_TERMINAL, TerminalView } from "./ui/terminal-view";
+// pi terminal manager (T3 smoke): shared-client + multi-leaf routing asserted
+// against the compiled main.js export surface.
+export { TerminalManager } from "./ui/terminal-manager";
+// fuzzy terminal picker (T4 smoke): modal + catalogue helpers asserted
+// against the compiled main.js export surface.
+export { TerminalPickerModal, hasTerminalChannel, sessionIdFromResource, fuzzyMatch, NO_TERMINAL_TOOLTIP } from "./ui/terminal-picker";
 
 /** One server profile — host + which ports the services live on + tokens. */
 export interface ServerProfile {
@@ -110,6 +125,17 @@ export interface ArthurSettings {
 	 *  roles[]/anonymous connections. Opting in assumes a token that grants
 	 *  control, which is stored PLAINTEXT in data.json like the read token. */
 	ahpEnableControl: boolean;
+	/** AHP terminal input relay (`terminal/input` + `terminal/resized` over an
+	 *  `ahp-terminal:/<id>` channel — PI-TERMINAL-PORT-PLAN §3/T6). DEFAULT OFF.
+	 *  Independent of `ahpEnableControl`: a user may want chat control but not
+	 *  terminal control, or vice-versa. Even when on, keystrokes/resize only
+	 *  leave when the live connection holds the controller role (AND'd,
+	 *  fail-safe both ways — a viewer connection sends ZERO input frames). The
+	 *  plugin never spawns a pty; it only renders + relays over the existing
+	 *  authenticated WS. WARNING: terminal input sends your keystrokes to the
+	 *  remote pi session and requires a controller-role token (stored PLAINTEXT
+	 *  in this vault's data.json). */
+	ahpEnableTerminal: boolean;
 }
 
 /** Clients built from the active profile — rebuilt when settings change. */
@@ -155,6 +181,7 @@ const DEFAULT_SETTINGS: ArthurSettings = {
 	ahpEndpoint: "100.75.249.5:4500",
 	ahpToken: "",
 	ahpEnableControl: false,
+	ahpEnableTerminal: false,
 };
 
 /** Parse a bounded positive int; invalid/missing → fallback. */
@@ -376,6 +403,17 @@ class ArthurSettingTab extends PluginSettingTab {
 					settings.ahpEnableControl = value;
 					await this.plugin.saveSettings();
 				}),
+		);
+		new Setting(containerEl)
+			.setName("AHP terminal input")
+			.setDesc(
+				"WARNING: Terminal input sends your keystrokes to the remote pi session over an ahp-terminal:/ channel. Default OFF = read-only terminal rendering. When on, keystrokes/resize still leave ONLY if the negotiated connection holds the broker's controller role (AND'd, fail-safe both ways — a viewer connection sends nothing). The plugin never spawns a pty; it only renders + relays over the existing authenticated WS. Requires a controller-role token, stored PLAINTEXT in this vault's data.json.",
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(settings.ahpEnableTerminal).onChange(async (value) => {
+					settings.ahpEnableTerminal = value;
+					await this.plugin.saveSettings();
+				}),
 			);
 
 		const s = this.plugin.settings;
@@ -421,6 +459,11 @@ export default class ArthurPlugin extends Plugin {
 	/** Live dashboard view instance, if its leaf is open (set/cleared by the view). */
 	dashboardView: ArthurDashboardView | null = null;
 
+	/** Pi terminal InstanceManager-lite (T3): owns the shared AHP WS client +
+	 *  routes one terminal leaf per session. Created in onload, torn down in
+	 *  onunload; null only around the unload boundary. */
+	terminalManager: TerminalManager | null = null;
+
 	/** Cached comfy clients for dynamically discovered instance ports. */
 	private readonly comfyClientCache = new Map<number, ComfyUIClient>();
 
@@ -451,6 +494,12 @@ export default class ArthurPlugin extends Plugin {
 	async onload(): Promise<void> {
 		await this.loadSettings();
 
+		// Pi terminal manager (T3): owns the shared AHP WS client + multi-leaf
+		// routing. Created BEFORE registerView/rebuildRuntime so the view can
+		// reach it at attach time and rebuildRuntime's settings-change rebuild
+		// finds it.
+		this.terminalManager = new TerminalManager(this);
+
 		// Dashboard view factory.
 		this.registerView(
 			VIEW_TYPE_ARTHUR_DASHBOARD,
@@ -465,6 +514,19 @@ export default class ArthurPlugin extends Plugin {
 			name: "Open pi sessions (AHP)",
 			callback: () => {
 				void this.activateAhpView();
+			},
+		});
+
+		// pi terminal view factory + open command (T2/T4): the leaf may carry a
+		// target session via view state (openTerminal/activatePiTerminal); the
+		// bare no-session command now opens the fuzzy picker, and a picked
+		// session routes through the manager into a bound leaf.
+		this.registerView(VIEW_TYPE_PI_TERMINAL, (leaf) => new TerminalView(leaf, this));
+		this.addCommand({
+			id: "open-pi-terminal",
+			name: "Open pi terminal",
+			callback: () => {
+				this.openTerminalPicker();
 			},
 		});
 
@@ -497,6 +559,13 @@ export default class ArthurPlugin extends Plugin {
 		this.clients?.lightPoller.stop();
 		this.clients?.detailPoller.stop();
 		this.rebuildClients();
+
+		// A settings change (endpoint/token/etc.) rebuilds the shared terminal
+		// client too — mirrors ahp-view's Refresh (close + lazily re-create from
+		// CURRENT settings on the next terminal attach). No-op until a client
+		// exists; live terminal leaves see the closed client and re-attach on
+		// the next open.
+		this.terminalManager?.rebuildClient();
 
 		const clients = this.clients;
 		if (!clients) return;
@@ -746,6 +815,14 @@ export default class ArthurPlugin extends Plugin {
 		// Detach the AHP view leaves too → AhpView.onClose closes its WS client
 		// (teardown incl. the fire-and-forget unsubscribe notification).
 		this.app.workspace.detachLeavesOfType(VIEW_TYPE_AHP);
+		// Terminal leaves → TerminalView.onClose detaches the terminal channel
+		// (unsubscribe + watermark drop) and disposes xterm; the shared client is
+		// NOT closed by the view (the manager owns it). Close all leaves first so
+		// each adapter sends its channel unsubscribe on the live socket, THEN
+		// close the shared client.
+		this.app.workspace.detachLeavesOfType(VIEW_TYPE_PI_TERMINAL);
+		this.terminalManager?.closeAll();
+		this.terminalManager = null;
 
 		// Stop poller timers (registerInterval above is the backstop).
 		this.clients?.lightPoller.stop();
@@ -791,6 +868,7 @@ export default class ArthurPlugin extends Plugin {
 			// Off unless explicitly true — legacy data.json without the key stays
 			// read-only.
 			ahpEnableControl: data?.ahpEnableControl === true,
+			ahpEnableTerminal: data?.ahpEnableTerminal === true,
 		};
 	}
 
@@ -840,6 +918,55 @@ export default class ArthurPlugin extends Plugin {
 			active: true,
 		});
 		workspace.revealLeaf(leaf);
+	}
+
+	/**
+	 * Open (or reveal) the pi terminal leaf — re-pointed through the
+	 * TerminalManager (T3) so multiple concurrent terminals share ONE AHP
+	 * WebSocket (one socket, many `ahp-terminal:/<id>` channel subs): a leaf
+	 * already bound to the given sessionId is focused, else an unbound
+	 * (no-arg) terminal leaf is repurposed, else a new main-area leaf is
+	 * created. `state` optionally carries `{sessionId, title}` through the
+	 * leaf's view state; with no session (the command path) the view renders
+	 * its 'no session attached' state line — the T4 picker instead fills it.
+	 */
+	async activatePiTerminal(state?: Record<string, string>): Promise<void> {
+		if (!this.terminalManager) return;
+		const sessionId = typeof state?.sessionId === "string" ? state.sessionId : undefined;
+		const title = typeof state?.title === "string" ? state.title : undefined;
+		await this.terminalManager.openTerminal(sessionId, title);
+	}
+
+	/**
+	 * Open the fuzzy terminal picker (T4) — the no-session entry point of the
+	 * 'Open pi terminal' command, the pi-panel opts-callback, and any caller
+	 * that wants a session chosen first. Picking a terminal-capable row routes
+	 * through `activatePiTerminal` → `TerminalManager.openTerminal` (re-attach
+	 * to a session already open focuses its leaf).
+	 */
+	openTerminalPicker(): void {
+		const modal = new TerminalPickerModal(this.app, {
+			loadSessions: () => this.loadTerminalSessions(),
+			onPick: (sessionId, title) => {
+				void this.activatePiTerminal({ sessionId, title });
+			},
+		});
+		modal.open();
+	}
+
+	/**
+	 * The picker's backing load: acquire the TerminalManager's LAZY shared
+	 * client (created + connected on first use — first terminal attach OR
+	 * first picker open) and re-page `listSessions` so a just-spawned session
+	 * shows up. Rejects with a displayable error while the broker is not live.
+	 */
+	async loadTerminalSessions(): Promise<AhpSessionSummary[]> {
+		const manager = this.terminalManager;
+		if (!manager) throw new Error("terminal manager unavailable (plugin unloading)");
+		const client = await manager.acquireClient();
+		if (client.currentState !== "ready") throw new Error(client.error ?? "AHP not connected");
+		await client.refresh();
+		return client.catalogue();
 	}
 
 	/** For docs/debugging: human summary of the last light tick. */
