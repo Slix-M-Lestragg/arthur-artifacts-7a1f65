@@ -94,6 +94,21 @@ pi-sync feed of v0.7.0:
                  tmux session the user can attach to; rpc-pipe fallback —
                  long-lived `pi --mode rpc` with stdin held open), 201 +
                  audit log, 502 on spawn failure
+
+(v0.8.2, Bearer-gated) pi AHP terminal spawning — launch `pi-ahp-tty` (the
+AHP terminal-registering pi supervisor) detached on a target device so the
+Obsidian plugin can offer "New pi session → live terminal":
+
+  POST /api/pi/terminal-sessions {device, cwd} → launch pi-ahp-tty with
+                 `--working-dir <cwd>` (resume semantics, NOT --fresh),
+                 detached (nohup+background, survives the HTTP call + agent
+                 restarts), log under the device/user's
+                 ~/.pi/agent/extensions/pi-ahp-client/logs/. Reuses the
+                 v0.8.0 device registry/ssh mapping + cwd allowlist + audit
+                 log. 422 {error: "pi-ahp-tty not available on <device>"}
+                 when the tool is missing on the device (nothing spawned),
+                 502 on launch failure, 503 offline, 400 bad device/cwd.
+                 A GET listing was SKIPPED (not trivial — see README).
 """
 
 import json
@@ -112,7 +127,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-AGENT_VERSION = "0.8.1"
+AGENT_VERSION = "0.8.2"
 
 CONFIG_PATH = os.environ.get("ARTHUR_AGENT_CONFIG", "/etc/arthur-agent/config.json")
 TOKEN_PATH = os.environ.get("ARTHUR_AGENT_TOKEN_FILE", "/etc/arthur-agent/token")
@@ -1326,6 +1341,14 @@ SSH_TARGET_RE = re.compile(r"^[A-Za-z0-9._@-]{1,253}$")  # user@host token only
 PI_LOGIN_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 PI_SPAWN_PREFIX = "pi-arthur-"      # tmux session name prefix
 PI_RPC_SHELL = "tail -f /dev/null | pi --mode rpc"  # long-lived RPC fallback
+# v0.8.2: pi-ahp-tty (AHP terminal-registering pi supervisor) launch path.
+# The built CLI lives at $HOME/<rel> on each device; the supervisor itself
+# sets AHP_LIVE_MODE/AHP_SESSION_ID_OVERRIDE on the child pi PTY, so the
+# launcher only needs to provide --working-dir (default = resume semantics,
+# NOT --fresh). Logs land in $HOME/<log-rel>/pi-ahp-tty-<UTC>.log.
+PI_AHP_TTY_REL = ".pi/agent/extensions/pi-ahp-client/dist/bin/pi-ahp-tty.js"
+PI_AHP_LOG_REL = ".pi/agent/extensions/pi-ahp-client/logs"
+PI_AHP_TTY_TIMEOUT = 20    # spawn/availability ssh subprocess timeout (s)
 
 
 def pi_repo():
@@ -1805,6 +1828,148 @@ def pi_spawn_session(dev_id, spec, cwd, ip):
                  "hint": hint}
 
 
+# v0.8.2: pi-ahp-tty launch — AHP terminal-registering pi supervisor.
+# Reuses the v0.8.0 device registry / ssh mapping + allowlist + audit log.
+# The supervisor is launched DETACHED (nohup + background, survives the
+# ssh/http call and agent restarts via KillMode=process) with a per-launch
+# log file under the device/user's pi-ahp-client logs dir. Default semantics
+# are resume (--working-dir only), NOT --fresh.
+
+def _pi_ahp_home(spec):
+    """Home dir for the user the supervisor should run as on this device:
+    the config-declared local `user` for self devices, the login shell's $HOME
+    on remote (probed over ssh). Returns (home, error) — home is None for
+    remote devices (we use $HOME inside the remote command instead)."""
+    if spec["self"]:
+        user = spec.get("user")
+        if user:
+            try:
+                return pwd.getpwnam(user).pw_dir, None
+            except KeyError:
+                return None, "no such user %r" % user
+        return os.path.expanduser("~"), None
+    return None, None
+
+
+def _pi_ahp_tty_available(spec):
+    """(available, error) — is pi-ahp-tty runnable on this device? self: the
+    built CLI file exists under the user's home; remote: ssh probe that the
+    file exists under $HOME AND `node` resolves on the non-interactive PATH
+    (the spawn uses the same PATH context, so a node that only loads under a
+    login/interactive shell counts as unavailable — honest, not magic)."""
+    if spec["self"]:
+        home, err = _pi_ahp_home(spec)
+        if err:
+            return False, err
+        tty = os.path.join(home, PI_AHP_TTY_REL)
+        if not os.path.isfile(tty):
+            return False, "pi-ahp-tty not installed at %s" % tty
+        return True, None
+    target = spec["ssh"]
+    cmd = ('test -f "$HOME/%s" && command -v node >/dev/null 2>&1'
+           % PI_AHP_TTY_REL)
+    rc, _out, err = run_cmd(["ssh"] + SSH_BATCH_OPTS + [target, cmd],
+                            timeout=PI_AHP_TTY_TIMEOUT)
+    if rc == 0:
+        return True, None
+    return False, "pi-ahp-tty/node missing on remote (ssh: %s)" % \
+        ((err or "exit %d" % rc)[:150])
+
+
+def _pi_ahp_tty_spawn_self(spec, cwd, stamp):
+    """(detail, error) — local (self-device) detached launch of pi-ahp-tty
+    as the config-declared user. nohup + background reparents the supervisor
+    to init when the launcher shell exits (it survives the HTTP call and
+    agent restarts); `$!` captures the supervisor PID. Returns a detail dict
+    {log, pid} on success."""
+    home, err = _pi_ahp_home(spec)
+    if err:
+        return None, err
+    tty = os.path.join(home, PI_AHP_TTY_REL)
+    logdir = os.path.join(home, PI_AHP_LOG_REL)
+    logfile = os.path.join(logdir, "pi-ahp-tty-%s.log" % stamp)
+    cmd = ("mkdir -p %s && nohup node %s --working-dir %s > %s 2>&1 & echo $!"
+           % (shlex.quote(logdir), shlex.quote(tty),
+              shlex.quote(cwd), shlex.quote(logfile)))
+    rc, out, err = _pi_run_local(spec.get("user"), cmd,
+                                 timeout=PI_AHP_TTY_TIMEOUT)
+    if rc != 0:
+        return None, (err or "launcher exited %d" % rc)
+    pid = None
+    if out.strip():
+        last = out.strip().splitlines()[-1].strip()
+        if last.isdigit():
+            pid = int(last)
+    return {"log": logfile, "pid": pid}, None
+
+
+def _pi_ahp_tty_spawn_remote(spec, cwd, stamp):
+    """(detail, error) — remote detached launch over ssh. Same nohup+background
+    pattern; $HOME-relative paths so the remote login shell resolves them.
+    Returns a detail dict {log (relative to remote $HOME), pid}."""
+    target = spec["ssh"]
+    logfile_rel = "%s/pi-ahp-tty-%s.log" % (PI_AHP_LOG_REL, stamp)
+    cmd = ('mkdir -p "$HOME/%s" && nohup node "$HOME/%s" --working-dir %s '
+           '> "$HOME/%s" 2>&1 & echo $!'
+           % (shlex.quote(PI_AHP_LOG_REL), shlex.quote(PI_AHP_TTY_REL),
+              shlex.quote(cwd), shlex.quote(logfile_rel)))
+    rc, out, err = run_cmd(["ssh"] + SSH_BATCH_OPTS + [target, cmd],
+                           timeout=PI_AHP_TTY_TIMEOUT)
+    if rc != 0:
+        return None, (err or "ssh exited %d" % rc)
+    pid = None
+    if out.strip():
+        last = out.strip().splitlines()[-1].strip()
+        if last.isdigit():
+            pid = int(last)
+    return {"log": "~/" + logfile_rel, "pid": pid}, None
+
+
+def pi_spawn_terminal_session(dev_id, spec, cwd, ip):
+    """(code, body) for POST /api/pi/terminal-sessions — launch pi-ahp-tty
+    (the AHP terminal-registering pi supervisor) detached on one device with
+    `--working-dir <cwd>` (resume semantics). Reuses the v0.8.0 reachability
+    gate + cwd allowlist/existence checks; adds a pi-ahp-tty availability
+    probe (422 when the tool is missing on the device — nothing is spawned).
+    Every launch and every refusal is audited like the v0.8.0 spawn."""
+    if not pi_device_reachable(spec):
+        audit("pi", dev_id, "terminal-spawn", "refused-unreachable", ip)
+        return 503, {"error": "device offline"}
+    # cwd existence on the target device (400, mirroring session spawn)
+    if spec["self"]:
+        exists = os.path.isdir(cwd)
+        miss = None
+    else:
+        rc, _out, miss = run_cmd(["ssh"] + SSH_BATCH_OPTS +
+                                 [spec["ssh"],
+                                  "test -d %s" % shlex.quote(cwd)],
+                                 timeout=SSH_TIMEOUT)
+        exists = rc == 0
+    if not exists:
+        detail = " (ssh: %s)" % miss[:150] if not spec["self"] and miss else ""
+        audit("pi", dev_id, "terminal-spawn", "refused-no-cwd", ip)
+        return 400, {"error": "cwd %s does not exist on %s%s"
+                              % (cwd, dev_id, detail)}
+    # pi-ahp-tty availability on the target device (422 — do NOT spawn)
+    avail, avail_err = _pi_ahp_tty_available(spec)
+    if not avail:
+        audit("pi", dev_id, "terminal-spawn", "refused-no-pi-ahp-tty", ip)
+        return 422, {"error": "pi-ahp-tty not available on %s" % dev_id}
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    if spec["self"]:
+        detail, err = _pi_ahp_tty_spawn_self(spec, cwd, stamp)
+    else:
+        detail, err = _pi_ahp_tty_spawn_remote(spec, cwd, stamp)
+    if err is not None:
+        audit("pi", dev_id, "terminal-spawn",
+              "failed:%s" % err[:120].replace(":", ";"), ip)
+        return 502, {"error": "launch failed on %s: %s" % (dev_id, err[:200])}
+    audit("pi", dev_id, "terminal-spawn",
+          "spawned:pi-ahp-tty:%s" % (detail.get("pid") or stamp), ip)
+    return 201, {"device": dev_id, "cwd": cwd, "spawned": "pi-ahp-tty",
+                 "detail": detail}
+
+
 # --------------------------------------------------------------------------
 # HTTP layer
 # --------------------------------------------------------------------------
@@ -2108,6 +2273,26 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(400, {"error": msg})
             return self.respond(*pi_spawn_session(dev_id, spec, norm,
                                                   self.client_ip()))
+
+        m = re.match(r"^/api/pi/terminal-sessions$", path)
+        if m and verb == "POST":
+            try:
+                body = self.read_json_body()
+            except ValueError as exc:
+                return self.respond(400, {"error": str(exc)})
+            if not isinstance(body, dict):
+                return self.respond(400, {"error": "request body must be a "
+                                                  "JSON object"})
+            dev_id = body.get("device")
+            spec = _config["pi_devices"].get(dev_id) \
+                if isinstance(dev_id, str) else None
+            if spec is None:
+                return self.respond(400, {"error": "unknown device %r" % dev_id})
+            norm, msg = pi_path_check(body.get("cwd"), spec)
+            if msg:
+                return self.respond(400, {"error": msg})
+            return self.respond(*pi_spawn_terminal_session(dev_id, spec, norm,
+                                                            self.client_ip()))
 
         self.respond(404, {"error": "not found"})
 

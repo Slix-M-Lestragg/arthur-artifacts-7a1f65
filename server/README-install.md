@@ -1,10 +1,10 @@
-# arthur-agent — server install (one page)
+`arthur-agent` — server install (one page)
 
 `server/` holds the pieces that run on the arthur home server (the machine
 hosting ComfyUI + ai-toolkit), not the Obsidian plugin itself. The agent is
-at **v0.8.1** (GPU-aware spawning + pi session aggregation + the pi device
+at **v0.8.2** (GPU-aware spawning + pi session aggregation + the pi device
 registry / SSH dir listing / session spawn endpoints + unmanaged-instance
-visibility):
+visibility + pi-ahp-tty AHP terminal launch):
 
 ```json
 {"known": {"comfyui": {"0": null, "2": [1], "3": [0, 1]}}}
@@ -146,7 +146,7 @@ sudo install -m 644 comfy@.service comfy-dual.service arthur-agent.service \
 sudo systemctl daemon-reload
 sudo systemctl enable comfy-dual.service   # enabled but NOT started
 sudo systemctl restart arthur-agent
-curl -s http://127.0.0.1:8766/health   # → {"ok": true, "version": "0.8.1"}
+curl -s http://127.0.0.1:8766/health   # → {"ok": true, "version": "0.8.2"}
 ```
 
 Token lives in `/etc/arthur-agent/token` (root 0600) and `/etc/arthur-agent/env`
@@ -204,6 +204,70 @@ with fatal-config-error strictness like the services registry.
 | `probe_path` | HTTP path used for the liveness probe (default `/`) |
 | `num_gpus` | fallback GPU count if `nvidia-smi -L` fails |
 | `bind` / `port` | optional; `ARTHUR_AGENT_BIND` / `ARTHUR_AGENT_PORT` env win |
+
+---
+
+## pi AHP terminal spawn (v0.8.2)
+
+Launches `pi-ahp-tty` — the AHP terminal-registering pi supervisor (from the
+`pi-ahp-client` extension at `~/.pi/agent/extensions/pi-ahp-client`) —
+detached on a target device so the Obsidian plugin can offer
+"New pi session → live terminal". The supervisor connects to the AHP
+server, creates a session, registers an externally-fed terminal channel,
+and mirrors a local node-pty `pi` PTY to it. The agent only launches the
+supervisor; **the supervisor itself** sets `AHP_LIVE_MODE=true` and
+`AHP_SESSION_ID_OVERRIDE=<id>` on the child `pi` PTY (the launcher does
+not). The AHP server URL defaults to `ws://100.75.249.5:4500` (or the
+supervisor's `AHP_SERVER_URL` env if set) — the agent does not pass it.
+
+**Per-device prerequisite:** the built CLI must exist at
+`$HOME/.pi/agent/extensions/pi-ahp-client/dist/bin/pi-ahp-tty.js` on the
+target device AND `node` must resolve on the non-interactive PATH there
+(`self`: `~/.local/bin/node` is on the spawn PATH; remote: the ssh login
+shell's PATH). On `self` the spawn drops to the config-declared `user`;
+on remote devices the launch goes over the same BatchMode ssh mapping used
+by `POST /api/pi/sessions`. If the tool is missing on a device the endpoint
+responds **422** and spawns nothing.
+
+### POST /api/pi/terminal-sessions — `{device: string, cwd: string}`
+Launch `pi-ahp-tty` with `--working-dir <cwd>` (default **resume** semantics
+— the most recent pi session in `cwd` — NOT `--fresh`) detached (nohup +
+background; survives the HTTP call and agent restarts via `KillMode=process`)
+with stdout/stderr redirected to a per-launch log file under the
+device/user's `~/.pi/agent/extensions/pi-ahp-client/logs/pi-ahp-tty-<UTC>.log`.
+`cwd` is validated exactly like the v0.8.0 session spawn (absolute,
+allowlist-prefixed, no `..`) and its existence is checked on the target
+first. Every launch — and every refusal — lands in the audit log
+(`service: "pi"`, action `terminal-spawn`).
+
+`201` on success:
+
+```json
+{"device": "Arthur", "cwd": "/tmp",
+ "spawned": "pi-ahp-tty",
+ "detail": {"log": "/home/slix/.pi/agent/extensions/pi-ahp-client/logs/pi-ahp-tty-20261108T201500Z.log",
+             "pid": 123456}}
+```
+
+(`detail.log` is the absolute log path on `self` devices, `~/...`-relative on
+remote; `detail.pid` is the supervisor's PID when captured, else `null`.)
+
+Failures use the existing error shapes:
+- **400** `unknown device 'x'` (device not in `pi_devices`) / bad `cwd`
+  (not absolute / outside the allowlist / `..` segments) / `cwd` does not
+  exist on the device.
+- **401** unauthorized (missing/invalid bearer token).
+- **422** `{"error": "pi-ahp-tty not available on <device>"}` — the tool
+  is missing on the device; **nothing is spawned**.
+- **502** launch failed (ssh/launcher error preview).
+- **503** `device offline` (neither feed-fresh, `self`, nor ssh-reachable).
+
+### GET /api/pi/terminal-sessions — SKIPPED
+A listing endpoint was considered (recent launches from the audit log) but
+**skipped** — filtering the audit log for `terminal-spawn` entries with
+stable response shaping is not trivial, and the live AHP terminal channels
+are already observable through the `pi-ahp-client` tooling / broker. The
+plugin should drive lifecycle from the AHP side, not by polling this agent.
 
 ---
 
@@ -423,6 +487,37 @@ The pi user's session lands in their own `~/.pi/agent/sessions/--<cwd>--/`
 and the pi-sync feed picks it up within seconds — it shows under
 `sessionsTotal`/`sessionsActive` on `GET /api/pi/devices` like any other
 session.
+
+### POST /api/pi/terminal-sessions  — `{"device": "…", "cwd": "<abs>"}`  (v0.8.2)
+Launch `pi-ahp-tty` (the AHP terminal-registering pi supervisor) detached
+on the target device with `--working-dir <cwd>` (default **resume**
+semantics, NOT `--fresh`). Reuses the v0.8.0 device registry / ssh mapping,
+`cwd` allowlist + existence check (→ **400** / **503** exactly like
+`POST /api/pi/sessions`). Adds a **pi-ahp-tty availability probe** on the
+target (`self`: the built CLI file exists at
+`~/.pi/agent/extensions/pi-ahp-client/dist/bin/pi-ahp-tty.js`; remote: ssh
+`test -f "$HOME/.../pi-ahp-tty.js" && command -v node`) → **422**
+`{"error": "pi-ahp-tty not available on <device>"}` when the tool is
+missing, and **nothing is spawned**. The supervisor is launched with
+`nohup node <cli> --working-dir <cwd> > <logs>/pi-ahp-tty-<UTC>.log 2>&1 &`
+(detached — survives the HTTP call and agent restarts via `KillMode=process`);
+the supervisor itself sets `AHP_LIVE_MODE`/`AHP_SESSION_ID_OVERRIDE` on the
+child `pi` PTY. Every launch/refusal is audited (`service: "pi"`, action
+`terminal-spawn`).
+
+`201` on success:
+
+```json
+{"device": "Arthur", "cwd": "/tmp",
+ "spawned": "pi-ahp-tty",
+ "detail": {"log": "/home/slix/.pi/agent/extensions/pi-ahp-client/logs/pi-ahp-tty-20261108T201500Z.log",
+             "pid": 123456}}
+```
+
+Failures: **400** unknown device / bad or missing `cwd`; **422** tool
+missing on device; **502** launch failed (error preview); **503** device
+offline. A `GET /api/pi/terminal-sessions` listing was **skipped** (not
+trivial — see the v0.8.2 section above).
 
 Live GPU stats straight from `nvidia-smi --query-gpu=...` (5 s subprocess
 timeout):
@@ -673,3 +768,13 @@ same: `comfy-0`, `comfy-1`, `aitoolkit`).
   `NoNewPrivileges` stays on); the agent's own ssh key for remote targets
   lives at `/root/.ssh/id_ed25519` and target hosts authorize it explicitly.
   Every spawn/refusal is audited.
+- **pi-ahp-tty terminal spawn (v0.8.2).** Same v0.8.0 device/ssh/allowlist
+  scaffold — `cwd` is allowlist-validated and `shlex.quote()`-wrapped before
+  reaching the launcher shell; the only request-influenced subprocess
+  argument is `--working-dir <cwd>` (the CLI path is resolved from the
+  config-declared user's home, never from the request). Availability is
+  probed before anything is spawned (422, no-op, when the tool is absent).
+  The launched supervisor is detached (nohup + background) so it survives
+  the HTTP call and agent restarts; it runs as the config-declared local
+  `user` on `self` devices and over BatchMode ssh on remote ones. No new
+  deps; the audit log gains `terminal-spawn` entries.
