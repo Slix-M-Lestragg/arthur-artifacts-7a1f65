@@ -92,6 +92,8 @@ export type { LinkResolver } from "./ui/terminal-note";
 // @-file suggester): exported for smoke.
 export { rewriteContextLinks } from "./ui/link-rewrite";
 export { buildPasteSubmit, clampComposerHeight, PromptComposer, PASTE_START, PASTE_END, COMPOSER_MIN_HEIGHT, COMPOSER_MAX_HEIGHT_PCT, COMPOSER_DEFAULT_HEIGHT } from "./ui/prompt-composer";
+export { createNativePromptEditor } from "./ui/native-prompt-editor";
+export { ObsidianEditorSurface, TextareaEditorSurface } from "./ui/editor-surface";
 export type { ComposerHost, PromptComposerOpts, PiRowAction } from "./ui/prompt-composer";
 // Pull an unsubmitted stock-pi TUI prompt through xterm's screen buffer (no RPC).
 export { extractPendingInput, buildClearPendingInput, mergePulledPrompt } from "./ui/prompt-transfer";
@@ -219,7 +221,7 @@ export interface ArthurSettings {
 	/** Prompt composer max height as a PERCENT of the leaf's height
 	 *  (20–60, default 50 — the drag resizer clamps to this). */
 	piTerminalComposerMaxHeight: number;
-	/** Prompt composer textarea font size in px (10–32, default 16 — FIX D).
+	/** Prompt composer editor font size in px (10–32, default 16 — FIX D).
 	 *  Applied to NEW composers at construct time. */
 	promptFontSize: number;
 	/** SSH+tmux targets for re-attachable remote pi terminals. */
@@ -603,7 +605,7 @@ export class ArthurSettingTab extends PluginSettingTab {
 			);
 		new Setting(containerEl)
 			.setName("Prompt font size (px)")
-			.setDesc("Font size of the prompt composer's text (10–32, default 16). Applied to NEW terminal leaves; the full-width textarea auto-grows with content up to the composer max height.")
+			.setDesc("Font size of the prompt composer's text (10–32, default 16). Applied to NEW terminal leaves; the native Markdown editor auto-grows with content up to the composer max height.")
 			.addText((text) =>
 				text.setValue(String(s.promptFontSize)).onChange(async (value) => {
 					s.promptFontSize = clampInt(value, 16, 10, 32);

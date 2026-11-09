@@ -1,8 +1,8 @@
 /**
  * FileAtSuggester — inline `@`-file autocomplete for the pi prompt composer
  * (Wave 2), adapted from the reference plugin's
- * `views/suggest/FileAtSuggester.ts` + `utils/fileSearch.ts` for a plain
- * HTMLTextAreaElement surface.
+ * `views/suggest/FileAtSuggester.ts` + `utils/fileSearch.ts`. It runs on the
+ * native CodeMirror editor and the plain-textarea fallback through EditorSurface.
  *
  * Trigger: an `@` at a TOKEN BOUNDARY of the text before the cursor (start of
  * text or after a delimiter — space/tab/quote/'='), including an unclosed
@@ -21,6 +21,7 @@
  * fake tree with no real fs access; production defaults to `fs.readdirSync`.
  */
 import { TokenSuggester, type TokenSuggestion, type TokenSuggesterOptions } from "./token-suggester";
+import type { EditorSurface } from "./editor-surface";
 export { insertCompletion } from "./token-suggester";
 
 /** One completion item: `value` includes the leading `@` (+ trailing `/` for dirs). */
@@ -267,13 +268,13 @@ export interface FileAtSuggesterOptions extends TokenSuggesterOptions {
 
 /** Thin `@` driver over the shared token-suggester overlay. */
 export class FileAtSuggester extends TokenSuggester<FileAtSuggesterOptions> {
-	constructor(textarea: HTMLTextAreaElement, opts: FileAtSuggesterOptions) {
-		super(textarea, { ...opts, ariaLabel: "File completions" });
+	constructor(editor: EditorSurface, opts: FileAtSuggesterOptions) {
+		super(editor, { ...opts, ariaLabel: "File completions" });
 	}
 
 	protected getPrefix(): string | null {
-		const value = this.textarea.value ?? "";
-		const cursor = this.textarea.selectionStart ?? value.length;
+		const value = this.editor.getValue();
+		const cursor = this.editor.getSelection().start;
 		return extractAtPrefix(value.slice(0, cursor));
 	}
 

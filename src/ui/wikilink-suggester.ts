@@ -7,6 +7,7 @@
 import type { CachedMetadata, TFile } from "obsidian";
 import { fuzzyScore } from "./at-suggester";
 import { TokenSuggester, type TokenSuggestion, type TokenSuggesterOptions } from "./token-suggester";
+import type { EditorSurface } from "./editor-surface";
 
 export interface WikilinkVault {
 	getMarkdownFiles(): TFile[];
@@ -139,13 +140,13 @@ export function listWikilinkSuggestions(
 }
 
 export class WikilinkSuggester extends TokenSuggester<WikilinkSuggesterOptions> {
-	constructor(textarea: HTMLTextAreaElement, opts: WikilinkSuggesterOptions) {
-		super(textarea, { ...opts, ariaLabel: "Wikilink completions" });
+	constructor(editor: EditorSurface, opts: WikilinkSuggesterOptions) {
+		super(editor, { ...opts, ariaLabel: "Wikilink completions" });
 	}
 
 	protected getPrefix(): string | null {
-		const value = this.textarea.value ?? "";
-		const cursor = this.textarea.selectionStart ?? value.length;
+		const value = this.editor.getValue();
+		const cursor = this.editor.getSelection().start;
 		return extractWikilinkPrefix(value.slice(0, cursor));
 	}
 

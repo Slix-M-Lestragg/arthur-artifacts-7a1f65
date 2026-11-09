@@ -1,9 +1,9 @@
 /**
  * PromptComposer — the Wave 2 docked prompt panel at the BOTTOM of a pi
- * terminal leaf (the reference's `embedded` surface, minus its
- * popout/docked-window modes and its MarkdownView/CodeMirror machinery — a
- * plain multiline textarea here, since our submit path is bracketed paste,
- * not the APC marker that needs the obsidian-bridge pi extension).
+ * terminal leaf (the reference's `embedded` surface). Production mounts a real
+ * Obsidian MarkdownView/CodeMirror editor, so the native `[[` suggester (aliases,
+ * headings, blocks, ranking and creation) is Obsidian's own. A textarea remains
+ * only as the headless/failure fallback; submit always uses bracketed paste.
  *
  * Contents (top → bottom, Wave 6a user layout): drag resizer → ONE slim
  * BUTTON STRIP (ROW 1 — the reference-ported composer controls: send /
@@ -11,20 +11,10 @@
  * `[[wikilink]]` token / word-char count, as a right-aligned icon-only
  * cluster, then the count/flash/hide tail) → ONE BODY REGION (ROW 2a — a
  * dedicated div, the panel's single flex-growing child between the strip
- * and the panel bottom) → ONE big multiline TEXTAREA (ROW 2b — the body's
- * sole child, filling it edge to edge BOTH axes). The textarea itself
- * carries ZERO inline layout styles — the PANEL owns height (drag + clamp
+ * and the panel bottom) → ONE native Markdown editor (or fallback TEXTAREA)
+ * filling the body edge to edge BOTH axes. The PANEL owns height (drag + clamp
  * + autoGrow all write the panel), the body region owns the flex fill, and
- * no theme `textarea` rule can pinch the input's size. The panel height
- * adapts when the view is
- * resized: the drag resizer (or the auto-grow clamp) sets the panel
- * height, the view's ResizeObserver → scheduleFit chain calls refit() so
- * the height re-clamps to the current leaf, and the flex column keeps the
- * textarea filling whatever space the panel has (min-height:0 discipline
- * throughout). `@`-file and `[[wikilink]]` suggesters ride the textarea through
- * the shared hover-overlay controller (at-suggester.ts /
- * wikilink-suggester.ts), and the `square-slash` button opens the LOCAL command picker
- * (pi-commands.ts). A transient "sent" flash sits on the strip.
+ * min-height:0 discipline keeps the editor filling whatever space it has.
  *
  * Submit semantics — BRACKETED PASTE (reference PtyClient
  * `submitPromptViaPaste`): the composer hands the raw text to the host, which
@@ -35,9 +25,8 @@
  * containing `ESC[201~` would otherwise break out of the paste and inject raw
  * keystrokes into the pi TUI).
  *
- * Focus: the composer is a separate element from xterm — keystrokes in the
- * textarea never reach the terminal. Mod+Enter submits; plain Enter inserts a
- * newline (never submits).
+ * Focus: the composer is a separate editor from xterm — its keystrokes never
+ * reach the terminal. Mod+Enter submits; plain/Shift+Enter insert newlines.
  *
  * Drafts: per-instance, IN-MEMORY on the TerminalManager (keyed by the leaf's
  * cwd) — written on every input, restored on leaf focus and view rebuild.
@@ -53,6 +42,8 @@ import { FileAtSuggester, insertCompletion, type FsDeps } from "./at-suggester";
 import { WikilinkSuggester } from "./wikilink-suggester";
 import { listPiCommands, PiCommandPickerModal, type PiCommand } from "./pi-commands";
 import { mergePulledPrompt } from "./prompt-transfer";
+import { TextareaEditorSurface, type EditorSurface } from "./editor-surface";
+import { createNativePromptEditor, type NativePromptEditorHandle } from "./native-prompt-editor";
 
 /** Bracketed-paste markers + the single trailing Enter of a submit. */
 export const PASTE_START = "\x1b[200~";
@@ -104,6 +95,8 @@ export interface ComposerHost {
 	/** Rewrite links + bracketed-paste the text into the pty. False when the
 	 *  leaf has no live pty (refused). */
 	submit(text: string): boolean;
+	/** Forward an image paste as pi's Ctrl+V (`\x16`) clipboard request. */
+	pasteImage?(): boolean;
 	/** Cut the stock pi TUI's pending input into this composer. The host owns
 	 *  screen extraction, safety guards, the non-submitting clear, and Notices. */
 	pullFromTerminal(): boolean;
@@ -138,6 +131,8 @@ export interface PromptComposerOpts {
 	/** Command-list source for the slash picker (tests inject a fake ~.pi
 	 *  tree); production default = listPiCommands()' local scan. */
 	piCommands?: () => PiCommand[];
+	/** Native MarkdownView factory seam for the headless smoke harness. */
+	nativeEditorFactory?: (initialValue: string) => Promise<NativePromptEditorHandle>;
 }
 
 export class PromptComposer {
@@ -145,13 +140,12 @@ export class PromptComposer {
 	readonly rootEl: HTMLElement;
 	/** Drag handle strip on the panel's top edge. */
 	readonly resizerEl: HTMLElement;
-	/** ROW 1 — the slim button strip above the textarea. */
+	/** ROW 1 — the slim button strip above the active editor. */
 	readonly toolbarEl: HTMLElement;
 	/** ROW 2a — the panel BODY region between the toolbar strip and the
 	 *  panel bottom: the panel's single flex-growing child. */
 	readonly bodyEl: HTMLElement;
-	/** ROW 2b — the textarea, the body region's sole child. It carries NO
-	 *  inline layout styles — it purely flex-fills the body both axes. */
+	/** Headless/failure fallback; removed after the native MarkdownView mounts. */
 	readonly textarea: HTMLTextAreaElement;
 	/** Transient "✓ sent" flash element. */
 	readonly sentEl: HTMLElement;
@@ -159,10 +153,17 @@ export class PromptComposer {
 	readonly statsEl: HTMLElement;
 	readonly pullBtn: HTMLButtonElement;
 	readonly hideBtn: HTMLButtonElement;
-	/** The @-file suggester riding the textarea. */
-	readonly suggester: FileAtSuggester;
-	/** The vault-backed `[[wikilink]]` suggester (same shared hover overlay). */
-	readonly wikilinkSuggester: WikilinkSuggester;
+	/** The @-file suggester riding the active textarea/CodeMirror surface. */
+	suggester: FileAtSuggester;
+	/** Textarea fallback only: native MarkdownView supplies Obsidian's own [[ UI. */
+	wikilinkSuggester: WikilinkSuggester | null;
+	/** Resolves after the native editor mounts (or the fallback is retained). */
+	readonly nativeReady: Promise<void>;
+
+	private surface: EditorSurface;
+	private nativeHandle: NativePromptEditorHandle | null = null;
+	private editorEventTarget: HTMLElement | null = null;
+	private destroyed = false;
 
 	private visible = true;
 	private statsOn = false;
@@ -185,6 +186,7 @@ export class PromptComposer {
 			attrs: { placeholder: "Prompt pi…  (Mod+Enter to send, Enter for newline)" },
 		}) as HTMLTextAreaElement;
 		this.textarea.value = "";
+		this.surface = new TextareaEditorSurface(this.textarea);
 		this.bodyEl = el("div", { cls: "arthur-pi-composer-body" });
 		this.sentEl = el("span", { cls: "arthur-pi-composer-sent" });
 		this.statsEl = el("span", { cls: "arthur-pi-composer-stats" });
@@ -239,16 +241,15 @@ export class PromptComposer {
 		// Capture at the textarea so Mod+Enter is handled before Obsidian's
 		// bubbling keymap scope. The composer still runs before the suggester's
 		// bubble listener: plain Enter/Escape remain available to an active popup.
-		this.textarea.addEventListener("input", this.onInput);
-		this.textarea.addEventListener("keydown", this.onKeydown, true);
+		this.bindEditorEvents(this.textarea);
 		this.resizerEl.addEventListener("mousedown", this.onResizeStart);
 
-		this.suggester = new FileAtSuggester(this.textarea, {
+		this.suggester = new FileAtSuggester(this.surface, {
 			baseDir: () => this.host.cwd(),
 			fs: this.opts.fs,
 			onInsert: () => this.afterInput(),
 		});
-		this.wikilinkSuggester = new WikilinkSuggester(this.textarea, {
+		this.wikilinkSuggester = new WikilinkSuggester(this.surface, {
 			vault: this.plugin.app.vault,
 			metadataCache: this.plugin.app.metadataCache,
 			onInsert: () => this.afterInput(),
@@ -261,9 +262,73 @@ export class PromptComposer {
 		this.applyPromptFont();
 		this.autoGrow();
 		this.setVisible(this.plugin.settings.piTerminalComposerVisible);
+		this.nativeReady = this.mountNativeEditor();
 	}
 
 	// ------------------------------------------------------------- behavior
+
+	get isNativeEditor(): boolean {
+		return this.nativeHandle !== null;
+	}
+
+	private async mountNativeEditor(): Promise<void> {
+		const canUseRealDom = typeof HTMLTextAreaElement !== "undefined"
+			&& this.textarea instanceof HTMLTextAreaElement;
+		const factory = this.opts.nativeEditorFactory
+			?? (canUseRealDom ? (draft: string) => createNativePromptEditor(this.plugin, draft) : null);
+		if (!factory) return;
+		try {
+			const handle = await factory(this.surface.getValue());
+			if (this.destroyed) {
+				await handle.dispose();
+				return;
+			}
+			const latest = this.surface.getValue();
+			const hadFocus = this.surface.hasFocus();
+			this.unbindEditorEvents();
+			this.suggester.destroy();
+			this.wikilinkSuggester?.destroy();
+			this.wikilinkSuggester = null;
+			this.nativeHandle = handle;
+			this.surface = handle.surface;
+			if (this.surface.getValue() !== latest) this.surface.setValue(latest);
+			const end = latest.length;
+			this.surface.setSelection(end, end);
+			this.textarea.remove();
+			this.bodyEl.append(handle.contentEl);
+			this.bodyEl.addClass("arthur-pi-composer-native");
+			this.bodyEl.setAttribute("data-editor", "obsidian-markdown");
+			this.bindEditorEvents(this.surface.dom);
+			this.suggester = new FileAtSuggester(this.surface, {
+				baseDir: () => this.host.cwd(),
+				fs: this.opts.fs,
+				onInsert: () => this.afterInput(),
+			});
+			this.applyPromptFont();
+			this.afterInput();
+			if (hadFocus && this.visible) this.surface.focus();
+		} catch (error) {
+			// A failed native mount must never discard the usable textarea/draft.
+			console.warn("[arthur] Native prompt editor unavailable; using textarea fallback", error);
+		}
+	}
+
+	private bindEditorEvents(target: HTMLElement): void {
+		this.unbindEditorEvents();
+		this.editorEventTarget = target;
+		target.addEventListener("input", this.onInput);
+		target.addEventListener("keydown", this.onKeydown, true);
+		target.addEventListener("paste", this.onPaste, true);
+	}
+
+	private unbindEditorEvents(): void {
+		const target = this.editorEventTarget;
+		if (!target) return;
+		target.removeEventListener("input", this.onInput);
+		target.removeEventListener("keydown", this.onKeydown, true);
+		target.removeEventListener("paste", this.onPaste, true);
+		this.editorEventTarget = null;
+	}
 
 	get isVisible(): boolean {
 		return this.visible;
@@ -277,7 +342,7 @@ export class PromptComposer {
 		if (visible) this.host.scheduleFit();
 		else {
 			this.suggester.hide();
-			this.wikilinkSuggester.hide();
+			this.wikilinkSuggester?.hide();
 		}
 	}
 
@@ -300,25 +365,25 @@ export class PromptComposer {
 	 *  existing text is preserved with a newline separator. Only a visible
 	 *  composer takes focus — the command must not reveal a hidden panel. */
 	acceptPulledText(text: string): void {
-		this.textarea.value = mergePulledPrompt(this.textarea.value ?? "", text);
-		const end = this.textarea.value.length;
-		if (typeof this.textarea.setSelectionRange === "function") this.textarea.setSelectionRange(end, end);
+		const value = mergePulledPrompt(this.surface.getValue(), text);
+		this.surface.setValue(value);
+		this.surface.setSelection(value.length, value.length);
 		this.afterInput();
-		if (this.visible) this.textarea.focus();
+		if (this.visible) this.surface.focus();
 		this.flash("pulled from terminal");
 	}
 
 	/** Pull the stored draft into the textarea (leaf focus / cwd change).
 	 *  Skipped while the user is typing in it — their text wins. */
 	restoreDraft(): void {
-		if (document.activeElement === this.textarea) return;
+		if (this.surface.hasFocus()) return;
 		this.restoredDraft();
 	}
 
 	/** Unconditional draft pull (constructor + cwd change). */
 	private restoredDraft(): void {
 		const draft = this.host.getDraft();
-		if ((this.textarea.value ?? "") !== draft) this.textarea.value = draft;
+		if (this.surface.getValue() !== draft) this.surface.setValue(draft);
 		this.autoGrow();
 	}
 
@@ -326,10 +391,29 @@ export class PromptComposer {
 	private onInput = (): void => this.afterInput();
 
 	private afterInput(): void {
-		this.host.setDraft(this.textarea.value ?? "");
+		this.host.setDraft(this.surface.getValue());
 		if (this.statsOn) this.updateStats();
 		this.autoGrow();
 	}
+
+	/** Image paste keeps pi's existing Ctrl+V flow; ordinary text paste remains
+	 *  native CodeMirror/textarea behavior. */
+	private onPaste = (e: ClipboardEvent): void => {
+		const items = e.clipboardData?.items;
+		if (!items) return;
+		let hasImage = false;
+		for (let i = 0; i < items.length; i++) {
+			if (items[i]?.type.startsWith("image/")) {
+				hasImage = true;
+				break;
+			}
+		}
+		if (!hasImage) return;
+		e.preventDefault();
+		e.stopImmediatePropagation();
+		e.stopPropagation();
+		this.host.pasteImage?.();
+	};
 
 	/** Cmd+Enter (macOS) and Ctrl+Enter submit, including while a completion popup
 	 *  is open. Capture + immediate propagation stop prevent Obsidian commands from
@@ -343,14 +427,14 @@ export class PromptComposer {
 			this.submitNow();
 			return;
 		}
-		if (this.suggester.isActive || this.wikilinkSuggester.isActive) return;
+		if (this.suggester.isActive || this.wikilinkSuggester?.isActive) return;
 		// plain/Shift+Enter → default textarea newline (NEVER submits)
 	};
 
 	/** Hand the draft to the host for rewrite + bracketed-paste submit.
 	 *  Returns true when the bytes were written. Empty text → refused. */
 	submitNow(): boolean {
-		const text = this.textarea.value ?? "";
+		const text = this.surface.getValue();
 		if (!text.trim()) {
 			this.flash("nothing to send");
 			return false;
@@ -360,9 +444,10 @@ export class PromptComposer {
 			return false;
 		}
 		this.suggester.hide();
-		this.wikilinkSuggester.hide();
+		this.wikilinkSuggester?.hide();
 		if (this.plugin.settings.piTerminalClearPromptOnSubmit) {
-			this.textarea.value = "";
+			this.surface.setValue("");
+			this.surface.setSelection(0, 0);
 			this.host.setDraft("");
 		}
 		if (this.statsOn) this.updateStats();
@@ -385,10 +470,11 @@ export class PromptComposer {
 
 	/** Reference `eraser` action: empty the composer (draft + count follow). */
 	private clearNow(): void {
-		this.textarea.value = "";
+		this.surface.setValue("");
+		this.surface.setSelection(0, 0);
 		this.afterInput();
 		this.flash("cleared");
-		if (typeof this.textarea.focus === "function") this.textarea.focus();
+		this.surface.focus();
 	}
 
 	/** Reference `square-slash` action: the LOCAL command picker (pi-commands.ts
@@ -401,15 +487,12 @@ export class PromptComposer {
 
 	/** Splice `text` at the cursor, store the draft, restore focus. */
 	insertAtCursor(text: string): void {
-		const value = this.textarea.value ?? "";
-		const start = this.textarea.selectionStart ?? value.length;
-		const end = this.textarea.selectionEnd ?? start;
+		const value = this.surface.getValue();
+		const { start, end } = this.surface.getSelection();
 		const res = insertCompletion(value, start, end, text);
-		this.textarea.value = res.value;
-		if (typeof this.textarea.setSelectionRange === "function") {
-			this.textarea.setSelectionRange(res.cursor, res.cursor);
-		}
-		this.textarea.focus();
+		this.surface.setValue(res.value);
+		this.surface.setSelection(res.cursor, res.cursor);
+		this.surface.focus();
 		this.afterInput();
 	}
 
@@ -447,11 +530,9 @@ export class PromptComposer {
 	 *  brackets (Obsidian-style) — resolved on submit like any other link. */
 	private insertWikilinkToken(): void {
 		this.insertAtCursor("[[]]");
-		const cursor = this.textarea.selectionStart ?? 0;
+		const cursor = this.surface.getSelection().start;
 		const pos = Math.max(0, cursor - 2);
-		if (typeof this.textarea.setSelectionRange === "function") {
-			this.textarea.setSelectionRange(pos, pos);
-		}
+		this.surface.setSelection(pos, pos);
 	}
 
 	// ---------------------------------------------------------- stats/resizer
@@ -464,6 +545,8 @@ export class PromptComposer {
 		this.textarea.style.fontSize = `${size}px`;
 		this.textarea.addClass("arthur-pi-composer-input");
 		this.textarea.setAttribute("data-prompt-font-size", String(size));
+		this.bodyEl.style.setProperty?.("--arthur-prompt-font-size", `${size}px`);
+		this.bodyEl.setAttribute("data-prompt-font-size", String(size));
 	}
 
 	/**
@@ -477,7 +560,7 @@ export class PromptComposer {
 	 */
 	autoGrow(): void {
 		if (!this.visible) return;
-		const contentH = Number(this.textarea.scrollHeight) || 0;
+		const contentH = this.surface.getContentHeight();
 		if (!(contentH > 0)) return;
 		const toolbarH = Number(this.toolbarEl.getBoundingClientRect?.().height) || 0;
 		const needed = COMPOSER_GROW_CHROME + (toolbarH || 28) + contentH;
@@ -493,7 +576,7 @@ export class PromptComposer {
 	}
 
 	private updateStats(): void {
-		const text = this.textarea.value ?? "";
+		const text = this.surface.getValue();
 		const words = text.split(/\s+/).filter(Boolean).length;
 		this.statsEl.setText(`${words} words · ${text.length} chars`);
 	}
@@ -540,7 +623,7 @@ export class PromptComposer {
 		const h = clampComposerHeight(this.currentHeight(), this.host.viewHeight(), this.maxHeightPct());
 		if (Number.isFinite(h) && h > 0) this.rootEl.style.height = `${h}px`;
 		this.suggester.reposition();
-		this.wikilinkSuggester.reposition();
+		this.wikilinkSuggester?.reposition();
 	}
 
 	/** Current height in px: inline style → measured box → CSS default. */
@@ -591,14 +674,16 @@ export class PromptComposer {
 
 	/** Teardown (view close): timers, drag listeners, suggester. Idempotent. */
 	destroy(): void {
+		this.destroyed = true;
 		if (this.sentTimer !== null) {
 			window.clearTimeout(this.sentTimer);
 			this.sentTimer = null;
 		}
 		this.stopDrag();
 		this.suggester.destroy();
-		this.wikilinkSuggester.destroy();
-		this.textarea.removeEventListener("input", this.onInput);
-		this.textarea.removeEventListener("keydown", this.onKeydown, true);
+		this.wikilinkSuggester?.destroy();
+		this.unbindEditorEvents();
+		if (this.nativeHandle) void this.nativeHandle.dispose();
+		this.nativeHandle = null;
 	}
 }

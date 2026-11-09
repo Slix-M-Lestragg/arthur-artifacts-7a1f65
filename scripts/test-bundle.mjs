@@ -8632,6 +8632,234 @@ try {
 	})();
 
 
+	// ---- 50. native Obsidian MarkdownView composer + CM @ adapter -------------
+	console.log("== 50. native Obsidian MarkdownView composer (public leaf/file wiring + behavior parity) ==");
+	await (async () => {
+		let checks50 = 0;
+		const failuresBefore50 = failures;
+		const assert50 = (cond, label) => { checks50++; assert(cond, label); };
+		assert50(typeof bundle.createNativePromptEditor === "function"
+			&& typeof bundle.ObsidianEditorSurface === "function",
+			"(a) native MarkdownView factory + CodeMirror editor surface are exported for the headless seam");
+
+		const createdFolders50 = [];
+		const createdFiles50 = new Map();
+		const deletedFiles50 = [];
+		let getLeafArg50 = null;
+		let openState50 = null;
+		let detachCount50 = 0;
+		let nativeEditor50 = null;
+		let nativeView50 = null;
+		const previousLeaf50 = { name: "terminal-before-native-mount" };
+		const restoredLeaves50 = [];
+		const workspace50 = {
+			activeLeaf: previousLeaf50,
+			getLeaf: (arg) => { getLeafArg50 = arg; return leaf50; },
+			setActiveLeaf: (leaf, opts) => { restoredLeaves50.push({ leaf, opts }); workspace50.activeLeaf = leaf; },
+		};
+		const vault50 = {
+			getAbstractFileByPath: (p) => createdFolders50.includes(p) ? { path: p } : createdFiles50.get(p) ?? null,
+			createFolder: async (p) => { createdFolders50.push(p); return { path: p }; },
+			create: async (p, data) => {
+				const file = new obsidianStub.TFile(p);
+				file.data = data;
+				createdFiles50.set(p, file);
+				return file;
+			},
+			delete: async (file, force) => {
+				deletedFiles50.push({ path: file.path, force });
+				createdFiles50.delete(file.path);
+			},
+		};
+		const leaf50 = {
+			view: null,
+			openFile: async (file, state) => {
+				openState50 = state;
+				workspace50.activeLeaf = leaf50;
+				const view = new obsidianStub.MarkdownView(file);
+				view.contentEl = new StubEl("div");
+				view.contentEl.addClass("workspace-leaf-content");
+				view.containerEl = new StubEl("div");
+				view.containerEl.append(view.contentEl);
+				let selectionStart50 = 0;
+				let selectionEnd50 = 0;
+				let coordsCalls50 = 0;
+				const offsetToPos = (offset) => {
+					const lines = view.editor.getValue().slice(0, offset).split("\n");
+					return { line: lines.length - 1, ch: lines.at(-1).length };
+				};
+				view.editor = {
+					getValue: () => file.data,
+					setValue: (value) => { file.data = value; },
+					getCursor: (side = "head") => offsetToPos(side === "from" ? selectionStart50 : selectionEnd50),
+					posToOffset: (pos) => {
+						const lines = file.data.split("\n");
+						let offset = 0;
+						for (let i = 0; i < pos.line; i++) offset += lines[i].length + 1;
+						return offset + pos.ch;
+				},
+					offsetToPos,
+					setSelection: (from, to = from) => {
+						selectionStart50 = view.editor.posToOffset(from);
+						selectionEnd50 = view.editor.posToOffset(to);
+						view.editor.cm.state.selection.main.head = selectionEnd50;
+					},
+					hasFocus: () => document.activeElement === view.contentEl,
+					focus: () => { document.activeElement = view.contentEl; },
+					cm: {
+						state: { selection: { main: { head: 0 } } },
+						coordsAtPos: (pos) => {
+							coordsCalls50++;
+							view.editor.lastCoordsPos = pos;
+							return { top: 550, bottom: 570, left: 90, right: 92 };
+						},
+					},
+					get coordsCalls() { return coordsCalls50; },
+				};
+				view.contentEl.getBoundingClientRect = () => ({
+					top: 500, bottom: 620, left: 40, right: 520, width: 480, height: 120,
+				});
+				nativeEditor50 = view.editor;
+				nativeView50 = view;
+				leaf50.view = view;
+			},
+			detach: () => { detachCount50++; },
+		};
+		const nativePlugin50 = {
+			app: {
+				vault: vault50,
+				workspace: workspace50,
+			},
+		};
+
+		let draft50 = "native draft";
+		const submissions50 = [];
+		let imagePastes50 = 0;
+		const host50 = {
+			cwd: () => "/tmp/native50",
+			getDraft: () => draft50,
+			setDraft: (text) => { draft50 = text; },
+			resolver: () => () => null,
+			submit: (text) => { submissions50.push(text); return true; },
+			pasteImage: () => { imagePastes50++; return true; },
+			pullFromTerminal: () => true,
+			viewHeight: () => 400,
+			scheduleFit: () => {},
+			activeNote: async () => null,
+			activeSelection: () => null,
+		};
+		const fs50 = { readdir: () => [{ name: "alpha.md", isDirectory: () => false }] };
+		let factoryDraft50 = null;
+		const comp50 = new bundle.PromptComposer(new StubEl("div"), host50, plugin, {
+			fs: fs50,
+			nativeEditorFactory: async (draft) => {
+				factoryDraft50 = draft;
+				return bundle.createNativePromptEditor(nativePlugin50, draft);
+			},
+		});
+		await comp50.nativeReady;
+		assert50(factoryDraft50 === "native draft" && getLeafArg50 === true
+			&& restoredLeaves50[0]?.leaf === previousLeaf50 && restoredLeaves50[0]?.opts?.focus === false,
+			"(b) the current draft reaches getLeaf(true), which then restores the prior active leaf/context");
+		assert50(openState50?.state?.mode === "source"
+			&& createdFolders50.join(",") === "Arthur,Arthur/prompts"
+			&& createdFiles50.size === 1,
+			"(b) public vault.create/createFolder + leaf.openFile install a source-mode MarkdownView (no fileMap seam)");
+		assert50(comp50.isNativeEditor && comp50.wikilinkSuggester === null
+			&& comp50.bodyEl.getAttribute("data-editor") === "obsidian-markdown"
+			&& comp50.bodyEl.children.includes(nativeView50.contentEl)
+			&& !comp50.bodyEl.children.includes(comp50.textarea),
+			"(b) the real MarkdownView replaces the textarea and suppresses only Arthur's approximate [[ popup");
+		assert50(nativeEditor50.getValue() === "native draft"
+			&& comp50.bodyEl.getAttribute("data-prompt-font-size") === String(plugin.settings.promptFontSize),
+			"(b) native content + promptFontSize survive the async mount");
+
+		// Native CM @ completion: the public Editor offsets drive insertion while
+		// editor.cm.coordsAtPos supplies only the popup's vertical caret anchor.
+		nativeEditor50.setValue("@al");
+		nativeEditor50.setSelection({ line: 0, ch: 3 });
+		for (const h of nativeView50.contentEl.handlers.get("input") ?? []) h({});
+		await sleep(190);
+		assert50(comp50.suggester.isActive && nativeEditor50.coordsCalls > 0
+			&& nativeEditor50.lastCoordsPos === 3,
+			"(c) @ completion runs on the native editor and calls coordsAtPos at the live caret");
+		assert50(comp50.suggester.popup.style.left === "40px"
+			&& comp50.suggester.popup.style.width === "480px"
+			&& parseFloat(comp50.suggester.popup.style.top) < 550,
+			"(c) @ overlay retains full editor width but anchors above the CM caret");
+		const key50 = (init) => {
+			const ev = {
+				key: "Enter", metaKey: false, ctrlKey: false, shiftKey: false, altKey: false,
+				defaultPrevented: false, stopped: false, immediateStopped: false, ...init,
+				preventDefault() { this.defaultPrevented = true; },
+				stopPropagation() { this.stopped = true; },
+				stopImmediatePropagation() { this.immediateStopped = true; this.stopped = true; },
+			};
+			for (const h of nativeView50.contentEl.handlers.get("keydown") ?? []) h(ev);
+			return ev;
+		};
+		key50({ key: "Enter" });
+		assert50(nativeEditor50.getValue() === "@alpha.md" && draft50 === "@alpha.md"
+			&& !comp50.suggester.isActive,
+			"(c) Enter accepts @ on CM, updates the shared draft, and dismisses the popup");
+
+		comp50.toggleStats();
+		nativeEditor50.setValue("two words");
+		for (const h of nativeView50.contentEl.handlers.get("input") ?? []) h({});
+		assert50(comp50.statsEl.textContent === "2 words · 9 chars",
+			"(d) native input updates the existing word/char counter");
+		plugin.settings.piTerminalClearPromptOnSubmit = true;
+		nativeEditor50.setValue("[[Note#Heading]]");
+		nativeEditor50.setSelection({ line: 0, ch: nativeEditor50.getValue().length });
+		const mod50 = key50({ metaKey: true });
+		assert50(mod50.defaultPrevented && mod50.stopped && mod50.immediateStopped
+			&& submissions50.at(-1) === "[[Note#Heading]]"
+			&& nativeEditor50.getValue() === "" && draft50 === "",
+			"(d) Mod+Enter captures on CM, sends literal native wikilinks unchanged to the existing rewrite host, and clears");
+		const sendsBeforeShift50 = submissions50.length;
+		const shift50 = key50({ shiftKey: true });
+		assert50(!shift50.defaultPrevented && submissions50.length === sendsBeforeShift50,
+			"(d) Shift+Enter stays an unconsumed editor newline and never submits");
+
+		comp50.acceptPulledText("pulled native");
+		assert50(nativeEditor50.getValue() === "pulled native" && draft50 === "pulled native"
+			&& document.activeElement === nativeView50.contentEl,
+			"(e) pull-from-terminal inserts into the native editor, persists, and restores focus");
+		const imageEvent50 = {
+			clipboardData: { items: [{ type: "image/png" }] }, prevented: false, stopped: false,
+			preventDefault() { this.prevented = true; },
+			stopPropagation() { this.stopped = true; },
+			stopImmediatePropagation() { this.immediateStopped = true; this.stopped = true; },
+		};
+		for (const h of nativeView50.contentEl.handlers.get("paste") ?? []) h(imageEvent50);
+		assert50(imageEvent50.prevented && imageEvent50.stopped && imagePastes50 === 1,
+			"(e) native image paste is swallowed before Obsidian attachments and routed to pi's existing Ctrl+V host flow");
+		const textEvent50 = {
+			clipboardData: { items: [{ type: "text/plain" }] }, prevented: false,
+			preventDefault() { this.prevented = true; }, stopPropagation() {}, stopImmediatePropagation() {},
+		};
+		for (const h of nativeView50.contentEl.handlers.get("paste") ?? []) h(textEvent50);
+		assert50(!textEvent50.prevented && imagePastes50 === 1,
+			"(e) ordinary text paste falls through to Obsidian unchanged");
+
+		comp50.destroy();
+		await sleep(0);
+		assert50(detachCount50 === 1 && deletedFiles50.length === 1 && deletedFiles50[0].force === true,
+			"(f) destroy detaches the scratch leaf and permanently removes only its temporary note");
+
+		const fallback50 = new bundle.PromptComposer(new StubEl("div"), host50, plugin, {
+			nativeEditorFactory: async () => { throw new Error("headless native failure"); },
+		});
+		await fallback50.nativeReady;
+		assert50(!fallback50.isNativeEditor && fallback50.wikilinkSuggester !== null
+			&& fallback50.textarea.value === "pulled native",
+			"(g) native construction failure retains the usable textarea, fallback completions, and draft");
+		fallback50.destroy();
+		assert50(failuresBefore50 === failures, "§50 all native MarkdownView composer assertions passed");
+		if (failuresBefore50 === failures) console.log(`§50 PASS: ${checks50} assertions`);
+	})();
+
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();

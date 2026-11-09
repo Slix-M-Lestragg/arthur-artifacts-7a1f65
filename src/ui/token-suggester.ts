@@ -1,9 +1,11 @@
 /**
- * Shared textarea token-completion controller. Drivers only detect the token
- * at the caret and return suggestions; this class owns the body-portaled hover
- * overlay, keyboard/mouse interaction, insertion, dismissal, and positioning.
+ * Shared editor token-completion controller. Drivers detect the token at the
+ * caret and return suggestions; this class owns the body-portaled hover overlay,
+ * keyboard/mouse interaction, insertion, dismissal, and positioning. It rides
+ * either the fallback textarea or the native CodeMirror editor adapter.
  */
 import { el } from "../util";
+import type { EditorSurface } from "./editor-surface";
 
 export interface TokenSuggestion {
 	/** Literal replacement for the active token. */
@@ -57,14 +59,14 @@ export abstract class TokenSuggester<TOptions extends TokenSuggesterOptions = To
 	protected readonly onReposition = (): void => this.reposition();
 
 	constructor(
-		protected readonly textarea: HTMLTextAreaElement,
+		protected readonly editor: EditorSurface,
 		protected readonly opts: TOptions,
 	) {
 		this.maxVisible = opts.maxVisibleItems ?? MAX_VISIBLE_ITEMS;
-		textarea.addEventListener("input", this.onInput);
-		textarea.addEventListener("keydown", this.onKeydown);
-		textarea.addEventListener("blur", this.onBlur);
-		const doc = textarea.ownerDocument ?? document;
+		editor.dom.addEventListener("input", this.onInput);
+		editor.dom.addEventListener("keydown", this.onKeydown, editor.captureKeydown === true);
+		editor.dom.addEventListener("blur", this.onBlur, editor.captureBlur === true);
+		const doc = editor.dom.ownerDocument ?? document;
 		(doc.defaultView ?? window).addEventListener("resize", this.onReposition);
 		doc.addEventListener("scroll", this.onReposition, true);
 	}
@@ -116,7 +118,7 @@ export abstract class TokenSuggester<TOptions extends TokenSuggesterOptions = To
 			this.hide();
 			return;
 		}
-		const doc = this.textarea.ownerDocument ?? document;
+		const doc = this.editor.dom.ownerDocument ?? document;
 		if (!this.popup) {
 			this.popup = el("div", {
 				cls: "arthur-pi-file-suggest arthur-pi-file-suggest--hover",
@@ -152,12 +154,12 @@ export abstract class TokenSuggester<TOptions extends TokenSuggesterOptions = To
 		this.reposition();
 	}
 
-	/** Re-anchor above the textarea after render, resize, scroll, or refit. */
+	/** Re-anchor above the caret (native CM) or textarea after layout changes. */
 	reposition(): void {
 		const popup = this.popup;
 		if (!this.active || !popup) return;
-		const rect = this.textarea.getBoundingClientRect();
-		const doc = this.textarea.ownerDocument ?? document;
+		const rect = this.editor.getAnchorRect();
+		const doc = this.editor.dom.ownerDocument ?? document;
 		const win = doc.defaultView ?? window;
 		const viewportH = Number(win.innerHeight) || 0;
 		const viewportW = Number(win.innerWidth) || 0;
@@ -220,20 +222,18 @@ export abstract class TokenSuggester<TOptions extends TokenSuggesterOptions = To
 		const item = this.items[index];
 		const prefix = this.currentPrefix;
 		if (!item || !prefix) return;
-		const value = this.textarea.value ?? "";
-		const cursor = this.textarea.selectionStart ?? value.length;
+		const value = this.editor.getValue();
+		const cursor = this.editor.getSelection().start;
 		const start = cursor - prefix.length;
 		const suffix = item.consumeSuffix ?? "";
 		const end = suffix && value.slice(cursor, cursor + suffix.length) === suffix
 			? cursor + suffix.length
 			: cursor;
 		const res = insertCompletion(value, start, end, item.value);
-		this.textarea.value = res.value;
+		this.editor.setValue(res.value);
 		const caret = Math.max(start, Math.min(res.value.length, res.cursor + (item.caretOffset ?? 0)));
-		if (typeof this.textarea.setSelectionRange === "function") {
-			this.textarea.setSelectionRange(caret, caret);
-		}
-		this.textarea.focus();
+		this.editor.setSelection(caret, caret);
+		this.editor.focus();
 		this.hide();
 		this.opts.onInsert?.();
 	}
@@ -256,10 +256,10 @@ export abstract class TokenSuggester<TOptions extends TokenSuggesterOptions = To
 			window.clearTimeout(this.debounceTimer);
 			this.debounceTimer = null;
 		}
-		this.textarea.removeEventListener("input", this.onInput);
-		this.textarea.removeEventListener("keydown", this.onKeydown);
-		this.textarea.removeEventListener("blur", this.onBlur);
-		const doc = this.textarea.ownerDocument ?? document;
+		this.editor.dom.removeEventListener("input", this.onInput);
+		this.editor.dom.removeEventListener("keydown", this.onKeydown, this.editor.captureKeydown === true);
+		this.editor.dom.removeEventListener("blur", this.onBlur, this.editor.captureBlur === true);
+		const doc = this.editor.dom.ownerDocument ?? document;
 		(doc.defaultView ?? window).removeEventListener("resize", this.onReposition);
 		doc.removeEventListener("scroll", this.onReposition, true);
 		this.popup?.remove();

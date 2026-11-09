@@ -2942,6 +2942,43 @@
 }
 .arthur-pi-composer-input::placeholder { color: var(--text-faint); }
 
+/* Native MarkdownView composer: the same Obsidian editor (and therefore its
+ * built-in [[ aliases/headings/blocks suggester) mounted in the panel body. */
+.arthur-pi-composer-native { overflow: hidden; }
+.arthur-pi-composer-native > .workspace-leaf-content {
+	flex: 1 1 auto;
+	min-height: 0;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+}
+.arthur-pi-composer-native .view-header { display: none; }
+.arthur-pi-composer-native .markdown-source-view {
+	flex: 1 1 auto;
+	min-height: 0;
+	padding: 4px 8px;
+}
+.arthur-pi-composer-native .cm-editor {
+	flex: 1 1 auto;
+	min-height: 0;
+	height: 100%;
+}
+.arthur-pi-composer-native .cm-scroller {
+	min-height: 0;
+	overflow-y: auto;
+	font-family: var(--font-text, var(--font-interface));
+	line-height: 1.4;
+}
+.arthur-pi-composer-native .cm-content,
+.arthur-pi-composer-native .cm-line {
+	font-size: var(--arthur-prompt-font-size, 16px) !important;
+}
+.arthur-pi-composer-native .cm-sizer,
+.arthur-pi-composer-native .cm-contentContainer {
+	max-width: none !important;
+	margin: 0 !important;
+}
+
 /* @-file hover tooltip: body-portaled and fixed ABOVE the textarea's top edge.
  * Inline geometry supplies the full composer width and a ≤240px height budget;
  * the tooltip layer keeps it above both xterm and the bottom composer. */

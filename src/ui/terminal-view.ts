@@ -629,7 +629,7 @@ export class TerminalView extends ItemView {
 			e.preventDefault();
 			e.stopImmediatePropagation();
 			e.stopPropagation();
-			if (this.pty && !this.exited) this.pty.write("\x16");
+			this.pasteImageToTerminal();
 		};
 		surface.addEventListener("paste", this.pasteHandler, true);
 		// Keystrokes: raw chunks straight to the pty; xterm decodes keys itself.
@@ -1008,12 +1008,21 @@ export class TerminalView extends ItemView {
 			},
 			resolver: () => this.makeLinkResolver(),
 			submit: (text) => this.submitPrompt(text),
+			pasteImage: () => this.pasteImageToTerminal(),
 			pullFromTerminal: () => this.pullFromTerminal(),
 			viewHeight: () => this.contentEl.getBoundingClientRect().height,
 			scheduleFit: () => this.scheduleFit(),
 			activeNote: () => this.readActiveNote(),
 			activeSelection: () => this.readActiveSelection(),
 		};
+	}
+
+	/** Let pi read an image directly from the OS clipboard. Shared by xterm and
+	 *  the native Markdown composer (which would otherwise save an attachment). */
+	private pasteImageToTerminal(): boolean {
+		if (!this.pty || this.exited) return false;
+		this.pty.write("\x16");
+		return true;
 	}
 
 	/** Cut pi's visible, unsubmitted TUI editor text into the composer.
