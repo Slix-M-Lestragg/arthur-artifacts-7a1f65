@@ -93,6 +93,9 @@ export type { LinkResolver } from "./ui/terminal-note";
 export { rewriteContextLinks } from "./ui/link-rewrite";
 export { buildPasteSubmit, clampComposerHeight, PromptComposer, PASTE_START, PASTE_END, COMPOSER_MIN_HEIGHT, COMPOSER_MAX_HEIGHT_PCT, COMPOSER_DEFAULT_HEIGHT } from "./ui/prompt-composer";
 export type { ComposerHost, PromptComposerOpts, PiRowAction } from "./ui/prompt-composer";
+// Pull an unsubmitted stock-pi TUI prompt through xterm's screen buffer (no RPC).
+export { extractPendingInput, buildClearPendingInput, mergePulledPrompt } from "./ui/prompt-transfer";
+export type { PendingInput, TerminalScreenLike, ScreenLineLike } from "./ui/prompt-transfer";
 // Wave 4 (FIX C) — local pi slash-command list + picker (fs source of truth).
 export { listPiCommands, BUILTIN_PI_COMMANDS, defaultPiAgentDir, PiCommandPickerModal } from "./ui/pi-commands";
 export type { PiCommand } from "./ui/pi-commands";
@@ -834,6 +837,18 @@ export default class ArthurPlugin extends Plugin {
 			name: "Open pi terminal",
 			callback: () => {
 				this.openPiTerminalCommand();
+			},
+		});
+		// Obsidian namespaces this as `arthur.pi-pull`. It is available only
+		// while a pi terminal is active, and never opens a hidden composer.
+		this.addCommand({
+			id: "pi-pull",
+			name: "Pull unsubmitted terminal prompt into composer",
+			checkCallback: (checking) => {
+				const view = this.app.workspace.getActiveViewOfType(TerminalView);
+				if (!view) return false;
+				if (!checking) view.pullFromTerminal();
+				return true;
 			},
 		});
 

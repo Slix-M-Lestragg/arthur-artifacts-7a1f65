@@ -50,6 +50,7 @@ import type { LinkResolver } from "./link-rewrite";
 import { rewriteContextLinks } from "./link-rewrite";
 import { FileAtSuggester, insertCompletion, type FsDeps } from "./at-suggester";
 import { listPiCommands, PiCommandPickerModal, type PiCommand } from "./pi-commands";
+import { mergePulledPrompt } from "./prompt-transfer";
 
 /** Bracketed-paste markers + the single trailing Enter of a submit. */
 export const PASTE_START = "\x1b[200~";
@@ -101,6 +102,9 @@ export interface ComposerHost {
 	/** Rewrite links + bracketed-paste the text into the pty. False when the
 	 *  leaf has no live pty (refused). */
 	submit(text: string): boolean;
+	/** Cut the stock pi TUI's pending input into this composer. The host owns
+	 *  screen extraction, safety guards, the non-submitting clear, and Notices. */
+	pullFromTerminal(): boolean;
 	/** Available leaf height (px) for the resizer clamp. */
 	viewHeight(): number;
 	/** Re-fit xterm after the composer's height changed. */
@@ -151,6 +155,7 @@ export class PromptComposer {
 	readonly sentEl: HTMLElement;
 	/** Word/char count readout (toggled). */
 	readonly statsEl: HTMLElement;
+	readonly pullBtn: HTMLButtonElement;
 	readonly hideBtn: HTMLButtonElement;
 	/** The @-file suggester riding the textarea. */
 	readonly suggester: FileAtSuggester;
@@ -187,6 +192,8 @@ export class PromptComposer {
 		// on the terminal view's header ROW 2 — this strip is the composer's
 		// ROW 1, ABOVE the textarea (right-aligned icon-only cluster after a
 		// spacer). Every button carries a stable `pi-btn-<id>` id for smoke.
+		this.pullBtn = this.iconBtn(PI_ROW_ICONS.pull, "Pull from terminal", () => this.host.pullFromTerminal(), "pull");
+		this.pullBtn.style.display = "none"; // until the view has a live pty + xterm
 		const sendBtn = this.iconBtn(PI_ROW_ICONS.send, "Send to pi (Mod+Enter)", () => this.submitNow(), "send");
 		const clearBtn = this.iconBtn(PI_ROW_ICONS.clear, "Clear the composer", () => this.clearNow(), "clear");
 		const noteBtn = this.iconBtn(PI_ROW_ICONS.note, "Insert the active note as context", () => void this.insertActiveNote(), "note");
@@ -196,6 +203,7 @@ export class PromptComposer {
 		const statsBtn = this.iconBtn(PI_ROW_ICONS.stats, "Toggle word/char count", () => this.toggleStats(), "stats");
 		this.toolbarEl.append(
 			this.spacer(),
+			this.pullBtn,
 			sendBtn,
 			clearBtn,
 			this.sep(),
@@ -259,6 +267,29 @@ export class PromptComposer {
 
 	toggle(): void {
 		this.setVisible(!this.visible);
+	}
+
+	/** The view owns live-terminal/run state; the button exists only with a
+	 *  terminal and is disabled while pi is running (the editor is not editable). */
+	syncPullState(terminalPresent: boolean, running: boolean): void {
+		this.pullBtn.style.display = terminalPresent ? "" : "none";
+		this.pullBtn.disabled = running;
+		this.pullBtn.setAttribute("aria-disabled", String(running));
+		const label = running ? "Pull from terminal (unavailable while pi is running)" : "Pull from terminal";
+		this.pullBtn.setAttribute("aria-label", label);
+		this.pullBtn.setAttribute("title", label);
+	}
+
+	/** Accept a successful pull as a draft edit. Empty composers are replaced;
+	 *  existing text is preserved with a newline separator. Only a visible
+	 *  composer takes focus — the command must not reveal a hidden panel. */
+	acceptPulledText(text: string): void {
+		this.textarea.value = mergePulledPrompt(this.textarea.value ?? "", text);
+		const end = this.textarea.value.length;
+		if (typeof this.textarea.setSelectionRange === "function") this.textarea.setSelectionRange(end, end);
+		this.afterInput();
+		if (this.visible) this.textarea.focus();
+		this.flash("pulled from terminal");
 	}
 
 	/** Pull the stored draft into the textarea (leaf focus / cwd change).

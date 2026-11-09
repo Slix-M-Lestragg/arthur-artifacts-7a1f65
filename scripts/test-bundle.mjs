@@ -6690,9 +6690,9 @@ try {
 		]), `(b) ROW 2 order = composer toggle → New → Resume… → Thinking → Compact (got: ${topIds.join(",")})`);
 		const rowIds = idsOf(comp.toolbarEl);
 		assert(JSON.stringify(rowIds) === JSON.stringify([
-			"pi-btn-send", "pi-btn-clear", "pi-btn-note", "pi-btn-selection",
+			"pi-btn-pull", "pi-btn-send", "pi-btn-clear", "pi-btn-note", "pi-btn-selection",
 			"pi-btn-command", "pi-btn-link", "pi-btn-stats", "pi-btn-hide",
-		]), `(b) composer strip order = send → clear → inserts → stats → hide (got: ${rowIds.join(",")})`);
+		]), `(b) composer strip order = pull → send → clear → inserts → stats → hide (got: ${rowIds.join(",")})`);
 		assert(["pi-btn-new", "pi-btn-resume", "pi-btn-compact", "pi-btn-thinking"]
 			.every((id) => findById(comp.toolbarEl, id) == null),
 			"(b) the composer strip no longer carries the moved command buttons");
@@ -6704,7 +6704,7 @@ try {
 			"pi-btn-composer": "squircle", "pi-btn-new": "file-plus", "pi-btn-resume": "layers", "pi-btn-thinking": "gauge", "pi-btn-compact": "weight",
 		};
 		const expectedRowIcons = {
-			"pi-btn-send": "send", "pi-btn-clear": "eraser", "pi-btn-note": "file-text",
+			"pi-btn-pull": "hard-drive-download", "pi-btn-send": "send", "pi-btn-clear": "eraser", "pi-btn-note": "file-text",
 			"pi-btn-selection": "text-cursor-input", "pi-btn-command": "square-slash",
 			"pi-btn-link": "link", "pi-btn-stats": "bar-chart-3",
 		};
@@ -8096,6 +8096,182 @@ try {
 		await app.workspace.detachLeavesOfType(F);
 		assert46(failuresBefore46 === failures, "§46 all remote UI assertions passed");
 		if (failuresBefore46 === failures) console.log(`§46 PASS: ${checks46} assertions`);
+	})();
+
+
+	// ---- 47. pull unsubmitted pi TUI input into the composer (screen heuristic) -
+	console.log("== 47. pull terminal prompt (headless-buffer extraction / non-submitting clear / composer + command wiring) ==");
+	await (async () => {
+		const T = "arthur-pi-terminal";
+		const stubTerminal47 = (rows, cursorY, cols = 32) => {
+			const lines = rows.map((row) => typeof row === "string" ? { text: row, isWrapped: false } : row);
+			return {
+				cols,
+				rows: lines.length,
+				buffer: { active: {
+					cursorY,
+					length: lines.length,
+					getLine: (row) => {
+						const line = lines[row];
+						if (!line) return undefined;
+						return {
+							isWrapped: line.isWrapped === true,
+							translateToString: (trimRight = false) => trimRight ? line.text.trimEnd() : line.text,
+						};
+					},
+				} },
+			};
+		};
+
+		// (a) Pure extraction: current pi's horizontal-border editor, prompt
+		// glyphs, vertical box chrome, soft wraps, logical lines, and fail-closed
+		// layouts all use injected lines — no native pty or network.
+		assert(typeof bundle.extractPendingInput === "function"
+			&& typeof bundle.buildClearPendingInput === "function"
+			&& typeof bundle.mergePulledPrompt === "function",
+			"(a) bundle exports the pty-native prompt-transfer surface");
+		const single47 = bundle.extractPendingInput(stubTerminal47([
+			"previous output", "─".repeat(32), "  hello pi", "─".repeat(32), "", "footer status",
+		], 2));
+		assert(single47?.text === "hello pi" && single47.lineStartRow === 2,
+			"(a) single-line input recovers text + its absolute buffer start row");
+		const glyph47 = bundle.extractPendingInput(stubTerminal47(["❯  explain this", ""], 0));
+		assert(glyph47?.text === "explain this" && glyph47.lineStartRow === 0,
+			"(a) an unboxed ❯ prompt glyph + whitespace padding are stripped");
+		const decorated47 = bundle.extractPendingInput(stubTerminal47([
+			"╭────────────────╮", "│ > decorated prompt │", "╰────────────────╯",
+		], 1));
+		assert(decorated47?.text === "decorated prompt",
+			"(a) decorated input-box top/bottom/vertical borders and > are stripped");
+		const wrapped47 = bundle.extractPendingInput(stubTerminal47([
+			"─".repeat(24), "hello", { text: "world", isWrapped: true }, "─".repeat(24), "",
+		], 2, 24));
+		assert(wrapped47?.text === "hello world" && wrapped47.lineStartRow === 1,
+			"(a) soft-wrapped continuation rows join with the word-boundary space");
+		const forced47 = bundle.extractPendingInput(stubTerminal47([
+			"─".repeat(10), "abcdefgh", { text: "ijk", isWrapped: true }, "─".repeat(10),
+		], 2, 10));
+		assert(forced47?.text === "abcdefghijk",
+			"(a) a full-width unbroken token joins without inventing whitespace");
+		const logical47 = bundle.extractPendingInput(stubTerminal47([
+			"─".repeat(20), "first line", "second line", "─".repeat(20),
+		], 2));
+		assert(logical47?.text === "first line\nsecond line",
+			"(a) non-wrapped editor rows retain logical newlines");
+		assert(bundle.extractPendingInput(stubTerminal47(["─".repeat(20), "", "─".repeat(20), ""], 1)) === null,
+			"(a) an empty input box returns null");
+		assert(bundle.extractPendingInput(stubTerminal47(["ordinary terminal output", ""], 0)) === null,
+			"(a) no box/prompt evidence returns null instead of copying transcript text");
+		assert(bundle.extractPendingInput(stubTerminal47([
+			"─".repeat(20), "first", "later logical line", "─".repeat(20),
+		], 1)) === null,
+			"(a) a cursor before a later logical line refuses an unsafe partial clear");
+		assert(bundle.extractPendingInput(null) === null, "(a) a missing terminal returns null");
+
+		// (b) Clear semantics verified against pi-tui's actual logical-line
+		// behavior: one pair per soft-wrapped prompt; extra kill/merge steps only
+		// for explicit logical newlines. No path contains Enter/CR.
+		assert(bundle.buildClearPendingInput("one logical line") === "\x05\x15",
+			"(b) single/soft-wrapped input clears with exactly Ctrl+E + Ctrl+U");
+		assert(bundle.buildClearPendingInput(wrapped47.text) === "\x05\x15",
+			"(b) multiple screen rows still need only ONE Ctrl+U (soft wrap ≠ logical line)");
+		assert(bundle.buildClearPendingInput(logical47.text) === "\x05\x15\x15\x15",
+			"(b) two logical lines need two clears + one backwards newline merge");
+		assert(!bundle.buildClearPendingInput(logical47.text).includes("\r"),
+			"(b) the clear sequence NEVER submits");
+		assert(bundle.mergePulledPrompt("", "new") === "new"
+			&& bundle.mergePulledPrompt("existing", "new") === "existing\nnew"
+			&& bundle.mergePulledPrompt("existing\n", "new") === "existing\nnew",
+			"(b) composer merge = replace empty / newline-append non-empty");
+
+		// (c) Real view + composer wiring over the fake pty. Swap only the xterm
+		// screen for the injected buffer; the production TerminalView method and
+		// actual toolbar button perform the transfer.
+		await app.workspace.detachLeavesOfType(T);
+		await plugin.onunload(); await plugin.onload();
+		const s47 = makeFakePtyFactory(); plugin.terminalManager.ptyFactory = s47.factory;
+		await plugin.activatePiTerminal();
+		let view47 = app.workspace.getLeavesOfType(T)[0].view;
+		assert(view47.composer.pullBtn.style.display === "none",
+			"(c) Pull is absent while the leaf has no terminal");
+		await plugin.activatePiTerminal({ cwd: "/tmp/pull47" });
+		view47 = app.workspace.getLeavesOfType(T).find((leaf) => leaf.view.boundCwd === "/tmp/pull47").view;
+		const comp47 = view47.composer;
+		const pty47 = s47.ptys[0];
+		const realTerminal47 = view47.terminal;
+		const clickPull47 = () => comp47.pullBtn.handlers.get("click")[0]?.({ preventDefault() {}, stopPropagation() {} });
+		assert(comp47.pullBtn.style.display === "" && comp47.pullBtn.disabled === false,
+			"(c) Pull appears next to Send once a live terminal is attached");
+		assert(comp47.pullBtn.attributes.get("data-icon") === "hard-drive-download"
+			&& bundle.PI_ROW_ICONS.pull === "hard-drive-download",
+			"(c) the restored button uses the reference's hard-drive-download glyph");
+
+		comp47.textarea.value = "";
+		comp47.textarea.handlers.get("input")[0]?.();
+		view47.terminal = stubTerminal47(["─".repeat(20), "replace me", "─".repeat(20)], 1);
+		StubNotice.reset();
+		clickPull47();
+		assert(JSON.stringify(pty47.writes) === JSON.stringify(["\x05\x15"]),
+			"(c) successful toolbar pull writes exactly Ctrl+E/Ctrl+U to the pty");
+		assert(comp47.textarea.value === "replace me"
+			&& plugin.terminalManager.getDraft("/tmp/pull47") === "replace me",
+			"(c) an empty composer + its per-instance draft receive the pulled text");
+		assert(document.activeElement === comp47.textarea,
+			"(c) a visible composer receives focus after pulling");
+		assert(pty47.writes.every((write) => !write.includes("\r")),
+			"(c) pulling never emits Enter/CR");
+
+		view47.terminal = stubTerminal47(["─".repeat(20), "pulled suffix", "─".repeat(20)], 1);
+		clickPull47();
+		assert(comp47.textarea.value === "replace me\npulled suffix"
+			&& plugin.terminalManager.getDraft("/tmp/pull47") === "replace me\npulled suffix",
+			"(c) a non-empty composer is appended with newline separation, never overwritten");
+
+		// (d) Null/running paths are gentle no-ops: same draft and zero new pty
+		// bytes. The direct handler click models even a stale enabled-looking DOM.
+		const beforeNull47 = pty47.writes.length;
+		const draftNull47 = comp47.textarea.value;
+		view47.terminal = stubTerminal47(["─".repeat(20), "", "─".repeat(20)], 1);
+		StubNotice.reset();
+		assert(view47.pullFromTerminal() === false
+			&& pty47.writes.length === beforeNull47
+			&& comp47.textarea.value === draftNull47
+			&& StubNotice.shown.some((message) => message.includes("nothing to pull")),
+			"(d) extraction null → Notice + untouched composer + NO clear keystrokes");
+		view47.terminal = stubTerminal47(["─".repeat(20), "must not move", "─".repeat(20)], 1);
+		view47.setVisualState("running");
+		StubNotice.reset();
+		clickPull47();
+		assert(comp47.pullBtn.disabled === true
+			&& pty47.writes.length === beforeNull47
+			&& comp47.textarea.value === draftNull47
+			&& StubNotice.shown.some((message) => message.includes("running")),
+			"(d) running disables Pull and the guarded action remains a no-op");
+		view47.setVisualState("ready");
+		assert(comp47.pullBtn.disabled === false, "(d) leaving running re-enables Pull");
+
+		// (e) Active-terminal command (`arthur.pi-pull` in Obsidian) uses the same
+		// path, does not reveal/focus a hidden composer, and disappears in other
+		// view contexts.
+		const command47 = plugin.commands.get("pi-pull");
+		assert(command47?.name === "Pull unsubmitted terminal prompt into composer"
+			&& typeof command47.checkCallback === "function",
+			"(e) the pi-pull command is registered");
+		app.workspace.activeLeaf = view47.leaf;
+		app.workspace.getActiveViewOfType = (ViewClass) =>
+			app.workspace.activeLeaf?.view instanceof ViewClass ? app.workspace.activeLeaf.view : null;
+		assert(command47.checkCallback(true) === true, "(e) checkCallback exposes the command for an active pi terminal");
+		comp47.setVisible(false);
+		document.activeElement = null;
+		view47.terminal = stubTerminal47(["─".repeat(20), "command pull", "─".repeat(20)], 1);
+		command47.checkCallback(false);
+		assert(comp47.isVisible === false && comp47.textarea.value.endsWith("\ncommand pull")
+			&& document.activeElement !== comp47.textarea,
+			"(e) command moves text without opening or focusing a hidden composer");
+		app.workspace.activeLeaf = null;
+		assert(command47.checkCallback(true) === false, "(e) no active pi terminal → command unavailable");
+		view47.terminal = realTerminal47;
+		await app.workspace.detachLeavesOfType(T);
 	})();
 
 

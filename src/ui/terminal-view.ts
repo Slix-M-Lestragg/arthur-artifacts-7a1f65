@@ -112,6 +112,7 @@ import {
 } from "./terminal-theme";
 import { listSessionFilesForCwd, defaultPiSessionsDir } from "./terminal-picker";
 import { PromptComposer, buildPasteSubmit, type ComposerHost, type PiRowAction } from "./prompt-composer";
+import { buildClearPendingInput, extractPendingInput } from "./prompt-transfer";
 import { rewriteContextLinks, type LinkResolver } from "./link-rewrite";
 
 export const VIEW_TYPE_PI_TERMINAL = "arthur-pi-terminal";
@@ -777,6 +778,7 @@ export class TerminalView extends ItemView {
 	setVisualState(state: TerminalState): void {
 		this.visualState = state;
 		this.applyBadge();
+		this.syncPullButton();
 	}
 
 	/** Fan the current state's CSS class onto the badge + tab-header icon. */
@@ -1006,11 +1008,53 @@ export class TerminalView extends ItemView {
 			},
 			resolver: () => this.makeLinkResolver(),
 			submit: (text) => this.submitPrompt(text),
+			pullFromTerminal: () => this.pullFromTerminal(),
 			viewHeight: () => this.contentEl.getBoundingClientRect().height,
 			scheduleFit: () => this.scheduleFit(),
 			activeNote: () => this.readActiveNote(),
 			activeSelection: () => this.readActiveSelection(),
 		};
+	}
+
+	/** Cut pi's visible, unsubmitted TUI editor text into the composer.
+	 *  Extraction is deliberately all-or-nothing: null (or an active run) emits
+	 *  NO keystrokes. Success writes only pi-tui's Ctrl+E/Ctrl+U kill sequence —
+	 *  never Enter — then replaces an empty draft or newline-appends to one. */
+	pullFromTerminal(): boolean {
+		const terminal = this.terminal;
+		const pty = this.pty;
+		const composer = this.composer;
+		if (!terminal || !pty || this.exited || !composer) {
+			new Notice("No live pi terminal — nothing to pull", 2500);
+			return false;
+		}
+		if (this.visualState === "running") {
+			new Notice("pi is running — nothing to pull", 2500);
+			return false;
+		}
+		const pending = extractPendingInput(terminal);
+		if (!pending) {
+			new Notice("No unsubmitted terminal prompt found — nothing to pull", 2500);
+			return false;
+		}
+		try {
+			pty.write(buildClearPendingInput(pending.text));
+		} catch {
+			new Notice("Could not clear the terminal prompt — pull cancelled", 3000);
+			return false;
+		}
+		this.lastInputAt = Date.now();
+		this.recomputeState();
+		composer.acceptPulledText(pending.text);
+		new Notice(`Pulled ${pending.text.length} chars from terminal`, 1500);
+		return true;
+	}
+
+	private syncPullButton(): void {
+		this.composer?.syncPullState(
+			!!this.terminal && !!this.pty && !this.exited,
+			this.visualState === "running",
+		);
 	}
 
 	/** Submit from the composer: rewrite Obsidian links to absolute paths,
@@ -1124,6 +1168,7 @@ export class TerminalView extends ItemView {
 	 *  gone, replaced by the dot) + the cwd (full path in the tooltip), plus
 	 *  the spawn error / exit note when they apply. */
 	private renderState(): void {
+		this.syncPullButton();
 		const stateEl = this.stateEl;
 		if (!stateEl) return;
 		// The state line is rebuilt below — drop any open Resume… popover first

@@ -69,6 +69,7 @@ export const SERVICE_ICON_FALLBACK = "server";
  *                checkout — PromptPopout.ts's setDockedIcon comments "the
  *                squircle glyph used by the terminal toolbar").
  *   reference views/PromptPopout.ts (buildActionToolbar):
+ *     hard-drive-download → pull the unsubmitted TUI prompt
  *     send              → Send to pi
  *     eraser            → clear the composer
  *     file-text         → insert the active note as context
@@ -78,8 +79,7 @@ export const SERVICE_ICON_FALLBACK = "server";
  *     bar-chart-3       → word/char count toggle
  *
  * Deliberately NOT ported: `mic` (STT needs a server we don't have — FIX C
- * says skip), `hard-drive-download` (pull-from-TUI: no in-TUI editor bridge
- * in our architecture), `image-plus` (the reference opens a vault/dir/clipboard
+ * says skip), `image-plus` (the reference opens a vault/dir/clipboard
  * picker menu; our composer takes image PASTES instead).
  * `file-plus` for New has no reference icon (the reference's session panel
  * uses plain text buttons) — lucide's standard new-file glyph.
@@ -93,6 +93,7 @@ export const PI_ROW_ICONS = {
 	compact: "weight",
 	thinking: "gauge",
 	composer: "squircle",
+	pull: "hard-drive-download",
 	send: "send",
 	clear: "eraser",
 	note: "file-text",
