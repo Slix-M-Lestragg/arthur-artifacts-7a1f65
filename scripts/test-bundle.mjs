@@ -6022,7 +6022,12 @@ try {
 			"(b) the spawn options carry an env with a non-empty PATH");
 		assert(viewB.boundCwd === "/tmp/s1", "(b) the leaf is bound to the cwd");
 		assert(viewB.getDisplayText() === "session one", "(b) display text uses the title from view state");
-		assert(allText(viewB.contentEl).includes("live"), "(b) state line shows 'live' while the pty runs");
+		const row1B = findByClass(viewB.contentEl, "arthur-pi-state-line")[0];
+		assert(!!row1B, "(b) the header ROW-1 status line renders");
+		assert((findByClass(row1B, "arthur-pi-badge")[0]?.textContent ?? "") === "ready",
+			"(b) a fresh session's status reads 'ready' (never a connection word)");
+		assert(findByClass(row1B, "arthur-pi-live-dot").length === 1,
+			"(b) ROW 1 carries exactly one liveness dot (replaces the old 'live' word)");
 
 		// (c) pty output → xterm buffer; xterm keystrokes → pty.write.
 		ptys[0].emit("hello>");
@@ -6203,7 +6208,8 @@ try {
 		// (b) attach via leaf view state: xterm constructs, pty spawns, 'live'.
 		await plugin.activatePiTerminal({ cwd: "/tmp/s9", title: "session nine" });
 		assert(vA.terminal != null && ptys.length === 1, "(b) attach constructed xterm + spawned a pty");
-		assert(allText(vA.contentEl).includes("live"), "(b) state line goes 'live'");
+		assert((findByClass(vA.contentEl, "arthur-pi-badge")[0]?.textContent ?? "") === "ready",
+			"(b) attach renders the status label 'ready' (connection wording is gone)");
 		assert(vA.getDisplayText() === "session nine", "(b) display text uses the session title");
 
 		// (c) close the leaf: pty killed, xterm disposed, refs nulled, content emptied.
@@ -6670,32 +6676,32 @@ try {
 		const comp = view.composer;
 		assert(!!comp && comp.isVisible === true, "(a) the composer row host is attached and default-visible");
 
-		// (b) WAVE 5a SPLIT: the four pi commands (New/Resume…/Compact/Thinking)
-		//     live on the TOP toolbar (the state-line row); the composer's slim
-		//     FOOTER strip keeps only its own controls (no '≡' dropdown anywhere).
-		const topBar = findByClass(view.stateEl, "arthur-pi-toolbar")[0];
-		assert(!!topBar, "(b) the state-line row carries the top toolbar");
+		// (b) WAVE 6a HEADER: the pi commands live on header ROW 2
+		//     (.arthur-pi-btnrow), AFTER the composer toggle, in the user's
+		//     exact order; the composer's own strip keeps only its controls.
+		const topBar = findByClass(view.contentEl, "arthur-pi-btnrow")[0];
+		assert(!!topBar, "(b) the header ROW-2 button row renders");
 		const idsOf = (root) => root.children
 			.map((c) => (c.attributes?.get?.("id") ?? ""))
 			.filter((id) => id.startsWith("pi-btn-"));
 		const topIds = idsOf(topBar);
 		assert(JSON.stringify(topIds) === JSON.stringify([
-			"pi-btn-new", "pi-btn-resume", "pi-btn-compact", "pi-btn-thinking",
-		]), `(b) top toolbar order = New / Resume… / Compact / Thinking (got: ${topIds.join(",")})`);
+			"pi-btn-composer", "pi-btn-new", "pi-btn-resume", "pi-btn-thinking", "pi-btn-compact",
+		]), `(b) ROW 2 order = composer toggle → New → Resume… → Thinking → Compact (got: ${topIds.join(",")})`);
 		const rowIds = idsOf(comp.toolbarEl);
 		assert(JSON.stringify(rowIds) === JSON.stringify([
 			"pi-btn-send", "pi-btn-clear", "pi-btn-note", "pi-btn-selection",
 			"pi-btn-command", "pi-btn-link", "pi-btn-stats", "pi-btn-hide",
-		]), `(b) composer footer order = send → clear → inserts → stats → hide (got: ${rowIds.join(",")})`);
+		]), `(b) composer strip order = send → clear → inserts → stats → hide (got: ${rowIds.join(",")})`);
 		assert(["pi-btn-new", "pi-btn-resume", "pi-btn-compact", "pi-btn-thinking"]
 			.every((id) => findById(comp.toolbarEl, id) == null),
-			"(b) the composer footer no longer carries the moved command buttons");
+			"(b) the composer strip no longer carries the moved command buttons");
 		assert(findButton(view.contentEl, "≡") == null, "(b) the Wave-1 '≡' dropdown button is gone");
 
 		// (c) PORTED REFERENCE ICONS (the lucide id recorded by the setIcon stub).
 		const iconOf = (root, id) => findById(root, id)?.attributes?.get?.("data-icon") ?? null;
 		const expectedTopIcons = {
-			"pi-btn-new": "file-plus", "pi-btn-resume": "layers", "pi-btn-compact": "weight", "pi-btn-thinking": "gauge",
+			"pi-btn-composer": "squircle", "pi-btn-new": "file-plus", "pi-btn-resume": "layers", "pi-btn-thinking": "gauge", "pi-btn-compact": "weight",
 		};
 		const expectedRowIcons = {
 			"pi-btn-send": "send", "pi-btn-clear": "eraser", "pi-btn-note": "file-text",
@@ -6703,10 +6709,10 @@ try {
 			"pi-btn-link": "link", "pi-btn-stats": "bar-chart-3",
 		};
 		for (const [id, icon] of Object.entries(expectedTopIcons)) {
-			assert(iconOf(topBar, id) === icon, `(c) ${id} renders the reference lucide icon '${icon}' on the TOP toolbar`);
+			assert(iconOf(topBar, id) === icon, `(c) ${id} renders the reference lucide icon '${icon}' on header ROW 2`);
 		}
 		for (const [id, icon] of Object.entries(expectedRowIcons)) {
-			assert(iconOf(comp.toolbarEl, id) === icon, `(c) ${id} renders the reference lucide icon '${icon}' on the composer footer`);
+			assert(iconOf(comp.toolbarEl, id) === icon, `(c) ${id} renders the reference lucide icon '${icon}' on the composer strip`);
 		}
 		assert(typeof bundle.PI_ROW_ICONS === "object" && bundle.PI_ROW_ICONS.compact === "weight",
 			"(c) bundle exports the PI_ROW_ICONS port registry");
@@ -6725,12 +6731,12 @@ try {
 			"(d) Thinking writes the bare Shift+Tab escape (no \\r)");
 
 		// (e) Resume… → the session-file LIST popover (the only popup left), now
-		//     anchored to the STATE LINE (the button lives on the top toolbar).
+		//     anchored to header ROW 2 (the button's own row).
 		clickBtn("pi-btn-resume");
-		assert(findByClass(view.stateEl, "arthur-pi-resume-popover").length === 1,
-			"(e) Resume… opens the session-file list popover below the state line");
+		assert(findByClass(topBar, "arthur-pi-resume-popover").length === 1,
+			"(e) Resume… opens the session-file list popover below the button row");
 		clickBtn("pi-btn-resume"); // toggle closed again
-		assert(findByClass(view.stateEl, "arthur-pi-resume-popover").length === 0,
+		assert(findByClass(topBar, "arthur-pi-resume-popover").length === 0,
 			"(e) a second Resume… click closes the popover");
 
 		// (f) SLASH PICKER — LOCAL source of truth (fake ~/.pi tree injected).
@@ -7246,13 +7252,14 @@ try {
 			"(g) never shrinks below the min height");
 		assert(bundle.clampComposerHeight(150, 400, 50) === 150, "(g) in-range heights pass through");
 
-		// (h) hide toggle: panel's `hide` button + the state-line ⌨ toggle.
+		// (h) hide toggle: panel's `hide` button + the ROW-2 composer toggle
+		//     (the reference's squircle prompt-surface glyph).
 		compA.setVisible(false);
 		assert(compA.isVisible === false && compA.rootEl.style.display === "none", "(h) hide button hides the panel");
-		const toggleBtn = findButton(viewA.stateEl, "⌨");
-		assert(!!toggleBtn, "(h) state line carries the composer toggle button");
+		const toggleBtn = findById(viewA.contentEl, "pi-btn-composer");
+		assert(!!toggleBtn, "(h) header ROW 2 carries the composer toggle button");
 		toggleBtn?.handlers.get("click")[0]?.({ preventDefault() {}, stopPropagation() {} });
-		assert(compA.isVisible === true && compA.rootEl.style.display === "", "(h) state-line toggle brings it back");
+		assert(compA.isVisible === true && compA.rootEl.style.display === "", "(h) the ROW-2 toggle brings it back");
 	})();
 
 
@@ -7548,9 +7555,9 @@ try {
 	})();
 
 
-	// ---- 43. Wave 5a — composer full-size (textarea body + slim footer) ----
-//      + top-toolbar command buttons + the contract's 'ready' label --------
-	console.log("== 43. Wave 5a — composer full-size structure, top toolbar, 'ready' label ==");
+	// ---- 43. Wave 6a — composer rows (strip ROW 1 + textarea ROW 2) ----------
+//      + structure guards + the contract's 'ready' label -------------------
+	console.log("== 43. Wave 6a — composer rows (button strip + textarea body), structure guards, 'ready' label ==");
 	await (async () => {
 		const T = "arthur-pi-terminal";
 		await app.workspace.detachLeavesOfType(T);
@@ -7560,15 +7567,15 @@ try {
 		const view43 = app.workspace.getLeavesOfType(T)[0].view;
 		const comp43 = view43.composer;
 
-		// (a) COMPOSER STRUCTURE: resizer → TEXTAREA (the panel body, BEFORE the
-		//     footer strip) → toolbar — the text element never shares a row with
-		//     the buttons, so it spans the panel's full width and fills its height.
+		// (a) COMPOSER STRUCTURE (Wave 6a user layout): resizer → BUTTON STRIP
+		//     (ROW 1 — the existing button strip) → TEXTAREA (ROW 2 — the big
+		//     multiline body that fills ALL remaining panel space).
 		const kids43 = comp43.rootEl.children;
 		assert(kids43[0] === comp43.resizerEl, "(a) resizer first (drag handle on the panel's top edge)");
-		assert(kids43[1] === comp43.textarea,
-			"(a) the textarea is the panel BODY (second child, above the footer strip)");
-		assert(kids43[2] === comp43.toolbarEl,
-			"(a) the button cluster is a slim footer strip BELOW the textarea");
+		assert(kids43[1] === comp43.toolbarEl,
+			"(a) ROW 1 = the existing button strip, ABOVE the textarea");
+		assert(kids43[2] === comp43.textarea,
+			"(a) ROW 2 = the textarea, the panel BODY filling the remaining space");
 		assert(comp43.textarea.classList.contains("arthur-pi-composer-input") === true,
 			"(a) the textarea carries the composer input class");
 		assert(comp43.textarea.style.fontSize === "16px"
@@ -7579,14 +7586,15 @@ try {
 		const wrap43 = view43.contentEl.children[0];
 		assert(wrap43.children[wrap43.children.length - 1] === comp43.rootEl,
 			"(a) the composer panel stays bottom-docked (last flex child of the view)");
-		assert(wrap43.children[1] === findByClass(view43.contentEl, "arthur-pi-terminal-surface")[0]
-			&& wrap43.children[0] === view43.stateEl,
-			"(a) view order = state line (top toolbar) → terminal surface → composer");
+		assert(wrap43.children[2] === findByClass(view43.contentEl, "arthur-pi-terminal-surface")[0]
+			&& wrap43.children[0] === view43.stateEl
+			&& wrap43.children[1] === findByClass(view43.contentEl, "arthur-pi-btnrow")[0],
+			"(a) view order = status row → button row → terminal surface → composer");
 
 		// (b) styles.css structure guards (text-level — smoke has no CSS engine):
 		//     the panel is a flex column, the textarea is a block-level flex body
-		//     with width:100%/min-height:0, the footer strip is fixed chrome, the
-		//     state line anchors the Resume… popover.
+		//     with width:100%/min-height:0, the button strip is fixed chrome, the
+		//     button row anchors the Resume… popover.
 		const css43 = fs.readFileSync(path.join(root, "styles.css"), "utf8");
 		assert(/\.arthur-pi-composer\s*\{[^}]*display:\s*flex[^}]*flex-direction:\s*column/s.test(css43),
 			"(b) the composer panel is a flex column");
@@ -7597,11 +7605,11 @@ try {
 		assert(/\.arthur-pi-composer-input\s*\{[^}]*max-width:\s*none/s.test(css43),
 			"(b) no max-width can cap the textarea");
 		assert(/\.arthur-pi-composer-toolbar\s*\{[^}]*flex:\s*0 0 auto/s.test(css43),
-			"(b) the footer strip is fixed chrome (flex: 0 0 auto — cannot squeeze the body)");
+			"(b) the button strip is fixed chrome (flex: 0 0 auto — cannot squeeze the body)");
 		assert(/\.arthur-pi-terminal-surface\s*\{[^}]*flex:\s*1 1 auto[^}]*min-height:\s*0/s.test(css43),
 			"(b) the terminal surface keeps the remaining flex space");
-		assert(/\.arthur-pi-state-line\s*\{[^}]*position:\s*relative/s.test(css43),
-			"(b) the state line anchors the Resume… popover (position:relative)");
+		assert(/\.arthur-pi-btnrow\s*\{[^}]*position:\s*relative/s.test(css43),
+			"(b) the button row anchors the Resume… popover (position:relative)");
 		assert(/\.arthur-pi-state-ready\s*\{[^}]*color:/s.test(css43),
 			"(b) the contract's is-ready state class is styled");
 
@@ -7619,6 +7627,141 @@ try {
 			"(c) the pre-run state renders the 'ready' label");
 		assert(badge43b.className.split(/\s+/).includes(`arthur-pi-state-${PRE_RUN_STATE_NAME}`),
 			"(c) the pre-run badge carries its state CSS class");
+
+		await app.workspace.detachLeavesOfType(T);
+	})();
+
+	// ---- 44. Wave 6a — header ROW 1 (liveness dot + status + cwd) ----------
+//      + ROW 2 order/squircle + label map + CR run boundary + refit --------
+	console.log("== 44. Wave 6a — header rows, liveness dot, status labels, CR run boundary, composer refit ==");
+	await (async () => {
+		const T = "arthur-pi-terminal";
+		await app.workspace.detachLeavesOfType(T);
+		await plugin.onunload(); await plugin.onload();
+		const s44 = makeFakePtyFactory(); plugin.terminalManager.ptyFactory = s44.factory;
+		await plugin.activatePiTerminal({ cwd: "/tmp/w6a", title: "w6a" });
+		const view = app.workspace.getLeavesOfType(T)[0].view;
+		const pty = s44.ptys[0];
+
+		// (a) ROW 1 structure, left → right: liveness dot (NO text, tooltip) →
+		//     status label → cwd (full path in its title tooltip).
+		const row1 = findByClass(view.contentEl, "arthur-pi-state-line")[0];
+		assert(!!row1, "(a) the header ROW-1 status line renders");
+		const dot = findByClass(row1, "arthur-pi-live-dot")[0];
+		const badge = findByClass(row1, "arthur-pi-badge")[0];
+		const cwdEl = findByClass(row1, "arthur-pi-state-cwd")[0];
+		assert(row1.children[0] === dot && row1.children[1] === badge && row1.children[2] === cwdEl,
+			"(a) ROW 1 order = dot → status label → cwd");
+		assert((dot.textContent ?? "") === "", "(a) the liveness dot carries NO text — color + tooltip only");
+		assert(!!dot.attributes.get("title"), "(a) the dot carries a hover tooltip");
+		assert(cwdEl.textContent === "/tmp/w6a" && cwdEl.attributes.get("title") === "/tmp/w6a",
+			"(a) the cwd cell shows the path with the full path in its title tooltip");
+		assert(dot.className.split(/\s+/).includes("pi-live-dot--live"), "(a) live pty → the green dot class");
+		// STATUS-SOURCE PURITY: the status text is a computeActivityState label —
+		// never the old connection wording ('live', 'connecting', …).
+		assert(badge.textContent === "ready", "(a) fresh construct → the status label 'ready' (pure computeActivityState)");
+		assert(!/^(live|connecting|disconnect|closed)$/.test(badge.textContent ?? ""),
+			"(a) the status element never shows connection wording");
+		assert(!/\blive\b|\bconnecting\b|\bdisconnected\b/i.test((row1.textContent ?? "").replace(/\//g, " ")),
+			"(a) ROW 1 carries no connection-state wording anywhere");
+
+		// (b) ROW 2: exact button order + the reference squircle toggle icon.
+		const row2 = findByClass(view.contentEl, "arthur-pi-btnrow")[0];
+		const ids44 = row2.children.map((c) => c.attributes?.get?.("id") ?? "").filter(Boolean);
+		assert(JSON.stringify(ids44) === JSON.stringify([
+			"pi-btn-composer", "pi-btn-new", "pi-btn-resume", "pi-btn-thinking", "pi-btn-compact",
+		]), `(b) ROW 2 exact order = composer toggle → New → Resume → Thinking → Compact (got: ${ids44.join(",")})`);
+		assert(findById(row2, "pi-btn-composer")?.attributes?.get?.("data-icon") === "squircle",
+			"(b) the composer toggle renders the reference's lucide 'squircle' (asserted icon string)");
+		assert(bundle.PI_ROW_ICONS.composer === "squircle",
+			"(b) PI_ROW_ICONS registers composer = 'squircle' (reference prompt-surface toggle)");
+
+		// (c) The contract's display labels: done-unseen/seen → 'done',
+		//     awaiting-input → 'wait' (driven through the live badge element).
+		assert(JSON.stringify(bundle.PI_STATE_LABELS) === JSON.stringify({
+			ready: "ready", running: "running", "awaiting-input": "wait", "done-unseen": "done", seen: "done", error: "error",
+		}), "(c) PI_STATE_LABELS is the contract's display map");
+		const labelOf = () => findByClass(view.contentEl, "arthur-pi-badge")[0]?.textContent ?? "";
+		view.setVisualState("awaiting-input");
+		assert(labelOf() === "wait", "(c) awaiting-input renders the 'wait' label");
+		view.setVisualState("done-unseen");
+		assert(labelOf() === "done", "(c) done-unseen renders the 'done' label");
+		view.setVisualState("seen");
+		assert(labelOf() === "done", "(c) seen renders the 'done' label");
+		view.setVisualState("running");
+		assert(labelOf() === "running", "(c) running renders the 'running' label");
+		view.setVisualState("error");
+		assert(labelOf() === "error", "(c) error renders the 'error' label");
+		view.setVisualState("ready");
+
+		// (d) RUN BOUNDARY (Wave 6b consumed by the view): a plain typed
+		//     keystroke holds ready; CR-carrying input (Enter) starts the run.
+		//     Awaiting-input was cleared by the setVisualState('ready') above.
+		view.terminal.input("abc", true);
+		await sleep(20);
+		assert(view.getVisualState() === "ready",
+			"(d) typed-but-not-entered keystrokes hold ready (a lone key never flips running)");
+		view.terminal.input("\r", true);
+		await sleep(20);
+		assert(view.getVisualState() === "running",
+			"(d) CR-carrying input (Enter) starts the run → running");
+		// LIVENESS IS A SECOND CHANNEL: the status changed, the dot did NOT.
+		assert(findByClass(view.contentEl, "arthur-pi-live-dot")[0].className.split(/\s+/).includes("pi-live-dot--live"),
+			"(d) the dot stays green through the ready→running status change");
+
+		// (e) exits: clean → orange warn dot + 'done' status; nonzero → red
+		//     error dot + 'error' status (dot class is the ONLY thing that
+		//     tracks liveness).
+		pty.exit(0);
+		await sleep(20);
+		let dotE = findByClass(view.contentEl, "arthur-pi-live-dot")[0];
+		assert(dotE.className.split(/\s+/).includes("pi-live-dot--warn"),
+			"(e) clean exit → the orange warn dot");
+		assert(labelOf() === "done", "(e) clean exit status label = 'done' (never error)");
+		assert(findByClass(view.contentEl, "arthur-pi-live-dot").length === 1,
+			"(e) exactly one liveness dot (no duplicate signals)");
+		// a second instance for the nonzero exit
+		await plugin.activatePiTerminal({ cwd: "/tmp/w6b", title: "w6b" });
+		const viewB = app.workspace.getLeavesOfType(T).find((l) => l.view.boundCwd === "/tmp/w6b").view;
+		s44.ptys[1].exit(3);
+		await sleep(20);
+		dotE = findByClass(viewB.contentEl, "arthur-pi-live-dot")[0];
+		assert(dotE.className.split(/\s+/).includes("pi-live-dot--error"),
+			"(e) nonzero exit → the red error dot");
+		assert((findByClass(viewB.contentEl, "arthur-pi-badge")[0]?.textContent ?? "") === "error",
+			"(e) nonzero exit status label = 'error'");
+
+		// (f) COMPOSER REFIT — the panel participates in the view's resize path:
+		//     firing the surface ResizeObserver re-clamps the panel height to
+		//     the current leaf (the stub leaf is 0px tall, so the ceiling
+		//     collapses to COMPOSER_MIN_HEIGHT); the textarea keeps filling the
+		//     panel via the flex rules asserted in (b) of section 43.
+		const comp = view.composer;
+		comp.rootEl.style.height = "300px";
+		const ro44 = globalThis.ResizeObserver.instances.find((r) => !r.disconnected
+			&& String(r.target?.className ?? "").includes("arthur-pi-terminal-surface"));
+		assert(!!ro44, "(f) the view still observes its terminal surface (shared RO fit path)");
+		ro44.cb([]);
+		assert(comp.rootEl.style.height === `${bundle.COMPOSER_MIN_HEIGHT}px`,
+			"(f) a container resize re-clamps the composer panel (it participates in the RO fit path)");
+		// the pure clamp through a real-sized host: 300px panel in a 400px leaf → 200px.
+		const host44 = {
+			cwd: () => "/tmp/w6a",
+			getDraft: () => "",
+			setDraft: () => {},
+			resolver: () => () => null,
+			submit: () => true,
+			viewHeight: () => 400,
+			scheduleFit: () => {},
+			activeNote: async () => null,
+			activeSelection: () => null,
+		};
+		const comp44 = new bundle.PromptComposer(new StubEl("div"), host44, plugin);
+		comp44.rootEl.style.height = "300px";
+		comp44.refit();
+		assert(comp44.rootEl.style.height === "200px",
+			"(f) refit re-clamps a 300px panel to the 50% ceiling of a 400px leaf");
+		comp44.destroy();
 
 		await app.workspace.detachLeavesOfType(T);
 	})();
@@ -7642,4 +7785,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / local-pty-terminal-spawn-args+pty→xterm+xterm→pty+resize+exit-state / local-pty-resolver-absolute-path-require+no-native-load / local-terminal-view-lazy-no-cwd+attach+close-kill+reopen / local-terminal-manager-per-cwd-routing+3-leaves+isolation+reuse+full-unload-kill-all / local-terminal-picker-fake-sessions-dir+select→open+vault-root+cwd-input+mobile-hide / ahp-client-load-retry-resilience-819e2bb-regression / pi-instance-states+badge-CSS-classes+focus-clears-awaiting / slash-toolbar-payload-bytes-new+compact+thinking / session-resume-spawn-args+listSessionFilesForCwd+respawn / send-active-note+selection-payload+wikilink-rewrite+no-terminal-notice / terminal-settings-plumbing-fontSize+scrollback+new-only / theme-follow-xterm-styling-var→ITheme+fallbacks+applyTheme / instance-picker+ribbon-command-routing+open-instances / pi-prompt-composer-drafts+bracketed-paste-submit+wikilink-context+@-files+image-paste+resizer-clamp / pi-farm-view-open+dormant-merge+resume/focus-actions+refresh-interval-lifecycle+empty-state+picker-browse-affordance / wave4-state-hysteresis-input-gate+5s-silence+re-arm-tick-loops-no-flap / inline-pi-toolbar-row-order+reference-lucide-icons+resume-popover+local-slash-picker-fake-fs / xterm-metrics-letterSpacing-0+lineHeight-1+font-monospace-chain / promptFontSize-default-clamp-apply+full-width-autogrow+css-guards / wave5a-composer-full-size+top-toolbar+ready-label all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / local-pty-terminal-spawn-args+pty→xterm+xterm→pty+resize+exit-state / local-pty-resolver-absolute-path-require+no-native-load / local-terminal-view-lazy-no-cwd+attach+close-kill+reopen / local-terminal-manager-per-cwd-routing+3-leaves+isolation+reuse+full-unload-kill-all / local-terminal-picker-fake-sessions-dir+select→open+vault-root+cwd-input+mobile-hide / ahp-client-load-retry-resilience-819e2bb-regression / pi-instance-states+badge-CSS-classes+focus-clears-awaiting / slash-toolbar-payload-bytes-new+compact+thinking / session-resume-spawn-args+listSessionFilesForCwd+respawn / send-active-note+selection-payload+wikilink-rewrite+no-terminal-notice / terminal-settings-plumbing-fontSize+scrollback+new-only / theme-follow-xterm-styling-var→ITheme+fallbacks+applyTheme / instance-picker+ribbon-command-routing+open-instances / pi-prompt-composer-drafts+bracketed-paste-submit+wikilink-context+@-files+image-paste+resizer-clamp / pi-farm-view-open+dormant-merge+resume/focus-actions+refresh-interval-lifecycle+empty-state+picker-browse-affordance / wave4-state-hysteresis-input-gate+5s-silence+re-arm-tick-loops-no-flap / inline-pi-toolbar-row-order+reference-lucide-icons+resume-popover+local-slash-picker-fake-fs / xterm-metrics-letterSpacing-0+lineHeight-1+font-monospace-chain / promptFontSize-default-clamp-apply+full-width-autogrow+css-guards / wave5a→6a-composer-rows+structure-guards / wave6a-header-rows+liveness-dot+status-labels+cr-run-boundary+composer-refit all clean");

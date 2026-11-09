@@ -27,6 +27,32 @@
  * union alias was removed at integration once the view-side call sites
  * landed on "ready").
  *
+ * WAVE 6b — STATE/LIVENESS SEMANTICS (the user contract):
+ *   - RUN BOUNDARY = CR-CARRYING INPUT. "The user sent a prompt" now means
+ *     an input chunk that actually STARTS a run: a keystroke carrying `\r`
+ *     (Enter in the TUI) or the composer's bracketed-paste submit (which
+ *     ends in `\r`). A LONE typed keystroke (no Enter) does NOT start
+ *     running — and neither can xterm's AUTOMATIC protocol responses (OSC
+ *     color reports, DA, CPR, kitty-keyboard replies: ESC sequences carry
+ *     no CR), which is the root cause of the observed "fresh session still
+ *     shows running" bug: they flowed through the view's terminal.onData
+ *     and counted as user input, making the never-prompted session read
+ *     prompted → banner burst → running. Chosen over "output-burst-after-
+ *     any-input" because a burst gate would re-open that exact hole (fake
+ *     input + banner burst ≥ threshold = running); the CR gate is immune to
+ *     it with zero view-side cooperation. Callers predating 6b that don't
+ *     pass `lastSubmitAt` keep the old lastInputAt behavior (fallback), so
+ *     the module never breaks the view mid-integration.
+ *   - LIVENESS is a SECOND, separate channel: computeLiveness()
+ *     ("live" | "warn" | "error") paints the green/orange/red dot from pty
+ *     facts only (alive / exited / exitCode / signal); the session STATUS
+ *     badge keeps its own vocabulary. Interplay pinned by contract: a CLEAN
+ *     exit (code 0, no signal) is liveness "warn" (orange dot — the process
+ *     is gone) while the session status stays done/seen ("done"), NEVER
+ *     error; a nonzero exit or a SIGNAL kill ("died unexpectedly") is
+ *     "error" on both channels; a live pty is "live" regardless of whether
+ *     the status is ready/running/done/awaiting-input.
+ *
  * WAVE 4 (FIX B) — HYSTERESIS. The Wave-1 heuristic (ACTIVE_MS=1200 /
  * IDLE_MS=1500) flapped running↔done-unseen with NO prompt sent, because pi's
  * TUI redraws a spinner every ~1s: a gap >1200ms read "done", the next
@@ -48,12 +74,14 @@
  *      began (≥ DONE_REARM_BYTES). Stray frames stay below that bar.
  *
  * States (mirrors the reference PiTerminalIconState vocabulary):
- *   ready           — alive, not exited, no user input sent yet: a new or
- *                     loaded session that hasn't generated anything on the
- *                     user's behalf (banner bursts don't flip it).
- *   running         — after first user input: pty alive and data/input
- *                     within DONE_SILENCE_MS of now (spinner redraws keep
- *                     it here).
+ *   ready           — alive, not exited, no prompt sent yet (no CR-carrying
+ *                     input): a new or loaded session that hasn't generated
+ *                     anything on the user's behalf (banner bursts, spinner
+ *                     ticks, lone keystrokes and xterm auto-responses don't
+ *                     flip it).
+ *   running         — after a submitted prompt (CR-carrying input): pty
+ *                     alive and data/input within DONE_SILENCE_MS of now
+ *                     (spinner redraws keep it here).
  *   done-unseen     — the session was PROMPTED, then went silent for
  *                     >DONE_SILENCE_MS while the leaf was UNFOCUSED → accent
  *                     "breathing" badge until focused. Holds against spinner
@@ -64,7 +92,8 @@
  *                     (detectAwaitingInput) and the leaf is unfocused → red
  *                     "?" badge; clears on focus. Detection UNCHANGED (FIX B
  *                     explicitly keeps it as-is).
- *   error           — the pty exited non-zero / spawn failed.
+ *   error           — the pty exited non-zero / spawn failed / was killed
+ *                     by a signal ("died unexpectedly", even at code 0).
  *
  * The pure helpers below are exported so smoke can assert the transitions
  * and CSS class names without a live pty; the view owns the timers that call
@@ -123,10 +152,23 @@ export interface ActivityInputs {
 	exited: boolean;
 	/** Pty exit code (only meaningful when `exited`). */
 	exitCode?: number | null;
+	/** Signal that ended the pty (only meaningful when `exited`). Non-zero =
+	 *  the process DIED unexpectedly (kill/crash — node-pty reports signal
+	 *  kills this way) → error even when exitCode coerces to 0. */
+	signal?: number | null;
 	/** ms of the most recent pty data chunk (null = no data yet). */
 	lastDataAt: number | null;
 	/** ms of the most recent keystroke sent to the pty (null = none). */
 	lastInputAt: number | null;
+	/** ms of the most recent CR-CARRYING input — a keystroke chunk containing
+	 *  `\r` (Enter) or the composer's bracketed-paste submit (ends in `\r`).
+	 *  The Wave-6b "prompt sent" signal: a LONE keystroke (no Enter) does NOT
+	 *  start a run, and neither do xterm's automatic protocol responses (ESC
+	 *  sequences carry no CR) — the root cause of the fresh-session-running
+	 *  bug. `undefined` = the caller predates Wave 6b and only tracks
+	 *  lastInputAt (fall back to it, behavior unchanged); `null` = the caller
+	 *  tracks submits and none has happened yet. */
+	lastSubmitAt?: number | null;
 	/** ms of the most recent chunk that matched `detectAwaitingInput`. */
 	lastQuestionAt: number | null;
 	/** Cumulative bytes the pty has emitted this session (0 = none yet). Used
@@ -201,12 +243,15 @@ export function syncActivityMemory(
  *      (unchanged detection, FIX B)
  *   5. nothing ever happened      → ready (fresh spawn or loaded-but-quiet;
  *      the pre-Wave-5b code split this on `alive` — see below)
- *   6. inside a done stretch      → hold done/seen unless RE-ARMED (fresh
- *      input after doneSince, or ≥ DONE_REARM_BYTES since then) — spinner
- *      frames can't bounce it (FIX B rule 3)
- *   7. never prompted (lastInputAt null/0) → ready — never done/seen (FIX B
- *      rule 1, the input gate) and never running (Wave-5b: pre-input output
- *      is not a run — banner bursts and spinner ticks hold ready)
+ *   6. inside a done stretch      → hold done/seen unless RE-ARMED (a fresh
+ *      CR-CARRYING submit after doneSince, or ≥ DONE_REARM_BYTES since
+ *      then) — spinner frames and lone keystrokes can't bounce it (FIX B
+ *      rule 3, tightened by Wave 6b to the submit signal)
+ *   7. never prompted (no CR-carrying input ever — lastSubmitAt null/0,
+ *      lastInputAt as a pre-6b fallback) → ready — never done/seen (FIX B
+ *      rule 1, the input gate) and never running (Wave-5b/6b: pre-submit
+ *      output is not a run — banner bursts, spinner ticks and lone
+ *      keystrokes hold ready)
  *   8. silence ≤ DONE_SILENCE_MS  → running (spinner redraws reset this)
  *   9. silence > DONE_SILENCE_MS  → focused ? seen : done-unseen
  * Pure over the inputs (incl. the memory fields) so smoke can assert every
@@ -215,9 +260,14 @@ export function syncActivityMemory(
 export function computeActivityState(inp: ActivityInputs): TerminalState {
 	if (inp.exited) {
 		const code = inp.exitCode ?? 0;
-		if (code !== 0) return "error";
+		// Died unexpectedly (signal kill / crash) is an error even at code 0.
+		if (code !== 0 || (inp.signal ?? 0) !== 0) return "error";
 		return inp.focused ? "seen" : "done-unseen";
 	}
+	// Wave-6b "prompt sent" signal: CR-carrying input (Enter / composer
+	// submit). Callers predating 6b don't pass lastSubmitAt — fall back to
+	// their lastInputAt so their behavior is unchanged until they land.
+	const submitAt = inp.lastSubmitAt !== undefined ? inp.lastSubmitAt : inp.lastInputAt;
 	// Awaiting-input: a question pattern seen recently AND we're not looking.
 	// (UNCHANGED — FIX B keeps this detection exactly as it was.)
 	if (
@@ -236,19 +286,56 @@ export function computeActivityState(inp: ActivityInputs): TerminalState {
 	// Rule 3: hold a done stretch until re-armed (input after doneSince, or a
 	// real data burst since it began — bytesSinceDone = totalBytes - bytesAtDone).
 	if (inp.doneSince != null) {
-		const freshInput = inp.lastInputAt != null && inp.lastInputAt > inp.doneSince;
+		const freshSubmit = submitAt != null && submitAt > inp.doneSince;
 		const burst =
 			(inp.totalBytes ?? 0) - (inp.bytesAtDone ?? 0) >= DONE_REARM_BYTES;
-		if (!freshInput && !burst) return inp.focused ? "seen" : "done-unseen";
+		if (!freshSubmit && !burst) return inp.focused ? "seen" : "done-unseen";
 	}
-	// Rule 1: a session that has never seen user input can never read
-	// done/seen — and, since Wave-5b, never running either: data no user
-	// asked for (banner bursts, spinner ticks) is not a run. It stays ready.
-	const prompted = inp.lastInputAt != null && inp.lastInputAt > 0;
+	// Rule 1: a session that has never seen a SUBMITTED prompt (CR-carrying
+	// input) can never read done/seen — and never running either: output no
+	// user asked for (banner bursts, spinner ticks) and lone keystrokes are
+	// not a run. It stays ready.
+	const prompted = submitAt != null && submitAt > 0;
 	if (!prompted) return "ready";
 	// Rule 2: done/seen only after DONE_SILENCE_MS of true silence.
 	if (inp.now - lastActivity <= DONE_SILENCE_MS) return "running";
 	return inp.focused ? "seen" : "done-unseen";
+}
+
+/** Pty LIVENESS verdict — the dot-color channel, separate from the session
+ *  status badge (computeActivityState). Pure pty facts, no activity
+ *  heuristics: the two channels answer different questions — "is the
+ *  process there?" (this) vs "what is the session doing?" (the status).
+ *  Interplay pinned by the Wave-6b contract:
+ *    - live (green):  pty alive — whatever the status (ready / running /
+ *                     done-unseen / seen / awaiting-input).
+ *    - warn (orange): pty not spawned yet, or exited CLEANLY (code 0, no
+ *                     signal) — while the session STATUS stays done/seen
+ *                     ("done"), never error.
+ *    - error (red):   exited non-zero, or killed by a signal (died
+ *                     unexpectedly) — the status channel reads error too.
+ */
+export type TerminalLiveness = "live" | "warn" | "error";
+
+/** Inputs to computeLiveness (all pure pty facts). */
+export interface LivenessInputs {
+	/** A live pty exists and hasn't exited. */
+	alive: boolean;
+	/** The pty has exited (exitCode/signal qualify how). */
+	exited: boolean;
+	/** Exit code (only meaningful when `exited`); null/undefined → 0. */
+	exitCode?: number | null;
+	/** Signal that ended the pty — non-zero = died unexpectedly → error. */
+	signal?: number | null;
+}
+
+/** Compute the pty liveness dot verdict (see TerminalLiveness). */
+export function computeLiveness(inp: LivenessInputs): TerminalLiveness {
+	if (inp.exited) {
+		const code = inp.exitCode ?? 0;
+		return code !== 0 || (inp.signal ?? 0) !== 0 ? "error" : "warn";
+	}
+	return inp.alive ? "live" : "warn";
 }
 
 /**

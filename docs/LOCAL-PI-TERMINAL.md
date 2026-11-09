@@ -368,3 +368,69 @@ width:100%/min-height:0, fixed footer chrome, surface keeps the remaining
 space, state-line popover anchor, the is-ready class), and the 'ready'
 label for a pre-run session (strict post-rename; the tolerant branch covers
 the pre-rename vocabulary and the integrator removes it after integration).
+
+## Wave 6a — header rows + composer layout (user spec)
+
+Three user-facing changes (the header restructured EXACTLY as two rows, the
+composer layout "still wrong", a brand-new session's status showing
+'running'):
+
+- **Header ROW 1** (`src/ui/terminal-view.ts`, `styles.css`). Left → right:
+  (1) the **liveness dot** — ONLY a small colored circle, no text; green
+  live / orange warn / red error from the shared `computeLiveness`
+  (`terminal-state.ts`, Wave 6b), meaning in the `title` tooltip
+  (`.arthur-pi-live-dot` + `.pi-live-dot--live|--warn|--error`); (2) the
+  **session-status label**, driven PURELY by `computeActivityState` through
+  the contract display map `PI_STATE_LABELS` (ready/running → verbatim,
+  awaiting-input → `wait`, done-unseen/seen → `done`, error → `error`);
+  (3) the **cwd**, right-aligned, ellipsized, full path in its `title`.
+  The old hardcoded `live` connection-state span (`renderState`'s
+  `arthur-ahp-state--ready` "live" word — same wording family as the AHP
+  view's `'live · 0.3.0'` protocol badge) is gone, replaced by the dot.
+- **Header ROW 2** (`.arthur-pi-btnrow`, its own flex row under ROW 1, also
+  the new anchor for the Resume… popover). Exact button order: the
+  **composer toggle** first — now the reference obsidian-pi's prompt-surface
+  toggle icon, lucide `squircle` (`views/TerminalView.ts` renderShell
+  `promptBtn`, "Open prompt editor (⌘E)"; registered in `PI_ROW_ICONS.composer`
+  with provenance in `src/icons.ts`) — then **New**, **Resume…**, **Thinking**,
+  **Compact** (`/new\r`, the session-file popover, `\x1b[Z`, `/compact\r`).
+- **Composer layout** (`src/ui/prompt-composer.ts`, `styles.css`). The panel
+  is now resizer → **ROW 1: the existing button strip**
+  (send/clear/insert-note/insert-selection/slash/link/stats/hide —
+  `flex: 0 0 auto`, may wrap freely) → **ROW 2: ONE big multiline textarea**
+  filling ALL remaining panel space (`flex: 1 1 auto` + `min-height: 0` +
+  `width: 100%` + `max-width: none` on a flex-column panel with
+  `min-height: 0` ancestors — nothing can squeeze or cap it). The PANEL
+  height adapts when the view is resized: the drag resizer (or auto-grow)
+  still sets the height, and the view's existing ResizeObserver →
+  `scheduleFit` chain now calls `composer.refit()` so the height re-clamps
+  to the current leaf's max-% ceiling; the flex column keeps the textarea
+  filling whatever space the panel has.
+- **Run boundary consumed** (the "fresh session shows running" fix,
+  Wave 6b contract): the view now tracks `lastSubmitAt` — a run starts on
+  CR-CARRYING input (an Enter keystroke in xterm, the composer's
+  bracketed-paste submit, or a CR-carrying `writeToPty` send-note payload).
+  A plain typed-but-not-entered keystroke — and xterm's automatic protocol
+  replies (OSC color reports, DA, CPR, kitty-keyboard — ESC sequences that
+  carry no CR), which previously flowed through `terminal.onData` and marked
+  the never-prompted session as prompted → banner burst → running — no
+  longer flip the status. Documented choice: the CR gate over
+  "burst-after-input" (a burst threshold would re-open the exact
+  fake-input hole). The toolbar slash buttons (`/new\r`, `/compact\r`)
+  deliberately do NOT set `lastSubmitAt` — they are pi UI navigation; a
+  `/new` respawn reads ready again.
+
+Smoke coverage: **section 28h/29** assert the fresh status label `ready` +
+the single liveness dot (connection wording gone); **section 34** asserts
+the ROW-2 order (composer toggle → New → Resume… → Thinking → Compact), the
+`squircle` toggle icon, and the popover anchored to the button row;
+**section 40(h)** drives the hide/toggle through `pi-btn-composer`;
+**section 43** asserts the composer DOM rows (resizer → strip → textarea)
++ the styles.css flex guards (incl. the `.arthur-pi-btnrow` popover anchor);
+**section 44** (new) covers ROW-1 structure (dot with no text + title
+tooltip, status label, cwd with full-path title), status-source purity (no
+connection wording), the `PI_STATE_LABELS` map (`wait`/`done`), the CR run
+boundary through the live view (lone keystroke holds ready, Enter →
+running, dot class unchanged through status changes), clean vs nonzero
+exit (warn + `done` / error + `error`), and the composer `refit` re-clamp
+through the stub ResizeObserver.

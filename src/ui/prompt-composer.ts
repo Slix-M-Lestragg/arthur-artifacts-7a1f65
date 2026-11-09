@@ -5,18 +5,21 @@
  * plain multiline textarea here, since our submit path is bracketed paste,
  * not the APC marker that needs the obsidian-bridge pi extension).
  *
- * Contents (top → bottom): drag resizer → full-width textarea BLOCK that
- * fills the panel's remaining height edge to edge and AUTO-GROWS with content
- * up to the composer max-height setting (Wave 5a — the text element is the
- * panel's BODY, never a squeezed row item) → ONE slim FOOTER toolbar strip
- * (Wave 5a moved the Wave 4/FIX C pi command buttons New / Resume… /
- * Compact / Thinking onto the terminal view's TOP toolbar; the strip carries
- * the reference-ported composer controls — send / clear / insert note /
- * insert selection / slash-command picker / insert `[[wikilink]]` token /
- * word-char count — as a right-aligned icon-only cluster, then the
- * count/flash/hide tail) → transient "sent" flash. An `@`-file suggester
- * (at-suggester.ts) rides the textarea, and the `square-slash` button opens
- * the LOCAL command picker (pi-commands.ts).
+ * Contents (top → bottom, Wave 6a user layout): drag resizer → ONE slim
+ * BUTTON STRIP (ROW 1 — the reference-ported composer controls: send /
+ * clear / insert note / insert selection / slash-command picker / insert
+ * `[[wikilink]]` token / word-char count, as a right-aligned icon-only
+ * cluster, then the count/flash/hide tail) → ONE big multiline TEXTAREA
+ * (ROW 2 — the panel body: full panel width edge to edge, flex-grows to
+ * fill ALL remaining panel height down to the panel bottom; it never
+ * shares a row with the buttons). The panel height adapts when the view is
+ * resized: the drag resizer (or the auto-grow clamp) sets the panel
+ * height, the view's ResizeObserver → scheduleFit chain calls refit() so
+ * the height re-clamps to the current leaf, and the flex column keeps the
+ * textarea filling whatever space the panel has (min-height:0 discipline
+ * throughout). An `@`-file suggester (at-suggester.ts) rides the textarea,
+ * and the `square-slash` button opens the LOCAL command picker
+ * (pi-commands.ts). A transient "sent" flash sits on the strip.
  *
  * Submit semantics — BRACKETED PASTE (reference PtyClient
  * `submitPromptViaPaste`): the composer hands the raw text to the host, which
@@ -65,7 +68,7 @@ export const COMPOSER_MAX_HEIGHT_PCT = 60;
 /** CSS default panel height (px) — the auto-grow floor before content grows. */
 export const COMPOSER_DEFAULT_HEIGHT = 140;
 /** Fixed chrome the auto-grow math must budget above the textarea content:
- *  resizer strip (6px, matches CSS) + footer toolbar (~28px) + padding. */
+ *  resizer strip (6px, matches CSS) + button strip (~28px) + padding. */
 const COMPOSER_GROW_CHROME = 6 + 28 + 8;
 
 /**
@@ -105,7 +108,7 @@ export interface ComposerHost {
 	activeSelection(): { note: string; text: string } | null;
 }
 
-/** One pi command button definition for the terminal view's TOP toolbar
+/** One pi command button definition for the terminal view's header ROW 2
  *  (Wave 5a moved New/Resume…/Compact/Thinking OUT of the composer row; the
  *  VIEW renders these itself so the pty wiring stays there). */
 export interface PiRowAction {
@@ -132,8 +135,9 @@ export class PromptComposer {
 	readonly rootEl: HTMLElement;
 	/** Drag handle strip on the panel's top edge. */
 	readonly resizerEl: HTMLElement;
+	/** ROW 1 — the slim button strip above the textarea. */
 	readonly toolbarEl: HTMLElement;
-	/** The panel-body textarea (full width, fills the panel's height). */
+	/** ROW 2 — the panel-body textarea (full width, fills the panel height). */
 	readonly textarea: HTMLTextAreaElement;
 	/** Transient "✓ sent" flash element. */
 	readonly sentEl: HTMLElement;
@@ -170,10 +174,10 @@ export class PromptComposer {
 
 		this.hideBtn = this.iconBtn("chevron-down", "Hide the prompt composer", () => this.setVisible(false), "hide");
 
-		// WAVE 5a: the pi command buttons (New/Resume…/Compact/Thinking) moved
-		// OUT of this row onto the terminal view's TOP toolbar — this strip is a
-		// slim FOOTER below the textarea (right-aligned icon-only cluster after
-		// a spacer). Every button carries a stable `pi-btn-<id>` id for smoke.
+		// WAVE 6a: the pi command buttons (New/Resume…/Compact/Thinking) live
+		// on the terminal view's header ROW 2 — this strip is the composer's
+		// ROW 1, ABOVE the textarea (right-aligned icon-only cluster after a
+		// spacer). Every button carries a stable `pi-btn-<id>` id for smoke.
 		const sendBtn = this.iconBtn(PI_ROW_ICONS.send, "Send to pi (Mod+Enter)", () => this.submitNow(), "send");
 		const clearBtn = this.iconBtn(PI_ROW_ICONS.clear, "Clear the composer", () => this.clearNow(), "clear");
 		const noteBtn = this.iconBtn(PI_ROW_ICONS.note, "Insert the active note as context", () => void this.insertActiveNote(), "note");
@@ -197,11 +201,12 @@ export class PromptComposer {
 			this.hideBtn,
 		);
 
-		// WAVE 5a DOM order: resizer → TEXTAREA (the panel body — full panel
-		// width, grows to fill the panel's height) → slim footer toolbar. The
-		// text element never shares a row with the buttons, so nothing can
-		// squeeze it.
-		this.rootEl.append(this.resizerEl, this.textarea, this.toolbarEl);
+		// WAVE 6a DOM order: resizer → BUTTON STRIP (ROW 1) → TEXTAREA (ROW 2,
+		// the panel body — full panel width, flex-grows to fill ALL the
+		// panel's remaining height down to the bottom). The strip is fixed
+		// chrome (flex: 0 0 auto) so the textarea can never be squeezed by
+		// it, and the textarea never shares a row with the buttons.
+		this.rootEl.append(this.resizerEl, this.toolbarEl, this.textarea);
 		parent.append(this.rootEl);
 
 		// NOTE: the composer's own input/keydown listeners are registered BEFORE
@@ -456,6 +461,19 @@ export class PromptComposer {
 		if (this.dragUp) document.removeEventListener("mouseup", this.dragUp);
 		this.dragMove = null;
 		this.dragUp = null;
+	}
+
+	/** Wave 6a — re-clamp the panel height to the CURRENT view height. The
+	 *  view's resize path (ResizeObserver → scheduleFit) calls this whenever
+	 *  the leaf resizes, so a panel dragged tall never outgrows the
+	 *  max-height ceiling of a leaf that shrank (the ceiling is re-derived
+	 *  from the live viewHeight on every call). Grow-only: the panel is never
+	 *  yanked taller by a growing leaf — growth stays user-drag / autoGrow
+	 *  driven; the textarea meanwhile ALWAYS fills the panel (flex). */
+	refit(): void {
+		if (!this.visible) return;
+		const h = clampComposerHeight(this.currentHeight(), this.host.viewHeight(), this.maxHeightPct());
+		if (Number.isFinite(h) && h > 0) this.rootEl.style.height = `${h}px`;
 	}
 
 	/** Current height in px: inline style → measured box → CSS default. */

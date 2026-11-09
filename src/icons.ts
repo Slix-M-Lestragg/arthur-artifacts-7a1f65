@@ -63,6 +63,11 @@ export const SERVICE_ICON_FALLBACK = "server";
  *     layers   → Resume… (its `layers` Session button — sessions live there)
  *     gauge    → Thinking (its Shift+Tab cycle button)
  *     weight   → Compact (its compact-context button)
+ *     squircle → the prompt-surface TOGGLE (its `promptBtn` — 'Open prompt
+ *                editor (⌘E)', the toolbar button that opens/toggles the
+ *                embedded prompt panel; TerminalView.ts:641 in the reference
+ *                checkout — PromptPopout.ts's setDockedIcon comments "the
+ *                squircle glyph used by the terminal toolbar").
  *   reference views/PromptPopout.ts (buildActionToolbar):
  *     send              → Send to pi
  *     eraser            → clear the composer
@@ -79,12 +84,15 @@ export const SERVICE_ICON_FALLBACK = "server";
  * `file-plus` for New has no reference icon (the reference's session panel
  * uses plain text buttons) — lucide's standard new-file glyph.
  * The state-line composer toggle keeps its literal "⌨" text (tested).
+ * WAVE 6a: replaced — the toggle now renders the reference's `squircle`
+ * prompt-surface glyph (PI_ROW_ICONS.composer; provenance above).
  */
 export const PI_ROW_ICONS = {
 	new: "file-plus",
 	resume: "layers",
 	compact: "weight",
 	thinking: "gauge",
+	composer: "squircle",
 	send: "send",
 	clear: "eraser",
 	note: "file-text",

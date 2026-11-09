@@ -28,6 +28,26 @@
  *     applied to NEW terminals (existing ones keep theirs — documented in the
  *     settings tab).
  *
+ * WAVE 6a additions (header rows + run-boundary consumption):
+ *   - HEADER = TWO rows. ROW 1 (state line): the LIVENESS dot (a colored
+ *     circle, NO text — green live / orange warn / red error from the shared
+ *     computeLiveness, meaning in the tooltip) → the session-status label
+ *     (PI_STATE_LABELS over computeActivityState's verdict — ready / running
+ *     / wait / done / error; NEVER a connection word: the old hardcoded
+ *     'live' connection-state span is gone) → the cwd (ellipsized, full path
+ *     in its title). ROW 2: the command buttons in the user's exact order —
+ *     the composer toggle (the reference's lucide 'squircle' prompt-surface
+ *     glyph) → New → Resume… → Thinking → Compact.
+ *   - RUN BOUNDARY (Wave 6b contract, consumed here): a run starts on
+ *     CR-CARRYING input (`lastSubmitAt` — an Enter keystroke or the
+ *     composer's bracketed-paste submit). A LONE typed keystroke — and
+ *     xterm's automatic protocol replies (OSC/DA/CPR — ESC sequences carry
+ *     no CR) — never flips a fresh session to running; that fake input was
+ *     the root cause of the observed "brand-new session shows running" bug.
+ *   - The composer panel participates in the view's resize path: the RO →
+ *     scheduleFit chain re-clamps its height to the current leaf (refit),
+ *     while the textarea always fills the panel's remaining space (flex).
+ *
  * WAVE 2 additions (prompt surface):
  *   - PROMPT COMPOSER (prompt-composer.ts): a drag-resizable multiline textarea
  *     panel docked at the BOTTOM of the view — per-instance in-memory drafts
@@ -73,12 +93,14 @@ import {
 	ALL_TERMINAL_STATES,
 	PI_TERMINAL_LIVE_CLASS,
 	computeActivityState,
+	computeLiveness,
 	detectAwaitingInput,
 	initialActivityMemory,
 	questionStillLive,
 	syncActivityMemory,
 	terminalStateClass,
 	type ActivityMemory,
+	type TerminalLiveness,
 	type TerminalState,
 } from "./terminal-state";
 import {
@@ -114,14 +136,37 @@ interface TerminalViewState {
  *  stripped at integration. */
 const PRE_RUN_STATE: TerminalState = "ready";
 
+/** Wave 6a ROW-1 status display labels (shared contract): done-unseen and
+ *  seen both read "done"; awaiting-input reads "wait". Exported so smoke
+ *  can assert the mapping against the compiled bundle. */
+export const PI_STATE_LABELS: Record<TerminalState, string> = {
+	ready: "ready",
+	running: "running",
+	"awaiting-input": "wait",
+	"done-unseen": "done",
+	seen: "done",
+	error: "error",
+};
+
+/** The liveness dot's tooltip text per verdict (the dot itself carries NO
+ *  text — the color is the signal, the tooltip is the meaning). */
+const LIVENESS_TITLES: Record<TerminalLiveness, string> = {
+	live: "pi process live",
+	warn: "no live pi process (not spawned yet, or exited cleanly)",
+	error: "pi process exited with an error",
+};
+
 export class TerminalView extends ItemView {
 	private stateEl: HTMLElement | null = null;
-	/** The state-line badge span carrying the live-state CSS class. */
+	/** WAVE 6a header ROW 1 — the liveness-dot span (computeLiveness class). */
+	private dotEl: HTMLElement | null = null;
+	/** The ROW-1 status-label span carrying the live-state CSS class (the
+	 *  text comes from PI_STATE_LABELS over computeActivityState's verdict). */
 	private badgeEl: HTMLElement | null = null;
+	/** WAVE 6a header ROW 2 — the command-button row (buildBtnRow). */
+	private btnRowEl: HTMLElement | null = null;
 	/** The container xterm opens into (fills the leaf; observed for fit). */
 	private surfaceEl: HTMLElement | null = null;
-	/** The slash-toolbar root (state-line row). */
-	private toolbarEl: HTMLElement | null = null;
 	/** The Wave 2 prompt-composer panel (docked at the view's bottom). */
 	private composer: PromptComposer | null = null;
 	/** Capture-phase image-paste interceptor on the xterm surface. */
@@ -164,12 +209,20 @@ export class TerminalView extends ItemView {
 	private exited = false;
 	/** The exit code/signo surfaced in the state line (null until exit). */
 	private exitCode: number | null = null;
+	/** The signal that ended the pty (null until exit; non-zero = died
+	 *  unexpectedly → error even at exit code 0 — Wave 6b contract). */
+	private exitSignal: number | null = null;
 	/** Spawn failure surfaced in the state line (error class). */
 	private attachError: string | null = null;
 
 	// --- activity-state heuristic timestamps (epoch ms; null = never) ---
 	private lastDataAt: number | null = null;
 	private lastInputAt: number | null = null;
+	/** ms of the most recent CR-CARRYING input (Wave 6b run boundary — an
+	 *  Enter keystroke or a composer submit; a lone keystroke / xterm's
+	 *  automatic protocol replies never set it, so a fresh session stays
+	 *  ready instead of reading prompted → running). */
+	private lastSubmitAt: number | null = null;
 	private lastQuestionAt: number | null = null;
 	/** FIX B hysteresis memory: byte counter + done-stretch stamps (advanced
 	 *  only through syncActivityMemory, shared with smoke). */
@@ -261,12 +314,14 @@ export class TerminalView extends ItemView {
 	async onOpen(): Promise<void> {
 		this.contentEl.empty();
 		const wrap = this.contentEl.createEl("div", { cls: "arthur-pi-terminal" });
+		// WAVE 6a header = TWO rows: ROW 1 the status line (renderState builds
+		// dot + status label + cwd inside it), ROW 2 the command buttons —
+		// built ONCE here (they don't depend on state), in the user's exact
+		// order: composer toggle → New → Resume… → Thinking → Compact.
 		this.stateEl = wrap.createEl("div", { cls: "arthur-ahp-state-line arthur-pi-state-line" });
-		this.badgeEl = this.stateEl.createEl("span", { cls: `arthur-pi-badge ${terminalStateClass(PRE_RUN_STATE)}` });
+		this.btnRowEl = wrap.createEl("div", { cls: "arthur-pi-btnrow" });
+		this.btnRowEl.append(...this.buildBtnRow());
 		this.surfaceEl = wrap.createEl("div", { cls: "arthur-pi-terminal-surface" });
-		// Wave 5a: the four pi command buttons live on the state-line TOP toolbar
-		// (buildToolbar/makePiActions); the composer keeps only its own controls.
-		this.composer = new PromptComposer(wrap, this.makeComposerHost(), this.plugin);
 		// Leaf focus (xterm OR composer) restores this instance's draft.
 		this.contentFocusHandler = () => this.composer?.restoreDraft();
 		this.contentEl.addEventListener("focusin", this.contentFocusHandler);
@@ -282,6 +337,9 @@ export class TerminalView extends ItemView {
 		// new data arrives — a quiet agent that finished while unfocused).
 		this.stateTimer = window.setInterval(() => this.recomputeState(), STATE_TICK_MS);
 		this.opened = true;
+		// Wave 6a: the composer participates in the view's resize path — the
+		// RO callback re-clamps its panel height to the current leaf.
+		this.composer = new PromptComposer(wrap, this.makeComposerHost(), this.plugin);
 		this.renderState();
 		// A setState that arrived before onOpen attaches here.
 		await this.maybeAttach();
@@ -378,10 +436,11 @@ export class TerminalView extends ItemView {
 			}
 			this.recomputeState();
 		});
-		// pty exit → state line + error state + stop accepting input.
+		// pty exit → liveness dot + status + error state + stop accepting input.
 		this.ptyExitSub = pty.onExit((e: { exitCode: number; signal?: number }) => {
 			this.exited = true;
 			this.exitCode = e.exitCode;
+			this.exitSignal = e.signal ?? null;
 			this.renderState();
 			this.recomputeState();
 		});
@@ -455,12 +514,20 @@ export class TerminalView extends ItemView {
 		};
 		surface.addEventListener("paste", this.pasteHandler, true);
 		// Keystrokes: raw chunks straight to the pty; xterm decodes keys itself.
-		// Refused once the process has exited. A keystroke counts as activity
-		// (clears awaiting-input — the user is answering).
+		// Refused once the process has exited. Every keystroke counts as input
+		// activity (clears awaiting-input — the user is answering); a RUN starts
+		// only on CR-CARRYING input (Wave 6b run boundary): a lone typed key —
+		// and xterm's automatic protocol replies (OSC color reports, DA, CPR,
+		// kitty-keyboard — ESC sequences that carry no CR) — must never mark a
+		// never-prompted session as prompted (the fresh-session-shows-running
+		// bug). Chosen over a "burst-after-any-input" gate because a burst
+		// threshold re-opens that exact hole; the CR gate is immune to it.
 		this.dataSub = terminal.onData((data) => {
 			if (this.exited || !this.pty) return;
 			this.pty.write(data);
-			this.lastInputAt = Date.now();
+			const now = Date.now();
+			this.lastInputAt = now;
+			if (data.includes("\r")) this.lastSubmitAt = now;
 			if (this.lastQuestionAt != null) this.lastQuestionAt = null;
 			this.recomputeState();
 		});
@@ -503,6 +570,7 @@ export class TerminalView extends ItemView {
 		this.pty = null;
 		this.exited = false;
 		this.exitCode = null;
+		this.exitSignal = null;
 		this.attachError = null;
 	}
 
@@ -510,6 +578,7 @@ export class TerminalView extends ItemView {
 	private resetActivity(): void {
 		this.lastDataAt = null;
 		this.lastInputAt = null;
+		this.lastSubmitAt = null;
 		this.lastQuestionAt = null;
 		this.activityMemory = initialActivityMemory();
 		this.visualState = PRE_RUN_STATE;
@@ -525,8 +594,10 @@ export class TerminalView extends ItemView {
 			focused: this.focused,
 			exited: this.exited,
 			exitCode: this.exitCode,
+			signal: this.exitSignal,
 			lastDataAt: this.lastDataAt,
 			lastInputAt: this.lastInputAt,
+			lastSubmitAt: this.lastSubmitAt,
 			lastQuestionAt: this.lastQuestionAt,
 			totalBytes: this.activityMemory.totalBytes,
 			doneSince: this.activityMemory.doneSince,
@@ -567,23 +638,30 @@ export class TerminalView extends ItemView {
 		}
 	}
 
-	/** Short badge text for the state line (kept tiny — the CSS color carries
-	 *  the meaning; this is the screen-reader/quick-scan label). */
+	/** Short badge text for the ROW-1 status label — the Wave 6a contract
+	 *  display map (done-unseen and seen both read "done", awaiting-input
+	 *  reads "wait"; see PI_STATE_LABELS). */
 	private badgeText(): string {
-		switch (this.visualState) {
-			case "ready":
-				return "ready";
-			case "done-unseen":
-				return "done";
-			case "seen":
-				return "seen";
-			case "awaiting-input":
-				return "?";
-			case "error":
-				return "error";
-			default:
-				return "running";
+		return PI_STATE_LABELS[this.visualState];
+	}
+
+	/** Apply the liveness dot: the computeLiveness verdict (pure pty facts —
+	 *  alive/exited/exitCode/signal) as the dot's modifier class + tooltip.
+	 *  The Wave 6b second channel: independent of the session-status label. */
+	private applyLiveness(): void {
+		const dot = this.dotEl;
+		if (!dot) return;
+		const verdict = computeLiveness({
+			alive: !!this.pty && !this.exited,
+			exited: this.exited,
+			exitCode: this.exitCode,
+			signal: this.exitSignal,
+		});
+		for (const v of ["live", "warn", "error"] as const) {
+			dot.removeClass(`pi-live-dot--${v}`);
 		}
+		dot.addClass(`pi-live-dot--${verdict}`);
+		dot.setAttribute("title", LIVENESS_TITLES[verdict]);
 	}
 
 	/** Re-apply the xterm theme (called by main.ts on Obsidian `css-change`). */
@@ -591,31 +669,33 @@ export class TerminalView extends ItemView {
 		if (this.terminal) this.terminal.options.theme = buildXtermTheme(readObsidianThemeVars());
 	}
 
-	// ------------------------------------------------- top toolbar (state line)
+	// -------------------------------------------------- header ROW 2 (buttons)
 
-	/** Build the TOP toolbar row (Wave 5a): the four pi command buttons
-	 *  (New / Resume… / Compact / Thinking — moved OUT of the composer row)
-	 *  followed by the composer-visibility ⌨ toggle at the far right. The
-	 *  state dot+label sits at the LEFT of the same row (renderState appends
-	 *  this toolbar last with CSS margin-left:auto). */
-	private buildToolbar(): HTMLElement {
-		const toolbar = el("div", { cls: "arthur-pi-toolbar" });
-		for (const action of this.makePiActions()) toolbar.append(this.cmdBtn(action));
+	/** Build the header ROW 2 children (Wave 6a), in the user's exact order:
+	 *  (1) the composer TOGGLE — the reference obsidian-pi prompt-surface
+	 *  button's lucide icon ('squircle', TerminalView.ts renderShell
+	 *  promptBtn; see PI_ROW_ICONS provenance) — then the four pi command
+	 *  buttons (2) New, (3) Resume…, (4) Thinking, (5) Compact. */
+	private buildBtnRow(): HTMLElement[] {
 		const composerBtn = el("button", {
 			cls: "arthur-pi-toolbar-btn",
-			attrs: { "aria-label": "toggle prompt composer", title: "toggle prompt composer" },
+			attrs: {
+				id: "pi-btn-composer",
+				"aria-label": "toggle prompt composer",
+				title: "toggle prompt composer",
+			},
 		});
-		composerBtn.setText("⌨");
+		if (getIcon(PI_ROW_ICONS.composer)) setIcon(composerBtn, PI_ROW_ICONS.composer);
+		else composerBtn.setText("⌨");
 		composerBtn.addEventListener("click", (e) => {
 			e.preventDefault();
 			e.stopPropagation();
 			this.composer?.toggle();
 		});
-		toolbar.append(composerBtn);
-		return toolbar;
+		return [composerBtn, ...this.makePiActions().map((a) => this.cmdBtn(a))];
 	}
 
-	/** One top-toolbar pi command button (icon-only, stable `pi-btn-<id>` id —
+	/** One ROW-2 pi command button (icon-only, stable `pi-btn-<id>` id —
 	 *  smoke asserts order/icons/payloads). */
 	private cmdBtn(action: PiRowAction): HTMLButtonElement {
 		const btn = el("button", {
@@ -636,10 +716,13 @@ export class TerminalView extends ItemView {
 		return btn;
 	}
 
-	/** The four pi command actions rendered on the TOP toolbar (Wave 5a moved
-	 *  them off the composer row). Icons are the reference's lucide set
+	/** The four pi command actions rendered on header ROW 2 (Wave 6a user
+	 *  order: New, Resume…, Thinking, Compact — after the composer toggle,
+	 *  which buildBtnRow prepends). Icons are the reference's lucide set
 	 *  (PI_ROW_ICONS); all slash commands are `pty.write(cmd + '\r')`, Thinking
-	 *  is a bare escape. */
+	 *  is a bare escape. The slash writes deliberately do NOT set
+	 *  lastSubmitAt — they are pi UI navigation (a /new respawn must read
+	 *  ready again, not prompted), never a submitted prompt. */
 	private makePiActions(): PiRowAction[] {
 		return [
 			{ id: "new", icon: PI_ROW_ICONS.new, label: "New session (/new)", run: () => this.sendSlash("/new") },
@@ -649,16 +732,16 @@ export class TerminalView extends ItemView {
 				label: "Resume a saved session…",
 				run: (btn) => this.toggleResumePopover(btn),
 			},
-			{ id: "compact", icon: PI_ROW_ICONS.compact, label: "Compact the context (/compact)", run: () => this.sendSlash("/compact") },
 			{ id: "thinking", icon: PI_ROW_ICONS.thinking, label: "Cycle thinking level (Shift+Tab)", run: () => this.sendRaw("\x1b[Z") },
+			{ id: "compact", icon: PI_ROW_ICONS.compact, label: "Compact the context (/compact)", run: () => this.sendSlash("/compact") },
 		];
 	}
 
 	/** The one remaining popover: the cwd's session files (newest first) under
 	 *  the Resume… button — a file LIST has no inline form. Selecting a row
-	 *  respawns `pi --session <file>` in this leaf. Wave 5a: the button lives on
-	 *  the TOP toolbar now, so the popover is anchored to the STATE LINE
-	 * (position:relative) and drops over the terminal surface. */
+	 *  respawns `pi --session <file>` in this leaf. Wave 6a: the button lives
+	 *  on header ROW 2, so the popover is anchored to that row
+	 *  (position:relative) and drops over the terminal surface. */
 	private toggleResumePopover(anchor: HTMLButtonElement): void {
 		if (this.resumePopover) {
 			this.closeResumePopover();
@@ -679,11 +762,11 @@ export class TerminalView extends ItemView {
 				pop.append(item);
 			}
 		}
-		// Anchor to the state line: CSS `top: 100%` drops the list right below
-		// the toolbar row; the inline left aligns it under the Resume… button
+		// Anchor to header ROW 2: CSS `top: 100%` drops the list right below the
+		// button row; the inline left aligns it under the Resume… button
 		// (skipped when layout metrics are unavailable — smoke's zero-sized
 		// stubs — so the CSS defaults hold).
-		const host = this.stateEl;
+		const host = this.btnRowEl;
 		const hr = host?.getBoundingClientRect?.();
 		const ar = anchor.getBoundingClientRect?.();
 		if (host && hr && ar && (ar.left || hr.left)) {
@@ -720,10 +803,16 @@ export class TerminalView extends ItemView {
 		this.terminal?.focus();
 	}
 
-	/** Public pty write (used by the send-note commands). Refused after exit. */
+	/** Public pty write (used by the send-note commands). Refused after exit.
+	 *  A CR-carrying payload (the send-note commands end in `\r`) counts as a
+	 *  submitted prompt — the Wave 6b run boundary. */
 	writeToPty(data: string): void {
 		if (!this.pty || this.exited) return;
 		this.pty.write(data);
+		const now = Date.now();
+		this.lastInputAt = now;
+		if (data.includes("\r")) this.lastSubmitAt = now;
+		this.recomputeState();
 	}
 
 	/** Respawn the pty with `pi --session <file>` for this leaf's cwd. Kills the
@@ -766,13 +855,15 @@ export class TerminalView extends ItemView {
 	/** Submit from the composer: rewrite Obsidian links to absolute paths,
 	 *  then BRACKETED-PASTE the text into the pty (`ESC[200~` … `ESC[201~` +
 	 *  ONE Enter — the Enter lands after the paste-end marker, so a newline
-	 *  inside the text can never submit mid-paste). Counts as user input
-	 *  (clears awaiting-input). Refused with no live pty. */
+	 *  inside the text can never submit mid-paste). A CR-carrying submit —
+	 *  the Wave 6b run boundary (lastSubmitAt). Refused with no live pty. */
 	private submitPrompt(text: string): boolean {
 		if (!this.pty || this.exited) return false;
 		const rewritten = rewriteContextLinks(text, this.makeLinkResolver());
 		this.pty.write(buildPasteSubmit(rewritten));
-		this.lastInputAt = Date.now();
+		const now = Date.now();
+		this.lastInputAt = now;
+		this.lastSubmitAt = now;
 		if (this.lastQuestionAt != null) this.lastQuestionAt = null;
 		this.recomputeState();
 		return true;
@@ -833,6 +924,11 @@ export class TerminalView extends ItemView {
 
 	private scheduleFit(): void {
 		if (!this.opened) return;
+		// Wave 6a: the composer participates in the view's resize path — the
+		// panel height re-clamps to the (possibly changed) leaf before the
+		// debounced xterm fit runs, so the textarea always fills a panel that
+		// respects the current max-height ceiling.
+		this.composer?.refit();
 		if (this.fitTimer !== null) window.clearTimeout(this.fitTimer);
 		this.fitTimer = window.setTimeout(() => {
 			this.fitTimer = null;
@@ -861,53 +957,58 @@ export class TerminalView extends ItemView {
 
 	// -------------------------------------------------------------- rendering
 
-	/** The state line: 'no working directory' without a cwd, else the live
-	 *  state badge + the slash toolbar, 'process exited (code N)' on exit, or
-	 *  the spawn error. */
+	/** The header ROW 1 (state line): 'no working directory' without a cwd,
+	 *  else the liveness dot + the session-status label (computeActivityState
+	 *  via visualState — NEVER a connection word; the Wave 5a 'live' span is
+	 *  gone, replaced by the dot) + the cwd (full path in the tooltip), plus
+	 *  the spawn error / exit note when they apply. */
 	private renderState(): void {
 		const stateEl = this.stateEl;
 		if (!stateEl) return;
 		// The state line is rebuilt below — drop any open Resume… popover first
 		// so its ref never points at a detached element.
 		this.closeResumePopover();
-		// Keep the badge element identity stable across re-renders so applyBadge
-		// can keep fanning the state class onto it.
 		stateEl.empty();
+		this.dotEl = null;
+		this.badgeEl = null;
 		if (!this.cwd) {
 			stateEl.append(el("span", { cls: "arthur-ahp-state arthur-note", text: "no working directory" }));
-			this.badgeEl = null;
-			this.toolbarEl = null;
 			return;
 		}
 		if (this.attachError) {
+			// Spawn failure is an EVENT, not the heuristic — a static red dot +
+			// 'error' status (no pty facts to track; badgeEl stays null so the
+			// timer's heuristic verdicts can never repaint it).
+			const dot = stateEl.createEl("span", { cls: "arthur-pi-live-dot pi-live-dot--error" });
+			dot.setAttribute("title", LIVENESS_TITLES.error);
 			stateEl.append(
 				el("span", { cls: "arthur-ahp-state arthur-ahp-state--error", text: "error" }),
 				el("span", { cls: "arthur-ahp-error", text: this.attachError }),
 			);
-			this.badgeEl = null;
-			this.toolbarEl = null;
 			return;
 		}
+		// WAVE 6a ROW 1, left → right: (1) the liveness dot — ONLY a colored
+		// circle, no text, tooltip on hover; (2) the session-status label
+		// (driven PURELY by computeActivityState/computeLiveness per the shared
+		// contract — fresh/loaded reads 'ready'); (3) the cwd, ellipsized with
+		// the full path in its title tooltip.
+		this.dotEl = stateEl.createEl("span", { cls: "arthur-pi-live-dot" });
+		this.badgeEl = stateEl.createEl("span", {
+			cls: `arthur-pi-badge ${terminalStateClass(this.visualState)}`,
+		});
+		this.badgeEl.setText(this.badgeText());
+		const cwdEl = stateEl.createEl("span", { cls: "arthur-pi-state-cwd", text: this.cwd });
+		cwdEl.setAttribute("title", this.cwd);
 		if (this.exited) {
-			const code = this.exitCode ?? 0;
+			const clean = (this.exitCode ?? 0) === 0 && !(this.exitSignal ?? 0);
 			stateEl.append(
 				el("span", {
-					cls: `arthur-ahp-state arthur-ahp-state--${code === 0 ? "closed" : "error"}`,
-					text: `process exited (code ${code})`,
+					cls: `arthur-ahp-state arthur-ahp-state--${clean ? "closed" : "error"}`,
+					text: `process exited (code ${this.exitCode ?? 0})`,
 				}),
 			);
-			this.badgeEl = null;
-			this.toolbarEl = null;
-			return;
 		}
-		// Live: badge (state CSS class) + a 'live' status word (kept for parity
-		// with the ahp-view state vocabulary) + cwd hint + slash toolbar.
-		this.badgeEl = stateEl.createEl("span", { cls: `arthur-pi-badge ${terminalStateClass(this.visualState)}` });
-		this.badgeEl.setText(this.badgeText());
-		stateEl.append(el("span", { cls: "arthur-ahp-state arthur-ahp-state--ready", text: "live" }));
-		stateEl.append(el("span", { cls: "arthur-pi-state-cwd", text: this.cwd }));
-		this.toolbarEl = this.buildToolbar();
-		stateEl.append(this.toolbarEl);
+		this.applyLiveness();
 		this.applyBadge();
 	}
 
@@ -961,7 +1062,8 @@ export class TerminalView extends ItemView {
 		this.attachError = null;
 		this.stateEl = null;
 		this.badgeEl = null;
-		this.toolbarEl = null;
+		this.dotEl = null;
+		this.btnRowEl = null;
 		this.surfaceEl = null;
 		this.contentEl.empty();
 		// Stay consistent with the manager's routing map regardless of how the

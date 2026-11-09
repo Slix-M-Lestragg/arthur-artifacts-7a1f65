@@ -50,7 +50,7 @@ export { VIEW_TYPE_AHP, AhpView } from "./ui/ahp-view";
 export { AhpClient, ahpWsUrl, AHP_PROTOCOL_VERSION } from "./api/ahp";
 // pi terminal view (local pty backend): registration + lifecycle asserted
 // against the compiled main.js export surface.
-export { VIEW_TYPE_PI_TERMINAL, TerminalView } from "./ui/terminal-view";
+export { VIEW_TYPE_PI_TERMINAL, TerminalView, PI_STATE_LABELS } from "./ui/terminal-view";
 // pi farm view (Wave 3) — local sessions overview (open + dormant, merged):
 // registration + the pure merge helper asserted against the export surface.
 export { VIEW_TYPE_PI_FARM, PiFarmView, mergeFarmRows } from "./ui/pi-farm-view";
@@ -67,8 +67,8 @@ export type { LocalPiSession, SessionFileInfo } from "./ui/terminal-picker";
 export { spawnPi, resolvePtyModulePath, buildSpawnEnv } from "./api/local-pty";
 export type { LocalPty, PtySpawnFn, SpawnPiOpts, SpawnEnvDeps } from "./api/local-pty";
 // pi terminal visual state + heuristics (smoke asserts transitions + classes).
-export { terminalStateClass, computeActivityState, detectAwaitingInput, questionStillLive, ALL_TERMINAL_STATES, IDLE_MS, DONE_SILENCE_MS, DONE_REARM_BYTES, initialActivityMemory, isDoneState, syncActivityMemory } from "./ui/terminal-state";
-export type { TerminalState, ActivityInputs, ActivityMemory } from "./ui/terminal-state";
+export { terminalStateClass, computeActivityState, computeLiveness, detectAwaitingInput, questionStillLive, ALL_TERMINAL_STATES, IDLE_MS, DONE_SILENCE_MS, DONE_REARM_BYTES, initialActivityMemory, isDoneState, syncActivityMemory } from "./ui/terminal-state";
+export type { TerminalState, TerminalLiveness, ActivityInputs, ActivityMemory } from "./ui/terminal-state";
 // pi terminal theme-follow builder (smoke asserts the var → ITheme mapping)
 // + the Wave 4 (FIX A) monospace font-chain resolution.
 export { buildXtermTheme, readObsidianThemeVars, resolveThemeVars, FALLBACK_THEME_VARS, resolveTerminalFontFamily, FALLBACK_MONOSPACE, readCssVar } from "./ui/terminal-theme";

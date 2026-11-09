@@ -2708,19 +2708,48 @@
  * instance picker. Appended after the verbatim xterm.css so it overrides
  * nothing in the xterm core. State colors are driven by
  * .arthur-pi-state-<state> on the badge + tab-header icon (.arthur-pi-live).
+ * WAVE 6a — the header is TWO rows: the state line below carries ONLY the
+ * liveness dot + status label + cwd; the command buttons moved to their
+ * own .arthur-pi-btnrow under it.
  * ---------------------------------------------------------------------- */
+/* WAVE 6a header ROW 1: liveness dot → session-status label → cwd. The
+ * old hardcoded 'live' connection word is GONE (the dot replaced it); no
+ * border here — ROW 2 carries the header's bottom border. */
 .arthur-pi-state-line {
 	display: flex;
 	align-items: center;
 	gap: 0.5em;
-	padding: 0.25em 0.5em;
-	border-bottom: 1px solid var(--background-modifier-border);
+	padding: 0.25em 0.5em 0.1em;
 	font-size: var(--font-ui-smaller);
 	flex: 0 0 auto;
-	/* Anchor for the Resume… session-list popover (Wave 5a: the button sits
-	 * on this row; the list drops below it over the terminal surface). */
+}
+/* WAVE 6a header ROW 2: the command buttons in the user's exact order
+ * (composer toggle → New → Resume… → Thinking → Compact). Also the anchor
+ * for the Resume… session-list popover (position:relative + top:100% —
+ * the list drops below the row over the terminal surface). */
+.arthur-pi-btnrow {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	padding: 0.1em 0.5em 0.25em;
+	border-bottom: 1px solid var(--background-modifier-border);
+	flex: 0 0 auto;
 	position: relative;
 }
+/* WAVE 6a ROW-1 liveness dot — the ONLY live/warn/error signal: a small
+ * colored circle, NO text (the tooltip carries the meaning). Green = the
+ * pty process is alive; orange = not spawned yet / exited cleanly; red =
+ * exited non-zero or killed by a signal (computeLiveness verdicts). */
+.arthur-pi-live-dot {
+	flex: 0 0 auto;
+	display: inline-block;
+	width: 0.6em;
+	height: 0.6em;
+	border-radius: 50%;
+}
+.pi-live-dot--live { background: var(--color-green, #3fb950); }
+.pi-live-dot--warn { background: var(--color-orange, #d29922); }
+.pi-live-dot--error { background: var(--text-error, #f14b4b); }
 .arthur-pi-badge {
 	font-weight: 600;
 	padding: 0 0.35em;
@@ -2729,6 +2758,9 @@
 	text-align: center;
 }
 .arthur-pi-state-cwd {
+	/* Right-aligned (the row's last cell); ellipsized, full path in title. */
+	margin-left: auto;
+	min-width: 0;
 	opacity: 0.7;
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -2756,7 +2788,6 @@
 .workspace-tab-header-inner-icon.arthur-pi-live.arthur-pi-state-done-unseen { color: var(--interactive-accent); animation: arthur-pi-breathe 1.6s ease-in-out infinite; }
 .workspace-tab-header-inner-icon.arthur-pi-live.arthur-pi-state-error { color: var(--text-error); }
 .workspace-tab-header-inner-icon.arthur-pi-live.arthur-pi-state-seen { color: var(--color-green, #3fb950); }
-.arthur-pi-toolbar { display: flex; align-items: center; margin-left: auto; }
 .arthur-pi-toolbar-btn {
 	background: transparent; border: none; cursor: pointer;
 	padding: 0 0.4em; color: var(--text-muted); border-radius: var(--radius-s);
@@ -2778,9 +2809,11 @@
 
 /* ---------------------------------------------------------------------- *
  * Wave 2 — prompt composer: drag-resizable panel docked at the BOTTOM of the
- * terminal view. WAVE 5a structure: resizer → full-width TEXTAREA block (the
- * panel body — fills the panel's remaining height, edge to edge) → slim
- * footer toolbar strip. Plus the @-file suggest popup.
+ * terminal view. WAVE 6a structure: resizer → slim BUTTON STRIP (ROW 1:
+ * the composer's own controls) → the big multiline TEXTAREA (ROW 2: the
+ * panel body — full panel width, flex-grows to fill ALL remaining panel
+ * height; min-height:0 discipline throughout so no fixed height, max-width
+ * or wrapped strip can ever squeeze it). Plus the @-file suggest popup.
  * ---------------------------------------------------------------------- */
 .arthur-pi-composer {
 	flex: 0 0 auto;
@@ -2800,7 +2833,7 @@
 	background: transparent;
 }
 .arthur-pi-composer-resizer:hover { background: var(--interactive-accent); opacity: 0.5; }
-/* Slim FOOTER strip (Wave 5a): fixed-height chrome below the textarea —
+/* Slim BUTTON STRIP (WAVE 6a ROW 1): fixed-height chrome ABOVE the textarea —
  * `flex: 0 0 auto` + `flex-wrap` so it can never steal the panel body's
  * height (the classic flexbox squeeze that shrank the textarea). */
 .arthur-pi-composer-toolbar {
@@ -2850,15 +2883,15 @@
 	flex: 1 1 auto;
 	min-width: 0;
 }
-/* pi command cluster (New / Resume… / Compact / Thinking) on the TOP toolbar —
+/* pi command cluster (New / Resume… / Thinking / Compact) on header ROW 2 —
  * same button chrome, flagged so it can be tinted as a group. */
-.arthur-pi-toolbar .arthur-pi-cmd-btn {
+.arthur-pi-btnrow .arthur-pi-cmd-btn {
 	color: var(--text-normal);
 }
-/* Session-file list popover under the TOP toolbar's Resume… button (Wave 5a
- * moved the button to the state line — the popover anchors to the
- * position:relative state line and drops over the terminal surface; the view
- * aligns it under the button with an inline left). */
+/* Session-file list popover under ROW 2's Resume… button (Wave 6a moved
+ * the button row — the popover anchors to the position:relative button row
+ * and drops over the terminal surface; the view aligns it under the button
+ * with an inline left). */
 .arthur-pi-resume-popover {
 	top: 100%;
 	left: 4px;
@@ -2866,10 +2899,12 @@
 	max-height: 50%;
 	overflow-y: auto;
 }
-/* The panel BODY: a block-level textarea spanning the panel's full width
- * (box-sizing) and growing to fill its remaining height (`flex: 1 1 auto` +
- * `min-height: 0` — Wave 5a; it never shares a row with the buttons, so no
- * flex shrink/wrap/max-width can squeeze it). */
+/* The panel BODY (WAVE 6a ROW 2): a block-level textarea spanning the panel's
+ * full width (box-sizing) and flex-growing to fill its remaining height down
+ * to the panel bottom (`flex: 1 1 auto` + `min-height: 0` — the panel is a
+ * flex column and the strip is fixed chrome, so no fixed height, flex
+ * shrink/wrap/max-width can squeeze it; container resizes keep it filling
+ * the panel via the flex discipline + the view's refit() re-clamp). */
 .arthur-pi-composer-input {
 	display: block;
 	flex: 1 1 auto;
