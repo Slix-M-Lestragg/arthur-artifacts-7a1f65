@@ -21,8 +21,19 @@ import { TerminalView, VIEW_TYPE_PI_TERMINAL } from "./ui/terminal-view";
 import { PiFarmView, VIEW_TYPE_PI_FARM } from "./ui/pi-farm-view";
 import { TerminalManager } from "./ui/terminal-manager";
 import { TerminalPickerModal, listLocalPiSessions, defaultPiSessionsDir } from "./ui/terminal-picker";
-import { InstancePickerModal } from "./ui/instance-picker";
+import { InstancePickerModal, NewTerminalTargetModal } from "./ui/instance-picker";
 import { attachRibbonHub } from "./ui/ribbon-hub";
+import { sanitizeRemoteProfiles, remoteProbeError, RemoteProbeCache } from "./settings";
+import {
+	spawnRemotePi,
+	listRemoteSessions,
+	killRemoteSession,
+	probeRemote,
+	type RemoteProfile,
+	type RemoteProbe,
+	type RemotePiSessionInfo,
+} from "./api/ssh-tmux";
+import type { LocalPty } from "./api/local-pty";
 import { buildNotePayloadWith, rewriteWikilinks } from "./ui/terminal-note";
 import { StatusBarPill, StatusBarState } from "./ui/status-bar";
 import { fmtBytes, fmtGigCompact, normalizeHost } from "./util";
@@ -88,8 +99,14 @@ export type { PiCommand } from "./ui/pi-commands";
 export { extractAtPrefix, parseAtQuery, listAtSuggestions, insertCompletion, fuzzyScore, walkFilesystem, MAX_WALK_DEPTH, MAX_WALK_ENTRIES, MAX_SUGGESTIONS } from "./ui/at-suggester";
 export type { FsDeps, FileSuggestion, DirentLike, WalkEntry } from "./ui/at-suggester";
 // instance picker (open-instances + new) — asserted against the export surface.
-export { InstancePickerModal } from "./ui/instance-picker";
+export { InstancePickerModal, NewTerminalTargetModal } from "./ui/instance-picker";
 export type { InstanceRow, InstancePickerOpts } from "./ui/instance-picker";
+export { sanitizeRemoteProfiles, remoteProbeError } from "./settings";
+export { normalizeTerminalRegistryEntry, terminalRouteKey } from "./ui/terminal-registry";
+export type { TerminalKind, TerminalRegistryEntry } from "./ui/terminal-registry";
+export { spawnRemotePi, listRemoteSessions, killRemoteSession, probeRemote };
+export { suggestTmuxSessionName, RemoteSshError } from "./api/ssh-tmux";
+export type { RemoteProfile, RemoteProbe, RemotePiSessionInfo, PtyLike, PtyFactoryLike } from "./api/ssh-tmux";
 // ribbon hub — attached in onload.
 export { attachRibbonHub } from "./ui/ribbon-hub";
 
@@ -201,6 +218,8 @@ export interface ArthurSettings {
 	/** Prompt composer textarea font size in px (10–32, default 16 — FIX D).
 	 *  Applied to NEW composers at construct time. */
 	promptFontSize: number;
+	/** SSH+tmux targets for re-attachable remote pi terminals. */
+	piRemoteProfiles: RemoteProfile[];
 }
 
 /** Clients built from the active profile — rebuilt when settings change. */
@@ -256,6 +275,7 @@ const DEFAULT_SETTINGS: ArthurSettings = {
 	piTerminalComposerVisible: true,
 	piTerminalComposerMaxHeight: 50,
 	promptFontSize: 16,
+	piRemoteProfiles: [],
 };
 
 /** Parse a bounded positive int; invalid/missing → fallback. */
@@ -327,7 +347,7 @@ export interface LightState {
 	lastUpdated: number | null;
 }
 
-class ArthurSettingTab extends PluginSettingTab {
+export class ArthurSettingTab extends PluginSettingTab {
 	private plugin: ArthurPlugin;
 
 	constructor(app: App, plugin: ArthurPlugin) {
@@ -587,6 +607,8 @@ class ArthurSettingTab extends PluginSettingTab {
 				})
 			);
 
+		this.renderRemoteHosts(containerEl);
+
 		containerEl.createEl("h3", { text: "Diagnostics" });
 		new Setting(containerEl)
 			.setName("Debug logging")
@@ -598,10 +620,133 @@ class ArthurSettingTab extends PluginSettingTab {
 				})
 			);
 	}
+
+	/** SSH+tmux remote targets. The <details> element supplies the collapsible
+	 *  section without another persisted UI flag. */
+	private renderRemoteHosts(containerEl: HTMLElement): void {
+		const details = containerEl.createEl("details", { cls: "arthur-remote-settings" });
+		details.createEl("summary", { text: "Remote pi hosts" });
+		details.createEl("p", {
+			cls: "setting-item-description",
+			text: "Run pi over SSH inside tmux. Closing a remote terminal detaches the local SSH pipe and leaves the remote agent running.",
+		});
+		const list = details.createEl("div", { cls: "arthur-remote-profile-list" });
+		const repaint = () => this.renderRemoteProfileRows(list);
+		repaint();
+		const add = details.createEl("button", { cls: "arthur-btn arthur-btn--tiny", text: "Add remote host" });
+		add.addEventListener("click", () => {
+			const n = this.plugin.settings.piRemoteProfiles.length + 1;
+			this.plugin.settings.piRemoteProfiles.push({
+				id: `remote-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+				label: `Remote ${n}`,
+				sshTarget: "user@host.tailnet",
+				remoteCwd: "~",
+				tmuxSession: "arthur-pi",
+			});
+			void this.plugin.saveSettings();
+			repaint();
+		});
+	}
+
+	private renderRemoteProfileRows(list: HTMLElement): void {
+		list.empty();
+		const profiles = this.plugin.settings.piRemoteProfiles;
+		if (profiles.length === 0) {
+			list.createEl("div", { cls: "arthur-note", text: "No remote pi hosts configured." });
+			return;
+		}
+		for (const profile of profiles) {
+			const card = list.createEl("div", {
+				cls: "arthur-remote-profile",
+				attr: { "data-remote-profile": profile.id },
+			});
+			const head = card.createEl("div", { cls: "arthur-remote-profile-head" });
+			head.createEl("strong", { text: profile.label || profile.sshTarget || profile.id });
+			const dot = head.createEl("span", { cls: "arthur-remote-probe-dot" });
+			const probeText = head.createEl("span", { cls: "arthur-remote-probe-status" });
+			const paintProbe = (probe: RemoteProbe | null) => {
+				dot.removeClass("arthur-remote-probe-dot--ok", "arthur-remote-probe-dot--error");
+				probeText.setText("");
+				if (!probe) return;
+				const error = remoteProbeError(probe);
+				dot.addClass(error ? "arthur-remote-probe-dot--error" : "arthur-remote-probe-dot--ok");
+				dot.setAttribute("title", error ?? `SSH + tmux ${probe.tmuxVersion ?? ""} + pi ready`);
+				probeText.setText(error ?? "ready");
+				probeText.toggleClass("arthur-remote-probe-status--error", !!error);
+			};
+			paintProbe(this.plugin.getRemoteProbe(profile.id));
+			const probeBtn = head.createEl("button", { cls: "arthur-btn arthur-btn--tiny arthur-remote-probe", text: "Probe" });
+			probeBtn.addEventListener("click", () => {
+				void (async () => {
+					probeBtn.disabled = true;
+					probeText.setText("probing…");
+					try {
+						const probe = await this.plugin.remoteBackend.probeRemote({ ...profile });
+						this.plugin.remoteProbeCache.set(profile.id, probe);
+						paintProbe(probe);
+						const error = remoteProbeError(probe);
+						if (error) new Notice(`Remote probe failed for ${profile.label}: ${error}`, 6000);
+					} catch (err) {
+						const message = err instanceof Error ? err.message : String(err);
+						const probe: RemoteProbe = { sshOk: false, tmuxOk: false, tmuxVersion: null, piDetected: false, error: message };
+						this.plugin.remoteProbeCache.set(profile.id, probe);
+						paintProbe(probe);
+						new Notice(`Remote probe failed for ${profile.label}: ${message}`, 6000);
+					} finally {
+						probeBtn.disabled = false;
+					}
+				})();
+			});
+			const remove = head.createEl("button", { cls: "arthur-btn arthur-btn--tiny", text: "Remove" });
+			remove.addEventListener("click", () => {
+				this.plugin.settings.piRemoteProfiles = profiles.filter((p) => p.id !== profile.id);
+				this.plugin.remoteProbeCache.delete(profile.id);
+				void this.plugin.saveSettings();
+				this.renderRemoteProfileRows(list);
+			});
+
+			const field = (name: string, key: keyof RemoteProfile, placeholder = "") => {
+				new Setting(card).setName(name).addText((text) => {
+					text.setPlaceholder(placeholder).setValue(profile[key] ?? "").onChange(async (value) => {
+						const next = value.trim();
+						if (key === "piArgs" || key === "piExecutable") {
+							if (next) profile[key] = next;
+							else delete profile[key];
+						} else {
+							profile[key] = next;
+						}
+						this.plugin.remoteProbeCache.delete(profile.id);
+						await this.plugin.saveSettings();
+					});
+				});
+			};
+			field("Label", "label", "workstation");
+			field("SSH target", "sshTarget", "user@host.tailnet");
+			field("Remote cwd", "remoteCwd", "/home/user/project");
+			field("tmux session", "tmuxSession", "arthur-pi");
+			field("pi executable (optional)", "piExecutable", "pi");
+			field("pi arguments (optional)", "piArgs", "--flag value");
+		}
+	}
+}
+
+export interface ArthurRemoteBackend {
+	spawnRemotePi: typeof spawnRemotePi;
+	listRemoteSessions: typeof listRemoteSessions;
+	killRemoteSession: typeof killRemoteSession;
+	probeRemote: typeof probeRemote;
 }
 
 export default class ArthurPlugin extends Plugin {
 	settings: ArthurSettings = DEFAULT_SETTINGS;
+
+	/** Remote backend seam (tests inject fakes; production uses ssh-tmux). */
+	remoteBackend: ArthurRemoteBackend = { spawnRemotePi, listRemoteSessions, killRemoteSession, probeRemote };
+	readonly remoteProbeCache = new RemoteProbeCache();
+
+	getRemoteProbe(profileId: string): RemoteProbe | null {
+		return this.remoteProbeCache.get(profileId);
+	}
 
 	/** API clients + pollers for the active profile; null until load/teardown. */
 	clients: ArthurClients | null = null;
@@ -1085,6 +1230,7 @@ export default class ArthurPlugin extends Plugin {
 			piTerminalComposerVisible: data?.piTerminalComposerVisible !== false,
 			piTerminalComposerMaxHeight: clampInt(data?.piTerminalComposerMaxHeight, 50, 20, 60),
 			promptFontSize: clampInt(data?.promptFontSize, 16, 10, 32),
+			piRemoteProfiles: sanitizeRemoteProfiles(data?.piRemoteProfiles),
 		};
 	}
 
@@ -1092,7 +1238,13 @@ export default class ArthurPlugin extends Plugin {
 		// Persist a normalized host: whatever ended up in the field (typed with a
 		// scheme, trailing slash, spaces) never reaches disk or URL building.
 		this.settings.profiles[0].host = normalizeHost(this.settings.profiles[0].host);
-		await this.saveData(this.settings);
+		// Sanitize the persisted copy without replacing live profile objects:
+		// inline Setting callbacks hold those objects across per-keystroke saves.
+		const data: ArthurSettings = {
+			...this.settings,
+			piRemoteProfiles: sanitizeRemoteProfiles(this.settings.piRemoteProfiles),
+		};
+		await this.saveData(data);
 		// Every live component (clients, pollers, dashboard, status pill)
 		// follows the new profile immediately, debounced across keystrokes.
 		this.scheduleRuntimeRebuild();
@@ -1164,6 +1316,13 @@ export default class ArthurPlugin extends Plugin {
 	 */
 	async activatePiTerminal(state?: Record<string, string>): Promise<void> {
 		if (!this.terminalManager) return;
+		if (state?.kind === "remote") {
+			const profileId = typeof state.profileId === "string" ? state.profileId : "";
+			if (profileId) {
+				await this.activateRemotePiTerminal(profileId, state.tmuxSession, state.title);
+			}
+			return;
+		}
 		const cwd = typeof state?.cwd === "string" ? state.cwd : undefined;
 		const title = typeof state?.title === "string" ? state.title : undefined;
 		const fresh = state?.fresh != null && String(state.fresh) === "true";
@@ -1173,6 +1332,18 @@ export default class ArthurPlugin extends Plugin {
 			...(fresh ? { fresh: true } : {}),
 			...(sessionFile ? { sessionFile } : {}),
 		});
+	}
+
+	/** Open/attach one configured SSH+tmux target. A discovered tmux session
+	 *  overrides the profile's default session name without mutating settings. */
+	async activateRemotePiTerminal(profileId: string, tmuxSession?: string, title?: string): Promise<void> {
+		if (Platform.isMobile || !this.terminalManager) return;
+		const profile = this.settings.piRemoteProfiles.find((p) => p.id === profileId);
+		if (!profile) {
+			new Notice("Remote pi host is no longer configured.", 4000);
+			return;
+		}
+		await this.terminalManager.openRemoteTerminal(profile, { tmuxSession, title });
 	}
 
 	/**
@@ -1186,6 +1357,21 @@ export default class ArthurPlugin extends Plugin {
 	 * (the local pty + Node fs scan cannot run there).
 	 */
 	openTerminalPicker(): void {
+		if (Platform.isMobile) return;
+		const profiles = this.settings.piRemoteProfiles;
+		if (profiles.length > 0) {
+			new NewTerminalTargetModal(this.app, {
+				profiles,
+				getRemoteProbe: (id) => this.getRemoteProbe(id),
+				onLocal: () => this.openLocalTerminalPicker(),
+				onRemote: (profile) => void this.activateRemotePiTerminal(profile.id),
+			}).open();
+			return;
+		}
+		this.openLocalTerminalPicker();
+	}
+
+	private openLocalTerminalPicker(): void {
 		if (Platform.isMobile) return; // local pty + Node fs scan are desktop-only
 		const vaultRoot = (this.app.vault?.adapter as { getBasePath?: () => string } | null)?.getBasePath?.() ?? "";
 		const modal = new TerminalPickerModal(this.app, {
@@ -1217,8 +1403,23 @@ export default class ArthurPlugin extends Plugin {
 		}
 		const modal = new InstancePickerModal(this.app, {
 			instances: open,
-			onPick: (cwd) => {
-				void this.activatePiTerminal({ cwd });
+			remoteProfiles: this.settings.piRemoteProfiles,
+			getRemoteProbe: (id) => this.getRemoteProbe(id),
+			listRemoteSessions: (profile) => this.remoteBackend.listRemoteSessions(profile),
+			onRemoteAttach: (profile, tmuxSession) => {
+				void this.activateRemotePiTerminal(profile.id, tmuxSession);
+			},
+			onPick: (cwd, instance) => {
+				if (instance?.kind === "remote" && instance.profileId) {
+					void this.activatePiTerminal({
+						cwd,
+						kind: "remote",
+						profileId: instance.profileId,
+						...(instance.tmuxSession ? { tmuxSession: instance.tmuxSession } : {}),
+					});
+				} else {
+					void this.activatePiTerminal({ cwd });
+				}
 			},
 			onNew: () => {
 				this.openTerminalPicker();

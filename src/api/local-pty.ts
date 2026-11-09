@@ -262,7 +262,7 @@ export function resolvePtyModulePath(vaultBasePath: string, manifestDir: string)
  * require because the module is an esbuild `external`. Throws a clear,
  * user-facing message on total failure (the view shows `.message`, no stack).
  */
-function loadPtyModule(absPath?: string): PtyModule {
+export function loadPtyModule(absPath?: string): PtyModule {
 	if (absPath) {
 		try {
 			return require(absPath) as PtyModule;

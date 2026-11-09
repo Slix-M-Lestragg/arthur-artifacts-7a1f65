@@ -46,6 +46,7 @@ import type ArthurPlugin from "../main";
 import { el, fmtBytes, truncate } from "../util";
 import { terminalStateClass, type TerminalState } from "./terminal-state";
 import type { InstanceRow } from "./instance-picker";
+import type { RemoteProfile, RemotePiSessionInfo } from "../api/ssh-tmux";
 import {
 	defaultPiSessionsDir,
 	listLocalPiSessions,
@@ -108,6 +109,9 @@ export function mergeFarmRows(
 		});
 	}
 	for (const o of openInstances) {
+		// A remote cwd is not evidence of a local dormant session. Remote-open
+		// leaves have their own tailnet group in the view instead.
+		if (o.kind === "remote") continue;
 		const cwd = o.cwd.trim();
 		if (!cwd) continue;
 		const ex = map.get(cwd);
@@ -167,6 +171,9 @@ export class PiFarmView extends ItemView {
 	private capEl: HTMLElement | null = null;
 	/** The merged row table root (kept stable; only the tbody refills). */
 	private tableEl: HTMLElement | null = null;
+	/** Progressive SSH+tmux discovery group (local table never waits for it). */
+	private remoteEl: HTMLElement | null = null;
+	private remoteSeq = 0;
 
 	/** 5s refresh interval id (null when not running). */
 	private refreshTimer: number | null = null;
@@ -184,6 +191,9 @@ export class PiFarmView extends ItemView {
 	 * without touching the real sessions dir.
 	 */
 	farmLoadDormant: () => LocalPiSession[] = () => listLocalPiSessions(defaultPiSessionsDir());
+	/** Per-profile remote lister seam; failures render in that profile's row. */
+	farmListRemoteSessions: (profile: RemoteProfile) => Promise<RemotePiSessionInfo[]> =
+		(profile) => this.plugin.remoteBackend.listRemoteSessions(profile);
 
 	constructor(leaf: WorkspaceLeaf, private readonly plugin: ArthurPlugin) {
 		super(leaf);
@@ -218,6 +228,8 @@ export class PiFarmView extends ItemView {
 		this.bodyEl = null;
 		this.capEl = null;
 		this.tableEl = null;
+		this.remoteEl = null;
+		this.remoteSeq++;
 		this.contentEl.empty();
 	}
 
@@ -251,6 +263,7 @@ export class PiFarmView extends ItemView {
 		this.rows = mergeFarmRows(open, dormant, now);
 		this.renderState(now);
 		this.renderTable(now);
+		this.renderRemote(open.filter((row) => row.kind === "remote"));
 	}
 
 	// --------------------------------------------------------------- render
@@ -260,6 +273,7 @@ export class PiFarmView extends ItemView {
 		const wrap = this.contentEl.createEl("div", { cls: "arthur-farm" });
 		if (this.compact) wrap.addClass("arthur-farm--compact");
 		this.stateEl = wrap.createEl("div", { cls: "arthur-ahp-state-line arthur-farm-state-line" });
+		this.remoteEl = wrap.createEl("section", { cls: "arthur-farm-remote" });
 		this.tableEl = wrap.createEl("table", { cls: "arthur-farm-table" });
 		const thead = this.tableEl.createEl("thead");
 		const headRow = thead.createEl("tr");
@@ -303,6 +317,102 @@ export class PiFarmView extends ItemView {
 			this.renderState(now);
 		});
 		stateEl.append(densityBtn);
+	}
+
+	/** Remote-open rows render synchronously; each configured host's tmux list
+	 *  resolves independently into its own group (never blocks the local table). */
+	private renderRemote(open: InstanceRow[]): void {
+		const host = this.remoteEl;
+		if (!host) return;
+		const seq = ++this.remoteSeq;
+		host.empty();
+		const profiles = this.plugin.settings.piRemoteProfiles;
+		if (open.length === 0 && profiles.length === 0) {
+			host.hide();
+			return;
+		}
+		host.show();
+		host.createEl("h4", { text: "Remote sessions (tailnet)" });
+		if (open.length > 0) {
+			const openList = host.createEl("div", { cls: "arthur-farm-remote-open-list" });
+			for (const row of open) {
+				const item = el("div", {
+					cls: "arthur-instance-row arthur-farm-remote-row arthur-farm-remote-open",
+					attrs: {
+						role: "button",
+						"data-remote-profile": row.profileId ?? "",
+						"data-tmux-session": row.tmuxSession ?? "",
+					},
+				});
+				item.append(
+					el("span", { cls: "arthur-pi-remote-flag", text: `⌁ ${row.profileLabel ?? row.profileId ?? "remote"}` }),
+					el("span", { cls: "arthur-instance-title", text: row.tmuxSession ?? row.title }),
+					el("span", { cls: "arthur-instance-dir", text: row.cwd }),
+					el("span", { cls: "arthur-badge arthur-badge--running", text: "open" }),
+				);
+				item.addEventListener("click", () => {
+					if (!row.profileId) return;
+					void this.plugin.activatePiTerminal({
+						cwd: row.cwd,
+						kind: "remote",
+						profileId: row.profileId,
+						...(row.tmuxSession ? { tmuxSession: row.tmuxSession } : {}),
+					});
+				});
+				openList.append(item);
+			}
+		}
+		for (const profile of profiles) {
+			const group = host.createEl("div", {
+				cls: "arthur-farm-remote-profile",
+				attr: { "data-remote-profile": profile.id },
+			});
+			const head = group.createEl("div", { cls: "arthur-remote-profile-line" });
+			head.createEl("strong", { text: `⌁ ${profile.label}` });
+			const body = group.createEl("div", { cls: "arthur-farm-remote-session-list" });
+			body.createEl("div", { cls: "arthur-note arthur-remote-loading", text: "listing tmux sessions…" });
+			void this.farmListRemoteSessions(profile).then((sessions) => {
+				if (!this.opened || seq !== this.remoteSeq) return;
+				body.empty();
+				head.createEl("span", {
+					cls: "arthur-note arthur-farm-remote-attached",
+					text: `${sessions.filter((s) => s.attached).length} attached`,
+				});
+				if (sessions.length === 0) {
+					body.createEl("div", { cls: "arthur-note", text: "no tmux sessions" });
+					return;
+				}
+				for (const session of sessions) {
+					const item = el("div", {
+						cls: "arthur-instance-row arthur-farm-remote-row arthur-farm-remote-session",
+						attrs: {
+							role: "button",
+							"data-remote-profile": profile.id,
+							"data-tmux-session": session.name,
+						},
+					});
+					item.append(
+						el("span", { cls: "arthur-pi-remote-flag", text: "⌁" }),
+						el("span", { cls: "arthur-instance-title", text: session.name }),
+						el("span", {
+							cls: "arthur-instance-dir",
+							text: `${session.attached ? "attached" : "detached"} · ${session.windows} window${session.windows === 1 ? "" : "s"}`,
+						}),
+					);
+					item.addEventListener("click", () => {
+						void this.plugin.activateRemotePiTerminal(profile.id, session.name);
+					});
+					body.append(item);
+				}
+			}).catch((err) => {
+				if (!this.opened || seq !== this.remoteSeq) return;
+				body.empty();
+				body.createEl("div", {
+					cls: "arthur-farm-remote-error arthur-note",
+					text: `${profile.label}: ${err instanceof Error ? err.message : String(err)}`,
+				});
+			});
+		}
 	}
 
 	/** The merged table body (+ empty-state note). */

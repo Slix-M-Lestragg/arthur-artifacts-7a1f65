@@ -80,12 +80,14 @@
  *   - The state line reuses the ahp-view state classes (arthur-ahp-state /
  *     arthur-note) for a consistent vocabulary PLUS the new pi state badge.
  */
-import { getIcon, setIcon, ItemView, TFile, WorkspaceLeaf } from "obsidian";
+import { getIcon, setIcon, ItemView, Modal, Notice, TFile, WorkspaceLeaf } from "obsidian";
 import { Terminal, type IDisposable } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 
 import type ArthurPlugin from "../main";
 import type { LocalPty } from "../api/local-pty";
+import type { RemoteProfile } from "../api/ssh-tmux";
+import { normalizeTerminalRegistryEntry, type TerminalKind, type TerminalRegistryEntry } from "./terminal-registry";
 import { spawnPi, resolvePtyModulePath } from "../api/local-pty";
 import { el } from "../util";
 import { PI_ROW_ICONS } from "../icons";
@@ -128,6 +130,9 @@ interface TerminalViewState {
 	title?: unknown;
 	fresh?: unknown;
 	sessionFile?: unknown;
+	kind?: unknown;
+	profileId?: unknown;
+	tmuxSession?: unknown;
 }
 
 /** The contract's pre-run activity state — 'ready' (Wave 5 renamed it from
@@ -155,6 +160,47 @@ const LIVENESS_TITLES: Record<TerminalLiveness, string> = {
 	warn: "no live pi process (not spawned yet, or exited cleanly)",
 	error: "pi process exited with an error",
 };
+
+const REMOTE_LIVENESS_TITLES: Record<TerminalLiveness, string> = {
+	live: "SSH pipe live; remote pi runs inside tmux",
+	warn: "SSH pipe detached; remote pi may still be running",
+	error: "SSH pipe failed; this says nothing about the remote pi's fate",
+};
+
+export class RemoteCloseDialog extends Modal {
+	constructor(
+		app: import("obsidian").App,
+		private readonly label: string,
+		private readonly onDetach: () => void,
+		private readonly onTerminate: () => void,
+	) {
+		super(app);
+	}
+
+	onOpen(): void {
+		this.titleEl.setText("Close remote pi terminal");
+		this.contentEl.createEl("p", {
+			text: `${this.label} has an active run. Detaching leaves the remote agent running in tmux and can be re-attached later.`,
+		});
+		const buttons = this.contentEl.createEl("div", { cls: "arthur-modal-buttons arthur-remote-close-actions" });
+		const detach = buttons.createEl("button", { cls: "mod-cta", text: "Detach (keep running)" });
+		detach.addEventListener("click", () => {
+			this.close();
+			this.onDetach();
+		});
+		const terminate = buttons.createEl("button", { cls: "mod-warning", text: "Terminate remote (kill tmux session)" });
+		terminate.addEventListener("click", () => {
+			this.close();
+			this.onTerminate();
+		});
+		const cancel = buttons.createEl("button", { text: "Cancel" });
+		cancel.addEventListener("click", () => this.close());
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+	}
+}
 
 export class TerminalView extends ItemView {
 	private stateEl: HTMLElement | null = null;
@@ -200,6 +246,9 @@ export class TerminalView extends ItemView {
 
 	private opened = false;
 	private cwd: string | null = null;
+	private kind: TerminalKind = "local";
+	private profileId: string | null = null;
+	private tmuxSession: string | null = null;
 	private titleText = "";
 	private fresh = false;
 	/** Optional session file to resume (`pi --session <file>`); from picker or
@@ -232,8 +281,16 @@ export class TerminalView extends ItemView {
 	/** Current visual state (drives the badge CSS class). */
 	private visualState: TerminalState = PRE_RUN_STATE;
 
+	/** Close interception is installed for the whole leaf lifetime. Local
+	 *  closes pass straight through; active remote runs get the detach dialog. */
+	private readonly originalLeafDetach: () => void;
+	private readonly interceptedLeafDetach: () => void;
+
 	constructor(leaf: WorkspaceLeaf, private readonly plugin: ArthurPlugin) {
 		super(leaf);
+		this.originalLeafDetach = leaf.detach.bind(leaf);
+		this.interceptedLeafDetach = () => this.requestClose();
+		leaf.detach = this.interceptedLeafDetach;
 	}
 
 	getViewType(): string {
@@ -241,7 +298,42 @@ export class TerminalView extends ItemView {
 	}
 
 	getDisplayText(): string {
-		return this.titleText || (this.cwd ?? "").trim().split("/").filter(Boolean).pop() || "pi terminal";
+		const base = this.titleText || (this.cwd ?? "").trim().split("/").filter(Boolean).pop() || "pi terminal";
+		return this.kind === "remote" ? `${base} (remote)` : base;
+	}
+
+	get sessionKind(): TerminalKind {
+		return this.kind;
+	}
+
+	get boundProfileId(): string | null {
+		return this.profileId;
+	}
+
+	get boundTmuxSession(): string | null {
+		return this.tmuxSession;
+	}
+
+	get remoteProfileLabel(): string {
+		if (this.kind !== "remote") return "";
+		return this.plugin.settings.piRemoteProfiles.find((p) => p.id === this.profileId)?.label
+			?? this.profileId
+			?? "remote";
+	}
+
+	get registryEntry(): TerminalRegistryEntry {
+		return this.kind === "remote"
+			? {
+				kind: "remote",
+				...(this.profileId ? { profileId: this.profileId } : {}),
+				...(this.tmuxSession ? { tmuxSession: this.tmuxSession } : {}),
+			}
+			: { kind: "local" };
+	}
+
+	hasActiveRun(): boolean {
+		return this.kind === "remote" && !this.exited
+			&& (this.visualState === "running" || this.visualState === "awaiting-input");
 	}
 
 	/** The cwd this leaf is bound to (null = unbound/no-cwd) — the
@@ -276,6 +368,9 @@ export class TerminalView extends ItemView {
 			...(this.titleText ? { title: this.titleText } : {}),
 			...(this.fresh ? { fresh: "true" } : {}),
 			...(this.sessionFile ? { sessionFile: this.sessionFile } : {}),
+			kind: this.kind,
+			...(this.kind === "remote" && this.profileId ? { profileId: this.profileId } : {}),
+			...(this.kind === "remote" && this.tmuxSession ? { tmuxSession: this.tmuxSession } : {}),
 		};
 	}
 
@@ -289,7 +384,12 @@ export class TerminalView extends ItemView {
 		const fresh = raw.fresh === true || raw.fresh === "true";
 		const sessionFile =
 			typeof raw.sessionFile === "string" && raw.sessionFile.trim() ? raw.sessionFile.trim() : null;
-		if (cwd === this.cwd && fresh === this.fresh && sessionFile === this.sessionFile) {
+		const registry = normalizeTerminalRegistryEntry(raw);
+		if (cwd) this.plugin.terminalManager?.register(this.leaf, cwd, registry);
+		const profileId = registry.profileId ?? null;
+		const tmuxSession = registry.tmuxSession ?? null;
+		if (cwd === this.cwd && fresh === this.fresh && sessionFile === this.sessionFile
+			&& registry.kind === this.kind && profileId === this.profileId && tmuxSession === this.tmuxSession) {
 			if (title && title !== this.titleText) {
 				this.titleText = title;
 				this.renderState();
@@ -301,6 +401,9 @@ export class TerminalView extends ItemView {
 		// never run in one leaf.
 		this.detachSession();
 		this.cwd = cwd;
+		this.kind = registry.kind;
+		this.profileId = profileId;
+		this.tmuxSession = tmuxSession;
 		this.titleText = title;
 		this.fresh = fresh;
 		this.sessionFile = sessionFile;
@@ -398,18 +501,32 @@ export class TerminalView extends ItemView {
 			: undefined;
 		let pty: LocalPty;
 		try {
-			pty = spawnPi(
-				cwd,
-				{
-					fresh: this.fresh,
-					sessionFile: this.sessionFile ?? undefined,
+			if (this.kind === "remote") {
+				const profile = this.plugin.settings.piRemoteProfiles.find((p) => p.id === this.profileId);
+				if (!profile) throw new Error("Remote pi host is no longer configured");
+				const remoteProfile: RemoteProfile = {
+					...profile,
+					tmuxSession: this.tmuxSession || profile.tmuxSession,
+				};
+				pty = this.plugin.remoteBackend.spawnRemotePi(remoteProfile, {
 					cols: terminal.cols,
 					rows: terminal.rows,
-					command: this.plugin.settings.piExecutable,
-					ptyModulePath,
-				},
-				factory ?? undefined,
-			);
+					...(factory ? { ptyFactory: factory } : {}),
+				});
+			} else {
+				pty = spawnPi(
+					cwd,
+					{
+						fresh: this.fresh,
+						sessionFile: this.sessionFile ?? undefined,
+						cols: terminal.cols,
+						rows: terminal.rows,
+						command: this.plugin.settings.piExecutable,
+						ptyModulePath,
+					},
+					factory ?? undefined,
+				);
+			}
 		} catch (err) {
 			this.attachError = err instanceof Error ? err.message : String(err ?? "pi spawn failed");
 			this.setVisualState("error");
@@ -553,18 +670,61 @@ export class TerminalView extends ItemView {
 		return terminal;
 	}
 
-	/** Detach one session: kill the pty + drop its subscriptions. The xterm
-	 *  renderer survives (reusable across a cwd change); teardown disposes it. */
+	/** Detach this leaf's pipe. REMOTE sessions deliberately never call
+	 *  pty.kill(): SSH exit status is transport status, not remote pi's fate. */
+	detach(): void {
+		this.detachSession();
+	}
+
+	/** Close via the leaf X/manager. Remote active runs ask first; quit/onClose
+	 *  bypasses this dialog and always takes the safe detach-only path. */
+	requestClose(): void {
+		if (this.kind !== "remote" || !this.hasActiveRun()) {
+			this.originalLeafDetach();
+			return;
+		}
+		new RemoteCloseDialog(
+			this.plugin.app,
+			`${this.remoteProfileLabel} · ${this.tmuxSession ?? "tmux"}`,
+			() => this.originalLeafDetach(),
+			() => { void this.terminateRemoteAndClose(); },
+		).open();
+	}
+
+	/** Explicit destructive secondary action. The SSH pipe is detached only
+	 *  after tmux was killed successfully; failure keeps the view open. */
+	async terminateRemoteAndClose(): Promise<void> {
+		const profile = this.plugin.settings.piRemoteProfiles.find((p) => p.id === this.profileId);
+		if (!profile || !this.tmuxSession) {
+			new Notice("Remote pi host or tmux session is no longer configured.", 5000);
+			return;
+		}
+		try {
+			await this.plugin.remoteBackend.killRemoteSession(profile, this.tmuxSession);
+			this.originalLeafDetach();
+		} catch (err) {
+			new Notice(`Failed to terminate remote pi: ${err instanceof Error ? err.message : String(err)}`, 7000);
+		}
+	}
+
+	/** Detach one session: kill a LOCAL pty, or only drop a REMOTE pipe's
+	 *  subscriptions/reference. The xterm renderer survives a cwd change. */
 	private detachSession(): void {
 		this.ptyDataSub?.dispose();
 		this.ptyDataSub = null;
 		this.ptyExitSub?.dispose();
 		this.ptyExitSub = null;
 		if (this.pty) {
-			try {
-				this.pty.kill();
-			} catch {
-				// already dead — best-effort
+			if (this.kind === "remote") {
+				// Optional backend extension; the shared PtyLike contract needs no
+				// kill call and remote teardown must never imply remote termination.
+				(this.pty as LocalPty & { detach?: () => void }).detach?.();
+			} else {
+				try {
+					this.pty.kill();
+				} catch {
+					// already dead — best-effort
+				}
 			}
 		}
 		this.pty = null;
@@ -661,7 +821,7 @@ export class TerminalView extends ItemView {
 			dot.removeClass(`pi-live-dot--${v}`);
 		}
 		dot.addClass(`pi-live-dot--${verdict}`);
-		dot.setAttribute("title", LIVENESS_TITLES[verdict]);
+		dot.setAttribute("title", (this.kind === "remote" ? REMOTE_LIVENESS_TITLES : LIVENESS_TITLES)[verdict]);
 	}
 
 	/** Re-apply the xterm theme (called by main.ts on Obsidian `css-change`). */
@@ -997,6 +1157,13 @@ export class TerminalView extends ItemView {
 			cls: `arthur-pi-badge ${terminalStateClass(this.visualState)}`,
 		});
 		this.badgeEl.setText(this.badgeText());
+		if (this.kind === "remote") {
+			stateEl.createEl("span", {
+				cls: "arthur-pi-remote-flag",
+				text: `⌁ ${this.remoteProfileLabel}`,
+				attr: { title: `${this.remoteProfileLabel} · ${this.tmuxSession ?? "tmux"}` },
+			});
+		}
 		const cwdEl = stateEl.createEl("span", { cls: "arthur-pi-state-cwd", text: this.cwd });
 		cwdEl.setAttribute("title", this.cwd);
 		if (this.exited) {
@@ -1004,7 +1171,11 @@ export class TerminalView extends ItemView {
 			stateEl.append(
 				el("span", {
 					cls: `arthur-ahp-state arthur-ahp-state--${clean ? "closed" : "error"}`,
-					text: `process exited (code ${this.exitCode ?? 0})`,
+					text: this.kind === "remote"
+					? this.exitCode === 0
+						? "SSH detached (remote tmux session may still be running)"
+						: `SSH pipe exited (code ${this.exitCode ?? 0}; remote pi fate unknown)`
+					: `process exited (code ${this.exitCode ?? 0})`,
 				}),
 			);
 		}
@@ -1068,6 +1239,7 @@ export class TerminalView extends ItemView {
 		this.contentEl.empty();
 		// Stay consistent with the manager's routing map regardless of how the
 		// leaf closed (X button, closeTerminal, unload).
-		this.plugin.terminalManager?.forget(this.cwd);
+		this.plugin.terminalManager?.forget(this.cwd, this.registryEntry);
+		if (this.leaf.detach === this.interceptedLeafDetach) this.leaf.detach = this.originalLeafDetach;
 	}
 }

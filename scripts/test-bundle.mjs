@@ -7807,6 +7807,295 @@ try {
 	})();
 
 
+	// ---- 46. REMOTE pi terminal UI / settings / detach + progressive discovery
+	console.log("== 46. remote pi terminal UI + settings + detach/resume/farm ==");
+	await (async () => {
+		let checks46 = 0;
+		const failuresBefore46 = failures;
+		const assert46 = (cond, label) => { checks46++; assert(cond, label); };
+		const T = "arthur-pi-terminal";
+		const F = "arthur-pi-farm";
+		const profile46a = {
+			id: "r1", label: "Voyager", sshTarget: "bob@voyager.tail",
+			remoteCwd: "/home/bob/work", tmuxSession: "arthur-pi-main",
+			piExecutable: "/home/bob/.local/bin/pi", piArgs: "--verbose",
+		};
+		const profile46b = {
+			id: "r2", label: "Broken", sshTarget: "root@broken.tail",
+			remoteCwd: "/srv", tmuxSession: "arthur-pi-broken",
+		};
+
+		const sameProfiles46 = (actual, expected) => actual.length === expected.length
+			&& expected.every((profile, i) => Object.keys(profile).every((key) => actual[i]?.[key] === profile[key]));
+
+		// (a) Schema defaults + lossless profile round-trip; probe data is not settings.
+		const raw46 = JSON.parse(JSON.stringify(plugin._data ?? {}));
+		delete raw46.piRemoteProfiles;
+		plugin._data = raw46;
+		await plugin.loadSettings();
+		assert46(Array.isArray(plugin.settings.piRemoteProfiles) && plugin.settings.piRemoteProfiles.length === 0,
+			"(a) legacy settings default piRemoteProfiles to []");
+		plugin._data = { ...raw46, piRemoteProfiles: [profile46a, profile46b] };
+		await plugin.loadSettings();
+		assert46(sameProfiles46(plugin.settings.piRemoteProfiles, [profile46a, profile46b]),
+			"(a) all remote profile fields survive loadSettings");
+		await plugin.saveSettings();
+		assert46(sameProfiles46(plugin._data.piRemoteProfiles, [profile46a, profile46b]),
+			"(a) all remote profile fields survive saveSettings");
+		assert46(bundle.normalizeTerminalRegistryEntry({}).kind === "local"
+			&& bundle.normalizeTerminalRegistryEntry({ cwd: "/legacy" }).kind === "local",
+			"(a) pre-feature registry entries reconstruct as local");
+		assert46(bundle.terminalRouteKey("/same", { kind: "local" }) === "/same"
+			&& bundle.terminalRouteKey("/same", { kind: "remote", profileId: "r1", tmuxSession: "tm" }) !== "/same",
+			"(a) remote routing identity is distinct from a local cwd");
+
+		// (b) Settings tab smoke: real inline inputs through an enhanced Setting stub.
+		StubEl.prototype.toggleClass = function(cls, force) {
+			const has = this.hasClass(cls);
+			if (force === undefined ? !has : force) this.addClass(cls); else this.removeClass(cls);
+		};
+		obsidianStub.Setting = class SmokeSetting46 {
+			constructor(container) { this.container = container; }
+			setName(name) { this.name = name; return this; }
+			setDesc() { return this; }
+			addText(cb) {
+				const input = this.container.createEl("input");
+				const api = {
+					inputEl: input,
+					setPlaceholder(v) { input.setAttribute("placeholder", v); return this; },
+					setValue(v) { input.value = String(v ?? ""); return this; },
+					setDisabled(v) { input.disabled = !!v; return this; },
+					onChange(fn) { input.addEventListener("change", () => void fn(input.value ?? "")); return this; },
+				};
+				cb(api);
+				return this;
+			}
+			addToggle(cb) {
+				const input = this.container.createEl("input");
+				input.type = "checkbox";
+				const api = {
+					setValue(v) { input.checked = !!v; return this; },
+					onChange(fn) { input.addEventListener("change", () => void fn(!!input.checked)); return this; },
+				};
+				cb(api);
+				return this;
+			}
+		};
+		plugin.remoteBackend = {
+			...plugin.remoteBackend,
+			probeRemote: async (profile) => {
+				if (profile.id === "r2") throw new Error("ssh unavailable");
+				return { sshOk: true, tmuxOk: true, tmuxVersion: "tmux 3.4", piDetected: true };
+			},
+		};
+		const settings46 = new bundle.ArthurSettingTab(app, plugin);
+		settings46.containerEl = new StubEl("div");
+		settings46.display();
+		const profileRows46 = findByClass(settings46.containerEl, "arthur-remote-profile");
+		assert46(profileRows46.length === 2 && findByClass(profileRows46[0], "arthur-remote-probe").length === 1,
+			"(b) settings builds one inline row + Probe button per profile");
+		assert46(findByTag(profileRows46[0], "INPUT").length === 6,
+			"(b) label/target/cwd/tmux/executable/args editors are present");
+		const probes46 = findButtons(settings46.containerEl, "Probe");
+		StubNotice.reset();
+		probes46[0].handlers.get("click")[0]();
+		probes46[1].handlers.get("click")[0]();
+		await sleep(30);
+		assert46(findByClass(profileRows46[0], "arthur-remote-probe-dot--ok").length === 1
+			&& plugin.getRemoteProbe("r1")?.tmuxVersion === "tmux 3.4",
+			"(b) successful probe paints green + populates the shared in-memory cache");
+		assert46(findByClass(profileRows46[1], "arthur-remote-probe-dot--error").length === 1
+			&& StubNotice.shown.some((m) => m.includes("ssh unavailable")),
+			"(b) failed probe paints red + error text/Notice");
+		await plugin.saveSettings();
+		assert46(plugin._data.remoteProbeCache === undefined
+			&& !JSON.stringify(plugin._data).includes("tmux 3.4"),
+			"(b) probe results are NEVER persisted");
+
+		// (c) Remote spawn + ROW-1 flag + persisted registry identity.
+		await app.workspace.detachLeavesOfType(T);
+		await plugin.onunload();
+		await plugin.onload();
+		const remotePtys46 = makeFakePtyFactory();
+		const killCalls46 = [];
+		plugin.remoteBackend = {
+			spawnRemotePi(profile, opts) {
+				const pty = remotePtys46.factory("ssh", ["-tt", profile.sshTarget], opts);
+				pty.remoteProfile = { ...profile };
+				return pty;
+			},
+			listRemoteSessions: async () => [],
+			killRemoteSession: async (profile, name) => { killCalls46.push({ profile, name }); },
+			probeRemote: async () => ({ sshOk: true, tmuxOk: true, tmuxVersion: "tmux 3.4", piDetected: true }),
+		};
+		await plugin.activateRemotePiTerminal("r1");
+		let remoteLeaf46 = app.workspace.getLeavesOfType(T)[0];
+		let remoteView46 = remoteLeaf46.view;
+		assert46(remoteView46.sessionKind === "remote" && remoteView46.boundProfileId === "r1"
+			&& remoteView46.boundTmuxSession === "arthur-pi-main",
+			"(c) remote view carries kind/profile/tmux identity");
+		const flag46 = findByClass(remoteView46.contentEl, "arthur-pi-remote-flag")[0];
+		assert46(flag46?.textContent === "⌁ Voyager" && allText(remoteView46.contentEl).includes(profile46a.remoteCwd),
+			"(c) ROW 1 renders the unmistakable ⌁ profileLabel flag before cwd");
+		assert46(remoteView46.getState().kind === "remote"
+			&& remoteView46.getState().profileId === "r1"
+			&& remoteView46.getState().tmuxSession === "arthur-pi-main",
+			"(c) workspace leaf state persists the remote registry entry");
+		assert46(remotePtys46.ptys[0].remoteProfile.piExecutable === profile46a.piExecutable
+			&& remotePtys46.ptys[0].remoteProfile.piArgs === "--verbose",
+			"(c) spawnRemotePi receives the full configured profile");
+		assert46(remoteView46.getDisplayText().includes("(remote)"),
+			"(c) leaf display title carries the remote suffix");
+
+		// (d) No active run: leaf close silently detaches and NEVER calls pty.kill.
+		StubModal.reset();
+		remoteLeaf46.detach();
+		await sleep(20);
+		assert46(!remotePtys46.ptys[0].killed && remoteView46.pty === null
+			&& app.workspace.getLeavesOfType(T).length === 0,
+			"(d) remote leaf close drops the pipe without kill");
+		assert46(StubModal.opened.length === 0, "(d) inactive remote close needs no confirmation");
+
+		// (e) Active run: default modal action = Detach, still no local pty kill.
+		await plugin.activateRemotePiTerminal("r1");
+		remoteLeaf46 = app.workspace.getLeavesOfType(T)[0];
+		remoteView46 = remoteLeaf46.view;
+		remoteView46.setVisualState("running");
+		StubModal.reset();
+		remoteLeaf46.detach();
+		const closeModal46 = StubModal.opened[0];
+		assert46(StubModal.opened.length === 1 && app.workspace.getLeavesOfType(T).length === 1
+			&& !!findButton(closeModal46.contentEl, "Detach (keep running)")
+			&& !!findButton(closeModal46.contentEl, "Terminate remote (kill tmux session)"),
+			"(e) active remote close offers Detach primary + explicit Terminate secondary");
+		findButton(closeModal46.contentEl, "Detach (keep running)").handlers.get("click")[0]();
+		await sleep(20);
+		assert46(!remotePtys46.ptys[1].killed && killCalls46.length === 0
+			&& app.workspace.getLeavesOfType(T).length === 0,
+			"(e) Detach keeps remote tmux alive and sends no kill");
+
+		// (f) Explicit Terminate calls the injected killRemoteSession seam; the
+		//     subsequent local teardown STILL does not call the pty kill method.
+		await plugin.activateRemotePiTerminal("r1");
+		remoteLeaf46 = app.workspace.getLeavesOfType(T)[0];
+		remoteView46 = remoteLeaf46.view;
+		remoteView46.setVisualState("running");
+		StubModal.reset();
+		remoteLeaf46.detach();
+		findButton(StubModal.opened[0].contentEl, "Terminate remote").handlers.get("click")[0]();
+		await sleep(30);
+		assert46(killCalls46.length === 1 && killCalls46[0].profile.id === "r1"
+			&& killCalls46[0].name === "arthur-pi-main",
+			"(f) Terminate calls killRemoteSession(profile, tmuxSession)");
+		assert46(!remotePtys46.ptys[2].killed && app.workspace.getLeavesOfType(T).length === 0,
+			"(f) Terminate's view teardown adds no pty.kill");
+
+		// (g) Resume picker: local/new content is immediate; remote profiles resolve
+		//     progressively and one failed host becomes ONE non-throwing error row.
+		let resolveGood46;
+		let rejectBad46;
+		const good46 = new Promise((resolve) => { resolveGood46 = resolve; });
+		const bad46 = new Promise((_, reject) => { rejectBad46 = reject; });
+		let attached46 = null;
+		const resume46 = new bundle.InstancePickerModal(app, {
+			instances: [], onPick: () => {}, onNew: () => {},
+			remoteProfiles: plugin.settings.piRemoteProfiles,
+			getRemoteProbe: (id) => plugin.getRemoteProbe(id),
+			listRemoteSessions: (profile) => profile.id === "r1" ? good46 : bad46,
+			onRemoteAttach: (profile, name) => { attached46 = { profile, name }; },
+		});
+		resume46.open();
+		assert46(findByClass(resume46.contentEl, "arthur-remote-sessions").length === 1
+			&& findByClass(resume46.contentEl, "arthur-remote-loading").length === 2
+			&& findByClass(resume46.contentEl, "arthur-instance-row--new").length === 1,
+			"(g) resume picker paints local/new + all remote placeholders before SSH resolves");
+		rejectBad46(new Error("host down"));
+		await sleep(20);
+		assert46(findByClass(resume46.contentEl, "arthur-remote-session-error").length === 1
+			&& allText(resume46.contentEl).includes("host down")
+			&& findByClass(resume46.contentEl, "arthur-remote-loading").length === 1,
+			"(g) one failed profile renders one error without blocking the other");
+		resolveGood46([
+			{ name: "arthur-pi-main", attached: true, windows: 2, createdTs: null },
+			{ name: "arthur-pi-side", attached: false, windows: 1, createdTs: null },
+		]);
+		await sleep(20);
+		const remoteRows46 = findByClass(resume46.contentEl, "arthur-remote-session-row");
+		assert46(remoteRows46.length === 2 && allText(resume46.contentEl).includes("1 attached")
+			&& allText(resume46.contentEl).includes("2 windows"),
+			"(g) resolved rows show attached count + windows");
+		remoteRows46.find((r) => r.getAttribute("data-tmux-session") === "arthur-pi-side")
+			.handlers.get("click")[0]();
+		assert46(attached46?.profile.id === "r1" && attached46.name === "arthur-pi-side"
+			&& resume46._closed === true,
+			"(g) clicking a discovered row attaches that exact tmux session");
+
+		// (h) New-target chooser: Local + each remote profile, with cached probe dots.
+		StubModal.reset();
+		plugin.openTerminalPicker();
+		const chooser46 = StubModal.opened[StubModal.opened.length - 1];
+		assert46(chooser46 instanceof bundle.NewTerminalTargetModal
+			&& findByClass(chooser46.contentEl, "arthur-terminal-target-local").length === 1
+			&& findByClass(chooser46.contentEl, "arthur-terminal-target-remote").length === 2
+			&& findByClass(chooser46.contentEl, "arthur-remote-probe-dot").length === 2,
+			"(h) New pi terminal chooser lists Local + remotes + probe-status dots");
+		const ptysBeforeChooser46 = remotePtys46.ptys.length;
+		findByClass(chooser46.contentEl, "arthur-terminal-target-remote")
+			.find((r) => r.getAttribute("data-remote-profile") === "r1").handlers.get("click")[0]();
+		await sleep(30);
+		assert46(remotePtys46.ptys.length === ptysBeforeChooser46 + 1
+			&& app.workspace.getLeavesOfType(T)[0].view.boundProfileId === "r1",
+			"(h) choosing a remote target opens its configured default tmux session");
+
+		// (i) Farm: remote-open badge is immediate and excluded from local dormant
+		//     reconstruction; discovered rows/errors then arrive per profile.
+		await plugin.activatePiFarmView();
+		const farm46 = app.workspace.getLeavesOfType(F)[0].view;
+		farm46.farmLoadDormant = () => [];
+		farm46.farmListRemoteSessions = async (profile) => {
+			if (profile.id === "r2") throw new Error("farm host down");
+			return [{ name: "arthur-pi-discovered", attached: false, windows: 3, createdTs: null }];
+		};
+		farm46.refresh();
+		assert46(findByClass(farm46.contentEl, "arthur-farm-remote-open").length === 1
+			&& allText(findByClass(farm46.contentEl, "arthur-farm-remote-open")[0]).includes("Voyager")
+			&& allText(findByClass(farm46.contentEl, "arthur-farm-remote-open")[0]).includes("arthur-pi-main"),
+			"(i) farm immediately lists the remote-open view with ⌁ label + tmux");
+		assert46(findByClass(farm46.contentEl, "arthur-farm-row").length === 0,
+			"(i) remote-open views never reconstruct as local dormant rows");
+		await sleep(30);
+		assert46(allText(farm46.contentEl).includes("Remote sessions (tailnet)")
+			&& findByClass(farm46.contentEl, "arthur-farm-remote-session").length === 1
+			&& findByClass(farm46.contentEl, "arthur-farm-remote-error").length === 1,
+			"(i) farm renders discovered sessions + one error per failed profile");
+		const ptysBeforeFarmAttach46 = remotePtys46.ptys.length;
+		findByClass(farm46.contentEl, "arthur-farm-remote-session")[0].handlers.get("click")[0]();
+		await sleep(30);
+		const attachedFarm46 = app.workspace.getLeavesOfType(T).find((l) => l.view.boundTmuxSession === "arthur-pi-discovered");
+		assert46(!!attachedFarm46 && remotePtys46.ptys.length === ptysBeforeFarmAttach46 + 1
+			&& attachedFarm46.view.pty.remoteProfile.tmuxSession === "arthur-pi-discovered",
+			"(i) clicking a farm discovery row attaches that session");
+		const dormantMerge46 = bundle.mergeFarmRows(
+			[{ cwd: "/same", title: "remote", state: "running", kind: "remote", profileId: "r1" }],
+			[{ cwd: "/same", mtimeMs: 1 }], 10,
+		);
+		assert46(dormantMerge46.length === 1 && dormantMerge46[0].open === false,
+			"(i) pure farm merge keeps remote identity out of local dormant reconstruction");
+
+		// (j) Quit/unload path is always safe detach, even with an active run.
+		const activeOnQuit46 = app.workspace.getLeavesOfType(T)[0].view;
+		activeOnQuit46.setVisualState("running");
+		const quitPty46 = activeOnQuit46.pty;
+		StubModal.reset();
+		await app.workspace.detachLeavesOfType(T);
+		assert46(!quitPty46.killed && StubModal.opened.length === 0,
+			"(j) Obsidian quit/detachLeaves path neither prompts nor kills remote");
+		await app.workspace.detachLeavesOfType(F);
+		assert46(failuresBefore46 === failures, "§46 all remote UI assertions passed");
+		if (failuresBefore46 === failures) console.log(`§46 PASS: ${checks46} assertions`);
+	})();
+
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();

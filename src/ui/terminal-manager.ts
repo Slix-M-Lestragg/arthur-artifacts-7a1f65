@@ -25,6 +25,12 @@ import type { WorkspaceLeaf } from "obsidian";
 
 import type ArthurPlugin from "../main";
 import type { PtySpawnFn } from "../api/local-pty";
+import type { RemoteProfile } from "../api/ssh-tmux";
+import {
+	normalizeTerminalRegistryEntry,
+	terminalRouteKey,
+	type TerminalRegistryEntry,
+} from "./terminal-registry";
 import { VIEW_TYPE_PI_TERMINAL, TerminalView } from "./terminal-view";
 import type { InstanceRow } from "./instance-picker";
 
@@ -37,6 +43,12 @@ export interface OpenTerminalOpts {
 	/** Resume a SPECIFIC session file (`pi --session <file>`); wins over `-c`,
 	 *  ignored when `fresh`. From the picker's resume rows / restored state. */
 	sessionFile?: string;
+}
+
+export interface OpenRemoteTerminalOpts {
+	title?: string;
+	/** Attach this discovered session instead of the profile's default. */
+	tmuxSession?: string;
 }
 
 export class TerminalManager {
@@ -88,17 +100,18 @@ export class TerminalManager {
 		const key = typeof cwd === "string" && cwd.trim() ? cwd.trim() : null;
 		if (key) {
 			const state: Record<string, unknown> = { cwd: key };
+			const routeKey = terminalRouteKey(key, { kind: "local" });
 			if (opts?.title) state.title = opts.title;
 			if (opts?.fresh) state.fresh = true;
 			if (opts?.sessionFile) state.sessionFile = opts.sessionFile;
-			const existing = this.leaves.get(key);
+			const existing = this.leaves.get(routeKey);
 			if (existing) {
 				await existing.setViewState({ type: VIEW_TYPE_PI_TERMINAL, active: true, state });
 				workspace.revealLeaf(existing);
 				return existing;
 			}
 			const leaf = this.findUnboundLeaf() ?? workspace.getLeaf(true);
-			this.leaves.set(key, leaf);
+			this.leaves.set(routeKey, leaf);
 			await leaf.setViewState({ type: VIEW_TYPE_PI_TERMINAL, active: true, state });
 			workspace.revealLeaf(leaf);
 			return leaf;
@@ -114,16 +127,61 @@ export class TerminalManager {
 		return leaf;
 	}
 
+	async openRemoteTerminal(profile: RemoteProfile, opts: OpenRemoteTerminalOpts = {}): Promise<WorkspaceLeaf> {
+		const { workspace } = this.plugin.app;
+		const cwd = profile.remoteCwd.trim() || "~";
+		const entry: TerminalRegistryEntry = {
+			kind: "remote",
+			profileId: profile.id,
+			tmuxSession: opts.tmuxSession?.trim() || profile.tmuxSession,
+		};
+		const key = terminalRouteKey(cwd, entry);
+		const state: Record<string, unknown> = {
+			cwd,
+			kind: "remote",
+			profileId: profile.id,
+			tmuxSession: entry.tmuxSession,
+			title: opts.title ?? profile.label,
+		};
+		const existing = this.leaves.get(key);
+		if (existing) {
+			await existing.setViewState({ type: VIEW_TYPE_PI_TERMINAL, active: true, state });
+			workspace.revealLeaf(existing);
+			return existing;
+		}
+		const leaf = this.findUnboundLeaf() ?? workspace.getLeaf(true);
+		this.leaves.set(key, leaf);
+		await leaf.setViewState({ type: VIEW_TYPE_PI_TERMINAL, active: true, state });
+		workspace.revealLeaf(leaf);
+		return leaf;
+	}
+
+	/** Factory alias for callers creating a session rather than resuming one. */
+	async newSession(profile: RemoteProfile, opts: OpenRemoteTerminalOpts = {}): Promise<WorkspaceLeaf> {
+		return this.openRemoteTerminal(profile, opts);
+	}
+
+	/** Register a restored leaf as well as manager-created ones. */
+	register(leaf: WorkspaceLeaf, cwd: string, entry: TerminalRegistryEntry): void {
+		if (cwd.trim()) this.leaves.set(terminalRouteKey(cwd, entry), leaf);
+	}
+
 	/**
 	 * Close one terminal leaf: detach it (real Obsidian `leaf.detach()` → view
 	 * `onClose` → teardown → pty kill + xterm dispose) and forget the routing
 	 * entry. Closing ONE leaf must not disturb any other — each owns its pty.
 	 */
-	closeTerminal(cwd: string): void {
-		const key = typeof cwd === "string" && cwd.trim() ? cwd.trim() : null;
-		if (!key) return;
+	closeTerminal(cwd: string, entry: TerminalRegistryEntry = { kind: "local" }): void {
+		const trimmed = typeof cwd === "string" && cwd.trim() ? cwd.trim() : null;
+		if (!trimmed) return;
+		const key = terminalRouteKey(trimmed, entry);
 		const leaf = this.leaves.get(key);
 		if (!leaf) return;
+		const view = leaf.view;
+		if (view instanceof TerminalView && view.sessionKind === "remote") {
+			view.requestClose();
+			return;
+		}
 		if (this.lastFocusedLeaf === leaf) this.lastFocusedLeaf = null;
 		this.leaves.delete(key);
 		leaf.detach();
@@ -134,9 +192,9 @@ export class TerminalManager {
 	 * leaf closed any way (X button, `closeTerminal`, unload) stays consistent
 	 * with the map. Idempotent.
 	 */
-	forget(cwd: string | null): void {
+	forget(cwd: string | null, rawEntry?: TerminalRegistryEntry): void {
 		if (typeof cwd === "string" && cwd.trim()) {
-			const key = cwd.trim();
+			const key = terminalRouteKey(cwd, normalizeTerminalRegistryEntry(rawEntry));
 			const leaf = this.leaves.get(key);
 			if (leaf && this.lastFocusedLeaf === leaf) this.lastFocusedLeaf = null;
 			this.leaves.delete(key);
@@ -168,6 +226,10 @@ export class TerminalManager {
 				cwd: view.boundCwd,
 				title: view.getDisplayText(),
 				state: view.getVisualState(),
+				kind: view.sessionKind,
+				...(view.boundProfileId ? { profileId: view.boundProfileId } : {}),
+				...(view.remoteProfileLabel ? { profileLabel: view.remoteProfileLabel } : {}),
+				...(view.boundTmuxSession ? { tmuxSession: view.boundTmuxSession } : {}),
 			});
 		}
 		// Most-recently-focused first.

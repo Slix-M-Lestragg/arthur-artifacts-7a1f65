@@ -7,7 +7,7 @@
 		"dev": "node esbuild.config.mjs",
 		"build": "tsc --noEmit && node esbuild.config.mjs production",
 		"typecheck": "tsc --noEmit",
-		"smoke": "node scripts/test-bundle.mjs && node scripts/test-state.mjs",
+		"smoke": "node scripts/test-bundle.mjs && node scripts/test-state.mjs && node scripts/test-remote.mjs",
 		"test:state": "node scripts/test-state.mjs",
 		"release": "node scripts/release.mjs"
 	},

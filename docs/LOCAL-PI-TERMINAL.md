@@ -434,3 +434,54 @@ boundary through the live view (lone keystroke holds ready, Enter →
 running, dot class unchanged through status changes), clean vs nonzero
 exit (warn + `done` / error + `error`), and the composer `refit` re-clamp
 through the stub ResizeObserver.
+
+## Wave R1a — remote pi terminal backend (SSH + tmux)
+
+`src/api/ssh-tmux.ts` runs pi on another tailnet machine without adding a
+second terminal event pipeline. `spawnRemotePi` spawns the **local `ssh`**
+through the same lazy node-pty loader as local terminals and returns the pty
+unchanged (`onData`, `onExit`, `write`, `resize`, `kill`). The attach argv is:
+
+```text
+ssh -tt -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 <sshTarget> <remoteCommand>
+```
+
+The remote command creates or attaches the named tmux session. tmux owns pi
+on the server: closing the view/killing the local pty only removes the ssh
+client, while the remote run continues. Running the same attach command from
+any arthur instance on the tailnet reattaches it. `onExit` therefore reports
+the **ssh lifecycle**, not remote pi liveness: 255 means an SSH link/banner
+failure; 0 means a clean detach or a clean remote exit.
+
+### Quoting and login-shell decision
+
+There are three command-string consumers: the remote shell started by ssh,
+the shell tmux uses for `new-session`'s command, and the user's login shell
+for pi. The backend POSIX-single-quotes each complete payload at its layer;
+an embedded quote becomes the byte sequence `'"'"'`. For example, cwd
+`/Users/bob/My Dir`, session `arthur-pi-My-Dir`, default pi produces exactly:
+
+```text
+tmux new-session -A -s 'arthur-pi-My-Dir' 'cd '"'"'/Users/bob/My Dir'"'"' && exec "${SHELL:-/bin/bash}" -l -c '"'"'exec pi'"'"''
+```
+
+The innermost command uses `"${SHELL:-/bin/bash}" -l -c`, rather than a
+non-login ssh shell, so profile-managed PATH entries such as nvm's are
+loaded. The default executable is the literal `pi`, resolved from that login
+PATH. `RemoteProfile.piExecutable` is an optional future Settings override;
+its whole value is shell-quoted, so an absolute path containing spaces works.
+`piArgs` remains raw, trusted shell syntax so callers can supply normally
+quoted flags and arguments.
+
+Control operations (`listRemoteSessions`, `killRemoteSession`, `probeRemote`)
+use injectable `execFile`, not a pty, with `-o BatchMode=yes -o
+ConnectTimeout=10` and a 15 s timeout. Listing filters the `arthur-pi-`
+prefix, converts tmux creation seconds to `createdTs` milliseconds, and maps
+"no server running on …" to an empty list. Probe performs one round trip for
+`command -v tmux`, `tmux -V`, and login-shell `command -v pi`; it never
+throws. `suggestTmuxSessionName` sanitizes the remote directory basename to
+tmux-safe ASCII letters, digits, `_`, and `-`.
+
+Isolated smoke coverage is **§45** in `scripts/test-remote.mjs`, chained by
+`npm run smoke`; it uses injected pty/exec implementations and never opens a
+real SSH connection.

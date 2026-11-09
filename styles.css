@@ -3095,3 +3095,48 @@
 	text-decoration: underline;
 }
 .arthur-terminal-browse-all:hover { background: var(--background-modifier-hover); border-radius: var(--radius-s); }
+
+/* ---- REMOTE pi terminals (SSH + tmux) ---- */
+.arthur-pi-remote-flag {
+	color: var(--interactive-accent);
+	font-size: var(--font-ui-smaller);
+	font-weight: 600;
+	white-space: nowrap;
+}
+.arthur-remote-settings { margin: 1em 0; }
+.arthur-remote-settings > summary { cursor: pointer; font-weight: 600; }
+.arthur-remote-profile-list { display: flex; flex-direction: column; gap: 0.8em; margin: 0.7em 0; }
+.arthur-remote-profile {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	padding: 0.5em 0.7em;
+}
+.arthur-remote-profile-head,
+.arthur-remote-profile-line { display: flex; align-items: center; gap: 0.45em; }
+.arthur-remote-profile-head > strong { margin-right: auto; }
+.arthur-remote-probe-dot {
+	display: inline-block;
+	flex: 0 0 auto;
+	width: 0.65em;
+	height: 0.65em;
+	border-radius: 50%;
+	background: var(--text-faint);
+}
+.arthur-remote-probe-dot--ok { background: var(--color-green, #4caf50); }
+.arthur-remote-probe-dot--error { background: var(--color-red, #e53935); }
+.arthur-remote-probe-status { color: var(--text-muted); font-size: var(--font-ui-smaller); }
+.arthur-remote-probe-status--error,
+.arthur-remote-session-error,
+.arthur-farm-remote-error { color: var(--text-error); }
+.arthur-remote-sessions,
+.arthur-farm-remote { margin-top: 0.8em; }
+.arthur-remote-sessions h4,
+.arthur-farm-remote h4 { margin: 0.4em 0; }
+.arthur-remote-profile-group,
+.arthur-farm-remote-profile { margin: 0.45em 0; }
+.arthur-remote-session-list,
+.arthur-farm-remote-session-list,
+.arthur-farm-remote-open-list { display: flex; flex-direction: column; gap: 0.15em; margin-top: 0.25em; }
+.arthur-remote-session-row,
+.arthur-farm-remote-row { min-width: 0; }
+.arthur-remote-close-actions { flex-wrap: wrap; }
