@@ -51,9 +51,10 @@ export { TerminalManager } from "./ui/terminal-manager";
 // the compiled main.js export surface.
 export { TerminalPickerModal, fuzzyMatch, listLocalPiSessions, defaultPiSessionsDir } from "./ui/terminal-picker";
 export type { LocalPiSession } from "./ui/terminal-picker";
-// local pty spawn wrapper (smoke asserts the spawn args/factory contract).
-export { spawnPi, resolvePtyModulePath } from "./api/local-pty";
-export type { LocalPty, PtySpawnFn, SpawnPiOpts } from "./api/local-pty";
+// local pty spawn wrapper (smoke asserts the spawn args/factory contract +
+// the enriched-PATH builder).
+export { spawnPi, resolvePtyModulePath, buildSpawnEnv } from "./api/local-pty";
+export type { LocalPty, PtySpawnFn, SpawnPiOpts, SpawnEnvDeps } from "./api/local-pty";
 
 /** One server profile — host + which ports the services live on + tokens. */
 export interface ServerProfile {

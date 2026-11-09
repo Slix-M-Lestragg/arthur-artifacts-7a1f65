@@ -5982,6 +5982,8 @@ try {
 		assert(ptys[0].cmd === "pi" && ptys[0].args.length === 1 && ptys[0].args[0] === "-c",
 			"(b) default spawn = `pi -c` (resume) in the cwd");
 		assert(ptys[0].opts.cwd === "/tmp/s1", "(b) the pty spawned in the chosen cwd");
+		assert(typeof ptys[0].opts.env?.PATH === "string" && ptys[0].opts.env.PATH.length > 0,
+			"(b) the spawn options carry an env with a non-empty PATH");
 		assert(viewB.boundCwd === "/tmp/s1", "(b) the leaf is bound to the cwd");
 		assert(viewB.getDisplayText() === "session one", "(b) display text uses the title from view state");
 		assert(allText(viewB.contentEl).includes("live"), "(b) state line shows 'live' while the pty runs");
@@ -6059,6 +6061,86 @@ try {
 		assert(pty.command === "fakepi" && pty.args.length === 1 && pty.args[0] === "-c", "(b) spawn args forwarded through the absolute-path-loaded module");
 		assert(pty.options.cwd === "/tmp/r", "(b) cwd forwarded through the absolute-path-loaded module");
 		fs.rmSync(fakeDir, { recursive: true, force: true });
+	})();
+
+	// ---- 28j. spawn PATH enrichment (buildSpawnEnv: piExecutable dir first /
+	//      exists-gated homebrew+nvm fallbacks / no dupes / spawn receives it) -
+	console.log("== 28j. spawn PATH enrichment (piExecutable dir first / exists-gated fallbacks / no dupes / spawn env) ==");
+	await (async () => {
+		const SEP = process.platform === "win32" ? ";" : ":";
+
+		// (a) pure builder, fully injected: realpath resolves the pi shim into the
+		//     real node bin dir → THAT dir is FIRST; the inherited PATH follows in
+		//     order (empties + dupes dropped); fallbacks appended only when
+		//     exists() says so; the NEWEST nvm version wins (numeric-aware sort —
+		//     a lexicographic name sort would rank v9.9.9 above v20.11.1).
+		assert(typeof bundle.buildSpawnEnv === "function", "(a) bundle exports buildSpawnEnv");
+		const existsA = new Set([
+			"/opt/homebrew/bin",                      // exists → appended
+			"/home/u/.nvm/versions/node/v9.9.9/bin",   // exists but NOT newest
+			"/home/u/.nvm/versions/node/v20.11.1/bin", // exists + newest → appended
+			// /usr/local/bin deliberately absent → must NOT be appended
+		]);
+		const envA = bundle.buildSpawnEnv({
+			piExecutable: "/shim/bin/pi",
+			env: { PATH: "/usr/bin::/bin:/usr/bin", HOME: "/home/u", SKIP: undefined },
+			homedir: "/home/u",
+			exists: (p) => existsA.has(p),
+			readdir: () => ["v9.9.9", "v20.11.1", "v10.0.0"], // deliberately unsorted
+			realpath: () => "/real/node/bin/pi",
+		});
+		const wantA = [
+			"/real/node/bin",                                  // 1. realpath→dir first
+			"/usr/bin", "/bin",                                 // 2. inherited (dupe+empty dropped)
+			"/opt/homebrew/bin",                                // 3. exists-gated
+			"/home/u/.nvm/versions/node/v20.11.1/bin",          // 3. newest nvm, not v9.9.9
+		].join(SEP);
+		assert(envA.PATH === wantA,
+			`(a) enriched PATH = realpath-dir + PATH + exists-gated fallbacks + newest nvm (got ${envA.PATH})`);
+		assert(envA.HOME === "/home/u", "(a) the rest of the base env is carried through");
+		assert(envA.SKIP === undefined, "(a) undefined env values are dropped");
+		assert(envA.PATH.split(SEP).every((e) => e !== "") && new Set(envA.PATH.split(SEP)).size === envA.PATH.split(SEP).length,
+			"(a) no empty / duplicate PATH entries");
+
+		// (b) realpath failure → dirname of the configured path still lands first;
+		//     readdir/exists failures are tolerated (nothing appended).
+		const envB = bundle.buildSpawnEnv({
+			piExecutable: "/cfg/bin/pi",
+			env: { PATH: "/usr/bin" },
+			homedir: "/home/u",
+			exists: () => false,
+			readdir: () => { throw new Error("ENOENT"); },
+			realpath: () => { throw new Error("ENOENT"); },
+		});
+		assert(envB.PATH === ["/cfg/bin", "/usr/bin"].join(SEP),
+			`(b) realpath failure → dirname(configured path) first, readdir failure tolerated (got ${envB.PATH})`);
+		// A relative command (the default 'pi') contributes NO dir entry — cwd
+		// ('.') must never end up on PATH.
+		const envB2 = bundle.buildSpawnEnv({
+			piExecutable: "pi",
+			env: { PATH: "/usr/bin" },
+			homedir: "/home/u",
+			exists: () => false,
+			readdir: () => [],
+			realpath: () => { throw new Error("ENOENT"); },
+		});
+		assert(envB2.PATH === "/usr/bin", `(b) relative default 'pi' adds no dir entry (got ${envB2.PATH})`);
+
+		// (c) spawn receives the enriched env — a fake factory records the opts
+		//     (NO native module load); the production fs/os injectables run here.
+		//     A nonexistent ABSOLUTE command → deterministic realpath failure →
+		//     its dirname must be the FIRST PATH entry.
+		const fakeEnv = makeFakePtyFactory();
+		bundle.spawnPi("/tmp/envprobe", { command: "/no/such/dir/pi" }, fakeEnv.factory);
+		const optsC = fakeEnv.ptys[0].opts;
+		assert(!!optsC.env && typeof optsC.env.PATH === "string", "(c) spawn receives a full env with a PATH");
+		const partsC = String(optsC.env?.PATH ?? "").split(SEP);
+		assert(partsC[0] === "/no/such/dir", `(c) piExecutable dir is the FIRST PATH entry (got ${partsC[0]})`);
+		assert((process.env.PATH ?? "").split(SEP).filter(Boolean).every((e) => partsC.includes(e)),
+			"(c) every inherited PATH entry is preserved in the enriched PATH");
+		assert(partsC.every((e) => e !== "") && new Set(partsC).size === partsC.length,
+			"(c) enriched PATH has no empty/duplicate entries");
+		if (process.env.HOME) assert(optsC.env.HOME === process.env.HOME, "(c) the rest of process.env is carried into the spawn env");
 	})();
 
 	// ---- 29. local terminal view lifecycle (lazy no-cwd / attach via view

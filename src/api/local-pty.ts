@@ -20,11 +20,22 @@
  * (or the bundle) never touches the native binding — smoke tests inject a
  * fake factory and never load the real one.
  *
+ * PATH enrichment: `spawnPi` builds the child env with `buildSpawnEnv` (pure
+ * over injected fs/os primitives — exported for smoke):
+ * `dirname(realpath(piExecutable))` FIRST so pi's `#!/usr/bin/env node`
+ * shebang finds `node` in the same bin dir (an nvm install ships both), then
+ * the inherited PATH, then exists()-gated homebrew/nvm fallbacks — a GUI app
+ * (Obsidian) can spawn the pty with a minimal PATH that lacks the user's node.
+ *
  * Testability: `spawnPi` takes an optional `factory` param. The default
  * factory is the real node-pty `spawn`; tests pass a fake that returns a
  * stub LocalPty so the data/resize/exit paths can be exercised with no native
  * pty and no real `pi` process.
  */
+
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 
 /** One end of a local pty — a subset of node-pty's IPty this view needs. */
 export interface LocalPty {
@@ -53,7 +64,8 @@ export interface PtySpawnOptions {
 	rows?: number;
 	/** Working directory the command starts in. */
 	cwd?: string;
-	/** Extra environment (merged over process.env by the default factory). */
+	/** Full child environment (spawnPi pre-enriches PATH via `buildSpawnEnv`;
+	 *  the default factory still merges it over process.env). */
 	env?: Record<string, string>;
 	/** Absolute path to the native pty module folder, pre-resolved by the
 	 *  caller from the vault base path + plugin manifest dir (see
@@ -86,11 +98,126 @@ export interface SpawnPiOpts {
 	rows?: number;
 	/** The pi executable (default `pi`; overridable via settings). */
 	command?: string;
-	/** Extra environment passthrough. */
+	/** Extra environment passthrough (merged into the base env BEFORE the PATH
+	 *  enrichment — see `buildSpawnEnv`). */
 	env?: Record<string, string>;
 	/** Absolute path to the native pty module (see `resolvePtyModulePath`).
 	 *  Passed through to the default factory; ignored by injected fakes. */
 	ptyModulePath?: string;
+}
+
+/** Filesystem/environment injectables for `buildSpawnEnv` — production wiring
+ *  passes real fs/os members; smoke injects fakes (no real fs access). */
+export interface SpawnEnvDeps {
+	/** The configured pi executable (settings `piExecutable`, default `pi`). */
+	piExecutable: string;
+	/** Base child env (`process.env` + `SpawnPiOpts.env` passthrough). */
+	env: Record<string, string | undefined>;
+	/** User home dir (`os.homedir()` in production). */
+	homedir: string;
+	/** Does the path exist? (`fs.existsSync`). */
+	exists(p: string): boolean;
+	/** List a directory's entry names (`fs.readdirSync`); throw → []. */
+	readdir(p: string): string[];
+	/** Resolve symlinks (`fs.realpathSync`); throw → configured-path fallback. */
+	realpath(p: string): string;
+}
+
+/** PATH list separator (POSIX ':' / Windows ';'). */
+const PATH_SEP = process.platform === "win32" ? ";" : ":";
+
+/** Well-known desktop bin dirs appended to PATH when they exist (Apple
+ *  Silicon Homebrew first, then the classic /usr/local prefix). */
+const FALLBACK_BIN_DIRS = ["/opt/homebrew/bin", "/usr/local/bin"];
+
+/** Numeric-chunk version compare: strips a leading `v` (nvm dir names are
+ *  `v24.19.0`) so chunks compare numerically — ranks v10 above v9 (a plain
+ *  lexicographic name sort would put v9.9.9 on top of v20.1.0) with a string
+ *  fallback for non-numeric tails. */
+function compareVersionish(a: string, b: string): number {
+	const pa = a.replace(/^[vV]/, "").split(/[.\-+_]/);
+	const pb = b.replace(/^[vV]/, "").split(/[.\-+_]/);
+	for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+		const x = pa[i] ?? "";
+		const y = pb[i] ?? "";
+		const nx = /^\d+$/.test(x) ? Number(x) : NaN;
+		const ny = /^\d+$/.test(y) ? Number(y) : NaN;
+		if (!Number.isNaN(nx) && !Number.isNaN(ny)) {
+			if (nx !== ny) return nx - ny;
+		} else if (x !== y) {
+			return x < y ? -1 : 1;
+		}
+	}
+	return 0;
+}
+
+/**
+ * Build the child environment for a spawned pi: copy `env`, then replace PATH
+ * with an ENRICHED list —
+ *   1. `dirname(realpath(piExecutable))` FIRST: pi's `#!/usr/bin/env node`
+ *      shebang needs `node` findable, and a GUI app (Obsidian) spawns the pty
+ *      with a minimal PATH; resolving the configured path/symlink lands the
+ *      real node bin dir, which holds BOTH `pi` and `node` (e.g. an nvm
+ *      version's `bin/`). realpath failure → dirname of the configured path;
+ *      a relative command (default `pi`) contributes no entry — cwd never
+ *      goes on PATH.
+ *   2. the existing PATH, in order.
+ *   3. append-if-exists: /opt/homebrew/bin, /usr/local/bin, then the NEWEST
+ *      `~/.nvm/versions/node/<v>/bin` (nvm version dir's `bin/`).
+ * Duplicates dropped, empty entries dropped; undefined env values dropped.
+ * Pure over the injectables so smoke can assert the exact composition.
+ */
+export function buildSpawnEnv(deps: SpawnEnvDeps): Record<string, string> {
+	const entries: string[] = [];
+	const seen = new Set<string>();
+	const push = (entry: string): void => {
+		if (entry && !seen.has(entry)) {
+			seen.add(entry);
+			entries.push(entry);
+		}
+	};
+
+	// 1. piExecutable dir, symlink-resolved when possible (nvm shim → real
+	//    node bin dir containing both `pi` and `node`).
+	let resolved = deps.piExecutable;
+	try {
+		resolved = deps.realpath(deps.piExecutable);
+	} catch {
+		// tolerate failure → dirname of the configured path (below).
+	}
+	const piDir = path.dirname(resolved);
+	if (path.isAbsolute(piDir)) push(piDir);
+
+	// 2. the existing PATH, in order (empties/dupes dropped).
+	const prior = deps.env["PATH"] ?? "";
+	for (const entry of prior.split(PATH_SEP)) push(entry.trim());
+
+	// 3. append-if-exists fallback bin dirs (desktop Node fs is available).
+	for (const dir of FALLBACK_BIN_DIRS) {
+		if (deps.exists(dir)) push(dir);
+	}
+	const nvmDir = path.join(deps.homedir, ".nvm", "versions", "node");
+	let versions: string[] = [];
+	try {
+		versions = deps.readdir(nvmDir);
+	} catch {
+		// no nvm → nothing to append.
+	}
+	versions.sort((a, b) => compareVersionish(b, a)); // newest first
+	for (const v of versions) {
+		const bin = path.join(nvmDir, v, "bin");
+		if (deps.exists(bin)) {
+			push(bin);
+			break;
+		}
+	}
+
+	const out: Record<string, string> = {};
+	for (const [key, value] of Object.entries(deps.env)) {
+		if (typeof value === "string") out[key] = value;
+	}
+	out["PATH"] = entries.join(PATH_SEP);
+	return out;
 }
 
 /** Default cols/rows when the view has no measured geometry yet. */
@@ -187,12 +314,23 @@ export function spawnPi(
 	// `-c` resumes the most recent session for the cwd; fresh → no flag.
 	const args = o.fresh ? [] : ["-c"];
 	const spawn: PtySpawnFn = factory ?? defaultPtySpawn;
+	// Enriched PATH (see buildSpawnEnv): a GUI-spawned pty can inherit a
+	// minimal PATH that lacks the user's nvm/homebrew node — pi's
+	// `#!/usr/bin/env node` shebang then dies with exit 127.
+	const env = buildSpawnEnv({
+		piExecutable: command,
+		env: { ...process.env, ...(o.env ?? {}) },
+		homedir: os.homedir(),
+		exists: (p) => fs.existsSync(p),
+		readdir: (p) => fs.readdirSync(p),
+		realpath: (p) => fs.realpathSync(p),
+	});
 	return spawn(command, args, {
 		name: "xterm-256color",
 		cols: o.cols ?? DEFAULT_COLS,
 		rows: o.rows ?? DEFAULT_ROWS,
 		cwd: cwd || undefined,
-		env: o.env,
+		env,
 		ptyModulePath: o.ptyModulePath,
 	});
 }

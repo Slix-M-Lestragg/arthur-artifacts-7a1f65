@@ -11,8 +11,10 @@ relay. `src/api/local-pty.ts` exposes `spawnPi(cwd, opts?, factory?)`, a thin
 wrapper over `@homebridge/node-pty-prebuilt-multiarch` that runs the configured
 pi executable (default `pi`, overridable in Settings → Pi terminal) with
 `["-c"]` to resume the most recent session in `cwd` (or no flag for a fresh
-session). The pty uses `name: "xterm-256color"`, the leaf's cols/rows, the
-given cwd, and env passthrough.
+session). The pty uses `name: "xterm-256color"`, the leaf's cols/rows, the given cwd,
+and an **enriched PATH** (`buildSpawnEnv`, exported for smoke):
+`dirname(realpath(piExecutable))` first — the nvm shim resolves to the real node bin dir, so pi's `#!/usr/bin/env node` shebang finds `node` even when the GUI app spawns with a minimal PATH —
+then the inherited PATH, then `/opt/homebrew/bin`, `/usr/local/bin` and the newest `~/.nvm/versions/node/*/bin` appended only when they exist (no duplicates, empty entries dropped).
 
 - `src/ui/terminal-manager.ts` — routes one leaf per cwd (`Map<cwd, leaf>`),
   reusing the existing leaf for an already-open cwd. Shared-nothing; each leaf
