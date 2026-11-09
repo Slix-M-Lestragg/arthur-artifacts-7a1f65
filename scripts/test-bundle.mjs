@@ -7574,13 +7574,45 @@ try {
 		assert(kids43[0] === comp43.resizerEl, "(a) resizer first (drag handle on the panel's top edge)");
 		assert(kids43[1] === comp43.toolbarEl,
 			"(a) ROW 1 = the existing button strip, ABOVE the textarea");
-		assert(kids43[2] === comp43.textarea,
-			"(a) ROW 2 = the textarea, the panel BODY filling the remaining space");
+		assert(kids43[2] === comp43.bodyEl,
+			"(a) ROW 2 = the BODY region, the panel's single flex-growing child");
+		assert(comp43.bodyEl.classList.contains("arthur-pi-composer-body") === true,
+			"(a) the body region carries the composer body class");
+		assert(comp43.bodyEl.children.length === 1 && comp43.bodyEl.children[0] === comp43.textarea,
+			"(a) the textarea is the body region's sole child (flex-fills it both axes)");
 		assert(comp43.textarea.classList.contains("arthur-pi-composer-input") === true,
 			"(a) the textarea carries the composer input class");
 		assert(comp43.textarea.style.fontSize === "16px"
 			&& comp43.textarea.attributes.get("data-prompt-font-size") === "16",
 			"(a) promptFontSize is applied to the full-size textarea (style + data attr)");
+
+		// (a2) ZERO-INLINE-LAYOUT CONTRACT (WAVE 7): the textarea NEVER receives an
+		//      inline height/width/max-height (nor a rows attr) — the PANEL owns
+		//      sizing. Checked after construct, after typing-driven autoGrow and
+		//      after refit (see §44f); only the FONT style is inline.
+		const noInlineLayout43 = (ta, where) => assert(
+			!ta.style.height && !ta.style.width && !ta.style.maxHeight
+				&& ta.attributes.get("rows") == null,
+			`(${where}) the textarea carries NO inline height/width/max-height and no rows attr`);
+		noInlineLayout43(comp43.textarea, "a2");
+		comp43.textarea.scrollHeight = 600;
+		comp43.textarea.handlers.get("input")[0]?.();
+		assert(comp43.rootEl.style.height === `${bundle.COMPOSER_MIN_HEIGHT}px`,
+			"(a2) typing-driven autoGrow grows the PANEL, never the textarea (clamped to the stub leaf)");
+		noInlineLayout43(comp43.textarea, "a2");
+
+		// (a3) STRUCTURAL WALKER — the full ancestor chain from the terminal
+		//      container down to the textarea must carry the flex-contract
+		//      classes (the chain that makes the fill work with zero inline
+		//      styles: panel owns height, body flex-fills, textarea fills it).
+		const hops43 = [];
+		for (let n = comp43.textarea; n; n = n._parent) {
+			hops43.unshift(String(n.className ?? ""));
+			if (String(n.className ?? "").includes("arthur-pi-terminal")) break;
+		}
+		assert(JSON.stringify(hops43) === JSON.stringify([
+			"arthur-pi-terminal", "arthur-pi-composer", "arthur-pi-composer-body", "arthur-pi-composer-input",
+		]), `(a3) ancestor chain = terminal → composer panel → body region → textarea (got: ${hops43.join(" | ")})`);
 		// The terminal surface keeps the remaining leaf space — the composer is
 		// not greedy beyond its own panel (it is the LAST flex child).
 		const wrap43 = view43.contentEl.children[0];
@@ -7604,6 +7636,10 @@ try {
 			"(b) the textarea: display:block + flex:1 1 auto + min-height:0 + width:100% (panel body)");
 		assert(/\.arthur-pi-composer-input\s*\{[^}]*max-width:\s*none/s.test(css43),
 			"(b) no max-width can cap the textarea");
+		assert(/\.arthur-pi-composer-input\s*\{[^}]*overflow-y:\s*auto/s.test(css43),
+			"(b) the textarea scrolls internally (overflow-y:auto) when content exceeds the grown panel");
+		assert(/\.arthur-pi-composer-body\s*\{[^}]*flex:\s*1 1 auto[^}]*min-height:\s*0[^}]*display:\s*flex/s.test(css43),
+			"(b) the body region: flex:1 1 auto + min-height:0 + a flex column (the panel's flex child)");
 		assert(/\.arthur-pi-composer-toolbar\s*\{[^}]*flex:\s*0 0 auto/s.test(css43),
 			"(b) the button strip is fixed chrome (flex: 0 0 auto — cannot squeeze the body)");
 		assert(/\.arthur-pi-terminal-surface\s*\{[^}]*flex:\s*1 1 auto[^}]*min-height:\s*0/s.test(css43),
@@ -7744,6 +7780,8 @@ try {
 		ro44.cb([]);
 		assert(comp.rootEl.style.height === `${bundle.COMPOSER_MIN_HEIGHT}px`,
 			"(f) a container resize re-clamps the composer panel (it participates in the RO fit path)");
+		assert(!comp.textarea.style.height && !comp.textarea.style.width,
+			"(f) refit re-clamps the PANEL only — the textarea keeps zero inline layout styles");
 		// the pure clamp through a real-sized host: 300px panel in a 400px leaf → 200px.
 		const host44 = {
 			cwd: () => "/tmp/w6a",
@@ -7761,6 +7799,8 @@ try {
 		comp44.refit();
 		assert(comp44.rootEl.style.height === "200px",
 			"(f) refit re-clamps a 300px panel to the 50% ceiling of a 400px leaf");
+		assert(!comp44.textarea.style.height && !comp44.textarea.style.width && !comp44.textarea.style.maxHeight,
+			"(f) a direct-host refit also leaves the textarea free of inline layout styles");
 		comp44.destroy();
 
 		await app.workspace.detachLeavesOfType(T);
@@ -7785,4 +7825,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / local-pty-terminal-spawn-args+pty→xterm+xterm→pty+resize+exit-state / local-pty-resolver-absolute-path-require+no-native-load / local-terminal-view-lazy-no-cwd+attach+close-kill+reopen / local-terminal-manager-per-cwd-routing+3-leaves+isolation+reuse+full-unload-kill-all / local-terminal-picker-fake-sessions-dir+select→open+vault-root+cwd-input+mobile-hide / ahp-client-load-retry-resilience-819e2bb-regression / pi-instance-states+badge-CSS-classes+focus-clears-awaiting / slash-toolbar-payload-bytes-new+compact+thinking / session-resume-spawn-args+listSessionFilesForCwd+respawn / send-active-note+selection-payload+wikilink-rewrite+no-terminal-notice / terminal-settings-plumbing-fontSize+scrollback+new-only / theme-follow-xterm-styling-var→ITheme+fallbacks+applyTheme / instance-picker+ribbon-command-routing+open-instances / pi-prompt-composer-drafts+bracketed-paste-submit+wikilink-context+@-files+image-paste+resizer-clamp / pi-farm-view-open+dormant-merge+resume/focus-actions+refresh-interval-lifecycle+empty-state+picker-browse-affordance / wave4-state-hysteresis-input-gate+5s-silence+re-arm-tick-loops-no-flap / inline-pi-toolbar-row-order+reference-lucide-icons+resume-popover+local-slash-picker-fake-fs / xterm-metrics-letterSpacing-0+lineHeight-1+font-monospace-chain / promptFontSize-default-clamp-apply+full-width-autogrow+css-guards / wave5a→6a-composer-rows+structure-guards / wave6a-header-rows+liveness-dot+status-labels+cr-run-boundary+composer-refit all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / local-pty-terminal-spawn-args+pty→xterm+xterm→pty+resize+exit-state / local-pty-resolver-absolute-path-require+no-native-load / local-terminal-view-lazy-no-cwd+attach+close-kill+reopen / local-terminal-manager-per-cwd-routing+3-leaves+isolation+reuse+full-unload-kill-all / local-terminal-picker-fake-sessions-dir+select→open+vault-root+cwd-input+mobile-hide / ahp-client-load-retry-resilience-819e2bb-regression / pi-instance-states+badge-CSS-classes+focus-clears-awaiting / slash-toolbar-payload-bytes-new+compact+thinking / session-resume-spawn-args+listSessionFilesForCwd+respawn / send-active-note+selection-payload+wikilink-rewrite+no-terminal-notice / terminal-settings-plumbing-fontSize+scrollback+new-only / theme-follow-xterm-styling-var→ITheme+fallbacks+applyTheme / instance-picker+ribbon-command-routing+open-instances / pi-prompt-composer-drafts+bracketed-paste-submit+wikilink-context+@-files+image-paste+resizer-clamp / pi-farm-view-open+dormant-merge+resume/focus-actions+refresh-interval-lifecycle+empty-state+picker-browse-affordance / wave4-state-hysteresis-input-gate+5s-silence+re-arm-tick-loops-no-flap / inline-pi-toolbar-row-order+reference-lucide-icons+resume-popover+local-slash-picker-fake-fs / xterm-metrics-letterSpacing-0+lineHeight-1+font-monospace-chain / promptFontSize-default-clamp-apply+full-width-autogrow+css-guards / wave5a→6a-composer-rows+structure-guards+wave7-body-region+zero-inline-layout / wave6a-header-rows+liveness-dot+status-labels+cr-run-boundary+composer-refit all clean");

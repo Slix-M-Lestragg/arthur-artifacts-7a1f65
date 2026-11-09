@@ -2809,11 +2809,12 @@
 
 /* ---------------------------------------------------------------------- *
  * Wave 2 — prompt composer: drag-resizable panel docked at the BOTTOM of the
- * terminal view. WAVE 6a structure: resizer → slim BUTTON STRIP (ROW 1:
- * the composer's own controls) → the big multiline TEXTAREA (ROW 2: the
- * panel body — full panel width, flex-grows to fill ALL remaining panel
- * height; min-height:0 discipline throughout so no fixed height, max-width
- * or wrapped strip can ever squeeze it). Plus the @-file suggest popup.
+ * terminal view. WAVE 7 structure: resizer → slim BUTTON STRIP (ROW 1: the
+ * composer's own controls) → BODY REGION (ROW 2a: the panel's single
+ * flex-growing child) → the big multiline TEXTAREA (ROW 2b: its sole child
+ * — full panel width, flex-fills the region BOTH axes; min-height:0
+ * discipline throughout so no fixed height, max-width or wrapped strip can
+ * ever squeeze it). Plus the @-file suggest popup.
  * ---------------------------------------------------------------------- */
 .arthur-pi-composer {
 	flex: 0 0 auto;
@@ -2899,12 +2900,25 @@
 	max-height: 50%;
 	overflow-y: auto;
 }
-/* The panel BODY (WAVE 6a ROW 2): a block-level textarea spanning the panel's
- * full width (box-sizing) and flex-growing to fill its remaining height down
- * to the panel bottom (`flex: 1 1 auto` + `min-height: 0` — the panel is a
- * flex column and the strip is fixed chrome, so no fixed height, flex
- * shrink/wrap/max-width can squeeze it; container resizes keep it filling
- * the panel via the flex discipline + the view's refit() re-clamp). */
+/* The panel BODY region (WAVE 7 ROW 2a): the panel's single flex-growing
+ * child between the toolbar strip and the panel bottom. The PANEL owns
+ * height (CSS default + the drag/autoGrow inline height — always on the
+ * panel, never on the textarea); this region flex-fills whatever the panel
+ * gives it, and the textarea flex-fills the region. Keeping the flex
+ * contract on a dedicated div (not on the textarea itself) means no theme
+ * `textarea` rule can pin the input's size. */
+.arthur-pi-composer-body {
+	flex: 1 1 auto;
+	min-height: 0;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+}
+/* The textarea (WAVE 7 ROW 2b) — the body region's sole child: full width
+ * edge to edge (box-sizing) and flex-growing to fill the region's full
+ * height (`flex: 1 1 auto` + `min-height: 0`); container resizes keep it
+ * filling via the flex discipline + the view's refit() re-clamp, and
+ * content beyond the grown panel scrolls INSIDE it (overflow-y: auto). */
 .arthur-pi-composer-input {
 	display: block;
 	flex: 1 1 auto;

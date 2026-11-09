@@ -9,10 +9,14 @@
  * BUTTON STRIP (ROW 1 — the reference-ported composer controls: send /
  * clear / insert note / insert selection / slash-command picker / insert
  * `[[wikilink]]` token / word-char count, as a right-aligned icon-only
- * cluster, then the count/flash/hide tail) → ONE big multiline TEXTAREA
- * (ROW 2 — the panel body: full panel width edge to edge, flex-grows to
- * fill ALL remaining panel height down to the panel bottom; it never
- * shares a row with the buttons). The panel height adapts when the view is
+ * cluster, then the count/flash/hide tail) → ONE BODY REGION (ROW 2a — a
+ * dedicated div, the panel's single flex-growing child between the strip
+ * and the panel bottom) → ONE big multiline TEXTAREA (ROW 2b — the body's
+ * sole child, filling it edge to edge BOTH axes). The textarea itself
+ * carries ZERO inline layout styles — the PANEL owns height (drag + clamp
+ * + autoGrow all write the panel), the body region owns the flex fill, and
+ * no theme `textarea` rule can pinch the input's size. The panel height
+ * adapts when the view is
  * resized: the drag resizer (or the auto-grow clamp) sets the panel
  * height, the view's ResizeObserver → scheduleFit chain calls refit() so
  * the height re-clamps to the current leaf, and the flex column keeps the
@@ -137,7 +141,11 @@ export class PromptComposer {
 	readonly resizerEl: HTMLElement;
 	/** ROW 1 — the slim button strip above the textarea. */
 	readonly toolbarEl: HTMLElement;
-	/** ROW 2 — the panel-body textarea (full width, fills the panel height). */
+	/** ROW 2a — the panel BODY region between the toolbar strip and the
+	 *  panel bottom: the panel's single flex-growing child. */
+	readonly bodyEl: HTMLElement;
+	/** ROW 2b — the textarea, the body region's sole child. It carries NO
+	 *  inline layout styles — it purely flex-fills the body both axes. */
 	readonly textarea: HTMLTextAreaElement;
 	/** Transient "✓ sent" flash element. */
 	readonly sentEl: HTMLElement;
@@ -168,6 +176,7 @@ export class PromptComposer {
 			attrs: { placeholder: "Prompt pi…  (Mod+Enter to send, Enter for newline)" },
 		}) as HTMLTextAreaElement;
 		this.textarea.value = "";
+		this.bodyEl = el("div", { cls: "arthur-pi-composer-body" });
 		this.sentEl = el("span", { cls: "arthur-pi-composer-sent" });
 		this.statsEl = el("span", { cls: "arthur-pi-composer-stats" });
 		this.statsEl.style.display = "none";
@@ -201,12 +210,15 @@ export class PromptComposer {
 			this.hideBtn,
 		);
 
-		// WAVE 6a DOM order: resizer → BUTTON STRIP (ROW 1) → TEXTAREA (ROW 2,
-		// the panel body — full panel width, flex-grows to fill ALL the
-		// panel's remaining height down to the bottom). The strip is fixed
-		// chrome (flex: 0 0 auto) so the textarea can never be squeezed by
-		// it, and the textarea never shares a row with the buttons.
-		this.rootEl.append(this.resizerEl, this.toolbarEl, this.textarea);
+		// WAVE 7 DOM order: resizer → BUTTON STRIP (ROW 1) → BODY REGION (ROW 2a,
+		// the panel's single flex-growing child) holding the TEXTAREA (ROW 2b)
+		// as its sole child. The textarea carries ZERO inline layout styles: the
+		// panel owns the height, the body flex-fills the panel, and the textarea
+		// flex-fills the body both axes — neither a theme `textarea` rule nor an
+		// inline style can pinch its size. The strip is fixed chrome (flex: 0 0
+		// auto) so it can never squeeze the body, and they never share a row.
+		this.bodyEl.append(this.textarea);
+		this.rootEl.append(this.resizerEl, this.toolbarEl, this.bodyEl);
 		parent.append(this.rootEl);
 
 		// NOTE: the composer's own input/keydown listeners are registered BEFORE
