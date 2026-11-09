@@ -214,3 +214,101 @@ through the fake pty factory, focus action reusing the existing leaf (no new
 pty / no duplicate), empty-state note, the 200-row view cap, and the picker
 empty-state "browse all sessions →" affordance firing `onBrowseAll` + closing
 the picker. All existing sections remain green.
+
+## Wave 4 — UI/UX fixes (typography, state hysteresis, inline toolbar, composer)
+
+Four user-facing fixes against the live symptom set from the Mac (glyphs
+rendering "very spaced out", tab badges flapping running↔done with no prompt
+sent, the pi commands hidden behind a dropdown, a narrow short composer):
+
+- **FIX A — xterm typography (root cause + cure).** xterm measures glyph
+  widths with hidden DOM spans (`.xterm-char-measure-element`,
+  `.xterm-width-cache-measure-container`) that JS styles only with
+  font-family/font-size — `letter-spacing` is INHERITED from the surrounding
+  Obsidian/theme CSS. Inherited tracking inflates the measured cell width,
+  which xterm bakes back into the rows (`_setDefaultSpacing` → positive
+  `letter-spacing` on `.xterm-rows`) — exactly the spaced-out glyph symptom.
+  Cures: the Terminal is now constructed with an EXPLICIT resolved monospace
+  chain (`resolveTerminalFontFamily` in `terminal-theme.ts`: user setting →
+  Obsidian's `--font-monospace` read via `getComputedStyle` → fallback
+  `Menlo, Consolas, monospace`), `letterSpacing: 0`, `lineHeight: 1`; a
+  metrics guard in `styles.css` pins `letter-spacing: 0 !important` from
+  `.arthur-pi-terminal` down through both measure elements (plus
+  `line-height: 1; white-space: normal` on our container so no theme rule can
+  leak into the surface); and the view re-`fit()`s once
+  `document.fonts.ready` resolves (metrics measured before the font loads are
+  stale). `resolveTerminalFontFamily` is pure + exported for smoke.
+- **FIX B — state hysteresis** (`src/ui/terminal-state.ts`). The Wave-1
+  heuristic (`ACTIVE_MS=1200`/`IDLE_MS=1500`) fought pi's ~1s spinner redraws:
+  a gap >1200 ms read "done", the next spinner frame read "running", forever.
+  Three rules now (pure, memory carried in an exported `ActivityMemory`
+  advanced only by `syncActivityMemory` so view and smoke share one
+  implementation):
+  1. **Input gate** — done-unseen/seen is reachable ONLY after user input
+     (`lastInputAt > 0`). A never-prompted session stays idle|running, never
+     done/seen. (Chosen over a cumulative-bytes gate: a spinner accumulates
+     bytes without bound, so bytes cannot distinguish "answered" from
+     "still spinning". A real pty EXIT still shows done/seen/error — that's
+     an event, not the heuristic.)
+  2. **5 s true silence** — `DONE_SILENCE_MS = 5000` of NO data AND no input
+     before the done/seen flip (every spinner frame resets it). `IDLE_MS`
+     now only gates question freshness (awaiting-input detection UNCHANGED).
+  3. **Re-arm** — a done stretch holds (`doneSince` + `bytesAtDone`
+     snapshots) until fresh input lands after `doneSince` or ≥
+     `DONE_REARM_BYTES` (2048) accumulates since it began; stray frames stay
+     under the bar, so done never bounces to running on spinner noise.
+- **FIX C — inline pi toolbar + ported icons.** The Wave-1 `≡` dropdown is
+  gone: New / Resume… / Compact / Thinking are directly-visible icon buttons
+  on the composer's toolbar row (the composer is that row's default-visible
+  host), with the composer controls right-aligned after a spacer. The lucide
+  glyph set is ported verbatim from the reference plugin and registered in
+  `src/icons.ts` (`PI_ROW_ICONS`, with per-icon provenance):
+  TerminalView toolbar → `layers` (Resume, its Session glyph), `gauge`
+  (Thinking), `weight` (Compact); PromptPopout actionbar → `send`, `eraser`
+  (clear — new button), `file-text` (note), `text-cursor-input` (selection),
+  `square-slash` (command), `link` (wikilink), `bar-chart-3` (stats); `file-plus`
+  for New (the reference's session panel uses text buttons — no reference
+  icon). NOT ported: `mic` (needs an STT server we don't have),
+  `hard-drive-download` (pull-from-TUI: no in-TUI editor bridge here),
+  `image-plus` (reference opens a vault/dir/clipboard menu; our composer takes
+  image pastes instead).
+- **FIX C — local slash-command picker** (`src/ui/pi-commands.ts`). Reference
+  `CommandPickerModal` UX (search box, ↑↓/↵/esc, `/<name>` inserted at the
+  cursor) on a plain Obsidian `Modal`, but the LIST'S SOURCE OF TRUTH is
+  deliberately LOCAL (we have no RPC): hardcoded builtin shortlist
+  (`BUILTIN_PI_COMMANDS`: new/clone/compact/session/model/name/fork — the
+  commands the reference itself drives) + `~/.pi/agent/prompts/*` → `/<stem>`
+  + `~/.pi/agent/skills/*/` → `/<dir>`, deduped builtin-first, missing dirs
+  degrade to builtins, fs surface injected (`FsDeps`) so smoke scans a fake
+  `~/.pi` tree. Resume… keeps one popover (a file LIST has no inline form),
+  anchored under its button.
+- **FIX D — composer size/width.** The textarea is full width
+  (`width: 100%` + `box-sizing: border-box`), font-sized by a new
+  `promptFontSize` setting (default 16, clamped 10–32, applied at construct
+  time to the element's style/class/`data-prompt-font-size` like the xterm
+  font settings), and has NO line cap: `autoGrow()` grows the PANEL with the
+  content (`scrollHeight` + toolbar chrome) up to the `piTerminalComposerMaxHeight`
+  % of the view — grow-only, so a drag or an earlier taller content is never
+  yanked back mid-typing. Buttons are an icon-only cluster pushed right by a
+  flexible spacer (the pi commands sit left of it).
+
+Smoke coverage: **section 33** now asserts the hysteresis directly (constants,
+input gate — a never-prompted session never reaches done-unseen at any gap,
+5 s silence boundary, re-arm by bytes/input, and three tick-loops through the
+shared `computeActivityState`+`syncActivityMemory` pair: 1 s spinner ticks
+over 30 s never leave running, sustained post-input silence flips to
+done-unseen EXACTLY ONCE with the memory stamped, 40 stray frames stay done
+until a ≥2 KB burst re-arms). **Section 34** asserts the inline row: exact
+button order/ids (`pi-btn-*`), every ported lucide icon via the `setIcon`
+stub, direct `/new` `/compact` `\x1b[Z` payloads (no dropdown), the Resume
+popover open/close, `listPiCommands` over an injected fake `~/.pi` tree
+(prompts/skills/builtins/dedupe/missing-dirs), and the picker modal
+(open-from-row → row-click and filter+Enter both insert `/<name>`).
+**Section 37** asserts the constructed Terminal carries `letterSpacing: 0`,
+`lineHeight: 1`, the fallback chain, and the live `--font-monospace` read
+(poisoned `getComputedStyle` stub) plus the pure resolver. **Section 42**
+asserts `promptFontSize` default/clamps/construct-time application (class +
+style + data attr, new-only), auto-grow clamping to the max-height % with
+grow-only semantics, and the `styles.css` metrics/width guards. All existing
+sections remain green (gate: `npm run typecheck && npm run build && npm run
+smoke`).

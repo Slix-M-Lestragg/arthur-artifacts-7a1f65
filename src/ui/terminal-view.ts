@@ -12,10 +12,11 @@
  *     CSS class on the leaf's tab-header icon + a state-line badge. `done-unseen`
  *     / `awaiting-input` only show while the leaf is UNFOCUSED and clear on
  *     focus (xterm onFocus/onBlur).
- *   - SLASH TOOLBAR in the state-line row: a compact icon-dropdown with New
- *     (`/new`), Resume… (session files for this cwd → respawn `--session`),
- *     Compact (`/compact`), Thinking (sends the Shift+Tab `\x1b[Z` cycle). All
- *     slash commands are `pty.write(cmd + '\r')`; Thinking is a bare escape.
+ *   - SLASH TOOLBAR: Wave 4 (FIX C) moved New (`/new`), Resume… (session
+ *     files for this cwd → respawn `--session`), Compact (`/compact`) and
+ *     Thinking (Shift+Tab `\x1b[Z`) OUT of the old "≡" dropdown onto the
+ *     composer's toolbar row as directly-visible icon buttons (reference
+ *     lucide glyphs); only Resume…'s file LIST stays a popover.
  *   - SESSION RESUME: the leaf's view state carries an optional `sessionFile`;
  *     when set the pty spawns `pi --session <file>` instead of `-c`.
  *   - THEME-FOLLOW xterm styling: the xterm theme is derived from Obsidian CSS
@@ -55,18 +56,26 @@ import type ArthurPlugin from "../main";
 import type { LocalPty } from "../api/local-pty";
 import { spawnPi, resolvePtyModulePath } from "../api/local-pty";
 import { el } from "../util";
+import { PI_ROW_ICONS } from "../icons";
 import {
 	ALL_TERMINAL_STATES,
 	PI_TERMINAL_LIVE_CLASS,
 	computeActivityState,
 	detectAwaitingInput,
+	initialActivityMemory,
 	questionStillLive,
+	syncActivityMemory,
 	terminalStateClass,
+	type ActivityMemory,
 	type TerminalState,
 } from "./terminal-state";
-import { buildXtermTheme, readObsidianThemeVars } from "./terminal-theme";
+import {
+	buildXtermTheme,
+	readObsidianThemeVars,
+	resolveTerminalFontFamily,
+} from "./terminal-theme";
 import { listSessionFilesForCwd, defaultPiSessionsDir } from "./terminal-picker";
-import { PromptComposer, buildPasteSubmit, type ComposerHost } from "./prompt-composer";
+import { PromptComposer, buildPasteSubmit, type ComposerHost, type PiRowAction } from "./prompt-composer";
 import { rewriteContextLinks, type LinkResolver } from "./link-rewrite";
 
 export const VIEW_TYPE_PI_TERMINAL = "arthur-pi-terminal";
@@ -123,8 +132,8 @@ export class TerminalView extends ItemView {
 	/** The in-flight attach (setState/onOpen callers serialize through it). */
 	private attachPromise: Promise<void> | null = null;
 
-	/** The currently-open slash toolbar popover (null when closed). */
-	private toolbarPopover: HTMLElement | null = null;
+	/** The Resume… session-list popover (null when closed). */
+	private resumePopover: HTMLElement | null = null;
 
 	private opened = false;
 	private cwd: string | null = null;
@@ -144,6 +153,9 @@ export class TerminalView extends ItemView {
 	private lastDataAt: number | null = null;
 	private lastInputAt: number | null = null;
 	private lastQuestionAt: number | null = null;
+	/** FIX B hysteresis memory: byte counter + done-stretch stamps (advanced
+	 *  only through syncActivityMemory, shared with smoke). */
+	private activityMemory: ActivityMemory = initialActivityMemory();
 	/** Whether the xterm currently has focus. */
 	private focused = false;
 	/** Current visual state (drives the badge CSS class). */
@@ -236,7 +248,9 @@ export class TerminalView extends ItemView {
 		this.surfaceEl = wrap.createEl("div", { cls: "arthur-pi-terminal-surface" });
 		// Wave 2: the prompt composer docked BELOW the surface (wrap is a flex
 		// column — appending last pins it to the bottom of the leaf).
-		this.composer = new PromptComposer(wrap, this.makeComposerHost(), this.plugin);
+		this.composer = new PromptComposer(wrap, this.makeComposerHost(), this.plugin, {
+			piActions: this.makePiActions(),
+		});
 		// Leaf focus (xterm OR composer) restores this instance's draft.
 		this.contentFocusHandler = () => this.composer?.restoreDraft();
 		this.contentEl.addEventListener("focusin", this.contentFocusHandler);
@@ -337,6 +351,7 @@ export class TerminalView extends ItemView {
 			if (this.terminal) this.terminal.write(data);
 			const now = Date.now();
 			this.lastDataAt = now;
+			this.activityMemory.totalBytes += data.length;
 			// A question pattern in this chunk raises the awaiting-input signal;
 			// a non-question chunk after one clears it (the user answered).
 			if (detectAwaitingInput(data)) {
@@ -366,15 +381,37 @@ export class TerminalView extends ItemView {
 		const surface = this.surfaceEl;
 		if (!surface) throw new Error("pi terminal surface is not built");
 		const s = this.plugin.settings;
+		// WAVE 4 (FIX A): EXPLICIT metrics — an unqualified/empty fontFamily let
+		// xterm's DOM width-measurement spans measure a different effective font
+		// than the renderer drew with (spaced-out glyphs), and an inherited
+		// `letter-spacing` from theme CSS inflates the measured cell width, which
+		// xterm then bakes back into the rows as positive letter-spacing
+		// (_setDefaultSpacing). Pin the font to a resolved monospace chain, pin
+		// letterSpacing/lineHeight to their neutral values, and let styles.css's
+		// metrics guard neutralize inherited letter-spacing on the measure spans.
 		const terminal = new Terminal({
-			fontFamily: s.piTerminalFontFamily || undefined,
+			fontFamily: resolveTerminalFontFamily(s.piTerminalFontFamily),
 			fontSize: s.piTerminalFontSize,
+			letterSpacing: 0,
+			lineHeight: 1,
 			scrollback: s.piTerminalScrollback,
 			theme: buildXtermTheme(readObsidianThemeVars()),
 		});
 		const fitAddon = new FitAddon();
 		terminal.loadAddon(fitAddon);
 		terminal.open(surface);
+		// Fonts may resolve AFTER the first fit (webfont / font cache) — char
+		// metrics measured before that are stale, so re-fit once they're ready.
+		const fonts = typeof document !== "undefined" ? document.fonts : undefined;
+		if (fonts?.ready && typeof fonts.ready.then === "function") {
+			void fonts.ready
+				.then(() => {
+					if (this.terminal === terminal) this.fitNow();
+				})
+				.catch(() => {
+					/* fonts.ready rejection is benign — metrics stay as measured */
+				});
+		}
 		this.terminal = terminal;
 		this.fitAddon = fitAddon;
 		// Image paste: xterm's built-in paste only forwards TEXT — when the
@@ -457,6 +494,7 @@ export class TerminalView extends ItemView {
 		this.lastDataAt = null;
 		this.lastInputAt = null;
 		this.lastQuestionAt = null;
+		this.activityMemory = initialActivityMemory();
 		this.visualState = "idle";
 	}
 
@@ -465,6 +503,7 @@ export class TerminalView extends ItemView {
 	/** Recompute the visual state from the activity heuristic + focus and apply
 	 *  the badge CSS class to the state-line badge + the tab-header icon. */
 	private recomputeState(): void {
+		const now = Date.now();
 		const next = computeActivityState({
 			focused: this.focused,
 			exited: this.exited,
@@ -472,9 +511,15 @@ export class TerminalView extends ItemView {
 			lastDataAt: this.lastDataAt,
 			lastInputAt: this.lastInputAt,
 			lastQuestionAt: this.lastQuestionAt,
+			totalBytes: this.activityMemory.totalBytes,
+			doneSince: this.activityMemory.doneSince,
+			bytesAtDone: this.activityMemory.bytesAtDone,
 			alive: !!this.pty && !this.exited,
-			now: Date.now(),
+			now,
 		});
+		// Carry the FIX B done-stretch memory across the transition (pure helper,
+		// shared with the smoke tick loops).
+		this.activityMemory = syncActivityMemory(this.activityMemory, next, now);
 		if (next !== this.visualState) this.setVisualState(next);
 	}
 
@@ -529,27 +574,15 @@ export class TerminalView extends ItemView {
 		if (this.terminal) this.terminal.options.theme = buildXtermTheme(readObsidianThemeVars());
 	}
 
-	// ----------------------------------------------------------- slash toolbar
+	// ------------------------------------------------ pi toolbar (composer row)
 
-	/** Build the slash-toolbar button row into the state line. Compact: one
-	 *  "menu" icon button toggles a popover with New / Resume… / Compact /
-	 *  Thinking. Resume… lists the cwd's session files (newest first) and
-	 *  respawns `pi --session <file>`. */
+	/** Build the state-line row: badge + live + cwd + the composer visibility
+	 *  toggle. The pi commands themselves (New / Resume… / Compact / Thinking)
+	 *  are DIRECTLY VISIBLE on the composer's toolbar row (Wave 4/FIX C) — the
+	 *  Wave-1 "≡" dropdown is gone. The ⌨ toggle stays here so the composer
+	 *  (its default-visible element) can always be brought back after a hide. */
 	private buildToolbar(): HTMLElement {
 		const toolbar = el("div", { cls: "arthur-pi-toolbar" });
-		const menuBtn = el("button", {
-			cls: "arthur-pi-toolbar-btn",
-			attrs: { "aria-label": "pi commands", title: "pi commands" },
-		});
-		menuBtn.setText("≡");
-		menuBtn.addEventListener("click", (e) => {
-			e.preventDefault();
-			e.stopPropagation();
-			this.toggleToolbarPopover();
-		});
-		toolbar.append(menuBtn);
-		// Wave 2: composer visibility toggle (the panel's own `hide` button
-		// hides it; this is the way back).
 		const composerBtn = el("button", {
 			cls: "arthur-pi-toolbar-btn",
 			attrs: { "aria-label": "toggle prompt composer", title: "toggle prompt composer" },
@@ -564,70 +597,67 @@ export class TerminalView extends ItemView {
 		return toolbar;
 	}
 
-	private toggleToolbarPopover(): void {
-		if (this.toolbarPopover) {
-			this.closeToolbarPopover();
+	/** The directly-visible pi command actions handed to the composer row
+	 *  (FIX C). Icons are the reference's lucide set (PI_ROW_ICONS); all slash
+	 *  commands are `pty.write(cmd + '\r')`, Thinking is a bare escape. */
+	private makePiActions(): PiRowAction[] {
+		return [
+			{ id: "new", icon: PI_ROW_ICONS.new, label: "New session (/new)", run: () => this.sendSlash("/new") },
+			{
+				id: "resume",
+				icon: PI_ROW_ICONS.resume,
+				label: "Resume a saved session…",
+				run: (btn) => this.toggleResumePopover(btn),
+			},
+			{ id: "compact", icon: PI_ROW_ICONS.compact, label: "Compact the context (/compact)", run: () => this.sendSlash("/compact") },
+			{ id: "thinking", icon: PI_ROW_ICONS.thinking, label: "Cycle thinking level (Shift+Tab)", run: () => this.sendRaw("\x1b[Z") },
+		];
+	}
+
+	/** The one remaining popover: the cwd's session files (newest first) under
+	 *  the Resume… button — a file LIST has no inline form. Selecting a row
+	 *  respawns `pi --session <file>` in this leaf. */
+	private toggleResumePopover(anchor: HTMLButtonElement): void {
+		if (this.resumePopover) {
+			this.closeResumePopover();
 			return;
 		}
-		const pop = el("div", { cls: "arthur-pi-toolbar-popover" });
-		pop.append(this.toolbarItem("New", "Start a fresh session (/new)", () => this.sendSlash("/new")));
-		// Resume… expands inline to the cwd's session files.
-		const resumeRow = el("div", { cls: "arthur-pi-toolbar-submenu" });
-		const resumeHead = el("button", { cls: "arthur-pi-toolbar-item", text: "Resume…" });
-		resumeHead.setAttribute("title", "Resume a saved session for this cwd");
-		const resumeList = el("div", { cls: "arthur-pi-toolbar-sublist" });
+		const pop = el("div", { cls: "arthur-pi-toolbar-popover arthur-pi-resume-popover" });
 		const files = this.cwd ? listSessionFilesForCwd(defaultPiSessionsDir(), this.cwd) : [];
 		if (files.length === 0) {
-			resumeList.append(el("span", { cls: "arthur-pi-toolbar-empty", text: "no saved sessions" }));
+			pop.append(el("span", { cls: "arthur-pi-toolbar-empty", text: "no saved sessions" }));
 		} else {
 			for (const f of files) {
 				const item = el("button", { cls: "arthur-pi-toolbar-item arthur-pi-toolbar-subitem", text: f.name });
 				item.setAttribute("title", f.path);
 				item.addEventListener("click", () => {
-					this.closeToolbarPopover();
+					this.closeResumePopover();
 					this.respawnWithSession(f.path);
 				});
-				resumeList.append(item);
+				pop.append(item);
 			}
 		}
-		resumeHead.addEventListener("click", () => {
-			resumeList.classList.toggle("is-open");
-		});
-		resumeRow.append(resumeHead, resumeList);
-		pop.append(resumeRow);
-		pop.append(
-			this.toolbarItem("Compact", "Compact the context (/compact)", () => this.sendSlash("/compact")),
-		);
-		pop.append(
-			this.toolbarItem("Thinking", "Cycle thinking level (Shift+Tab)", () => this.sendRaw("\x1b[Z")),
-		);
-		// Mount into the state-line container so it anchors under the toolbar.
-		this.stateEl?.append(pop);
-		this.toolbarPopover = pop;
+		// Anchor directly below the Resume… button inside the composer root
+		// (the composer is position:relative); fall back to the state line.
+		const root = this.composer?.rootEl;
+		const rr = root?.getBoundingClientRect?.();
+		const ar = anchor.getBoundingClientRect?.();
+		if (root && rr && ar) pop.style.top = `${Math.max(0, ar.top - rr.top + ar.height + 2)}px`;
+		(root ?? this.stateEl)?.append(pop);
+		this.resumePopover = pop;
 		// Clicking outside the popover closes it.
 		const onOutside = (evt: MouseEvent): void => {
-			if (!pop.contains(evt.target as Node) && !this.toolbarEl?.contains(evt.target as Node)) {
-				this.closeToolbarPopover();
+			if (!pop.contains(evt.target as Node) && !anchor.contains(evt.target as Node)) {
+				this.closeResumePopover();
 				document.removeEventListener("click", onOutside, true);
 			}
 		};
 		window.setTimeout(() => document.addEventListener("click", onOutside, true), 0);
 	}
 
-	private closeToolbarPopover(): void {
-		this.toolbarPopover?.remove();
-		this.toolbarPopover = null;
-	}
-
-	/** One plain toolbar item button → action. */
-	private toolbarItem(label: string, title: string, action: () => void): HTMLElement {
-		const item = el("button", { cls: "arthur-pi-toolbar-item", text: label });
-		item.setAttribute("title", title);
-		item.addEventListener("click", () => {
-			this.closeToolbarPopover();
-			action();
-		});
-		return item;
+	private closeResumePopover(): void {
+		this.resumePopover?.remove();
+		this.resumePopover = null;
 	}
 
 	/** Write a pi slash command + Enter into the pty (refused after exit). */
@@ -845,7 +875,7 @@ export class TerminalView extends ItemView {
 			window.clearInterval(this.stateTimer);
 			this.stateTimer = null;
 		}
-		this.closeToolbarPopover();
+		this.closeResumePopover();
 		this.resizeObserver?.disconnect();
 		this.resizeObserver = null;
 		this.detachSession();

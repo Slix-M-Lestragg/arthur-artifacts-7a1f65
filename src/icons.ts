@@ -54,6 +54,46 @@ export const SERVICE_META: Record<string, { label: string; lucide?: string }> = 
 /** Lucide icon name for service ids without an official mark. */
 export const SERVICE_ICON_FALLBACK = "server";
 
+/**
+ * Lucide icon names for the pi terminal's inline toolbar row (Wave 4, FIX C)
+ * — PORTED VERBATIM from the reference obsidian-pi plugin so the glyph set
+ * matches upstream (icon → our button):
+ *
+ *   reference views/TerminalView.ts (renderShell toolbar):
+ *     layers   → Resume… (its `layers` Session button — sessions live there)
+ *     gauge    → Thinking (its Shift+Tab cycle button)
+ *     weight   → Compact (its compact-context button)
+ *   reference views/PromptPopout.ts (buildActionToolbar):
+ *     send              → Send to pi
+ *     eraser            → clear the composer
+ *     file-text         → insert the active note as context
+ *     text-cursor-input → insert the active selection
+ *     square-slash      → insert a pi slash command (the local picker)
+ *     link              → insert a [[wikilink]] token
+ *     bar-chart-3       → word/char count toggle
+ *
+ * Deliberately NOT ported: `mic` (STT needs a server we don't have — FIX C
+ * says skip), `hard-drive-download` (pull-from-TUI: no in-TUI editor bridge
+ * in our architecture), `image-plus` (the reference opens a vault/dir/clipboard
+ * picker menu; our composer takes image PASTES instead).
+ * `file-plus` for New has no reference icon (the reference's session panel
+ * uses plain text buttons) — lucide's standard new-file glyph.
+ * The state-line composer toggle keeps its literal "⌨" text (tested).
+ */
+export const PI_ROW_ICONS = {
+	new: "file-plus",
+	resume: "layers",
+	compact: "weight",
+	thinking: "gauge",
+	send: "send",
+	clear: "eraser",
+	note: "file-text",
+	selection: "text-cursor-input",
+	command: "square-slash",
+	link: "link",
+	stats: "bar-chart-3",
+} as const;
+
 /** Display label of a service id (the id itself when unregistered). */
 export function serviceLabel(svcId: string): string {
 	return SERVICE_META[svcId]?.label ?? svcId;

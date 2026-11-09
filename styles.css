@@ -2677,6 +2677,33 @@
 }
 
 /* ---------------------------------------------------------------------- *
+ * WAVE 4 (FIX A) — xterm metrics guard.
+ *
+ * xterm measures glyph widths with hidden DOM spans
+ * (.xterm-char-measure-element / .xterm-width-cache-measure-container) that
+ * are styled only with font-family/font-size by JS — everything else,
+ * including `letter-spacing`, is INHERITED from the surrounding Obsidian/theme
+ * CSS. An inherited positive letter-spacing inflates the measured cell width,
+ * which xterm then bakes back into the rendered rows as letter-spacing
+ * (_setDefaultSpacing → visibly spaced-out glyphs). Pin the whole chain to
+ * neutral metrics: letter-spacing 0 from our container down to the measure
+ * spans, line-height 1 on the terminal surface. `!important` here is
+ * deliberate — it must beat ANY theme rule that adds tracking to ancestors.
+ * ---------------------------------------------------------------------- */
+.arthur-pi-terminal,
+.arthur-pi-terminal-surface,
+.xterm,
+.xterm-width-cache-measure-container,
+.xterm-char-measure-element {
+	letter-spacing: 0 !important;
+}
+.arthur-pi-terminal,
+.arthur-pi-terminal-surface {
+	line-height: 1;
+	white-space: normal;
+}
+
+/* ---------------------------------------------------------------------- *
  * pi terminal WAVE 1 — instance states, slash toolbar, ribbon hub,
  * instance picker. Appended after the verbatim xterm.css so it overrides
  * nothing in the xterm core. State colors are driven by
@@ -2742,9 +2769,6 @@
 	padding: 0.3em 0.5em; border-radius: var(--radius-s); color: var(--text-normal);
 }
 .arthur-pi-toolbar-item:hover { background: var(--background-modifier-hover); }
-.arthur-pi-toolbar-submenu { display: flex; flex-direction: column; }
-.arthur-pi-toolbar-sublist { display: none; flex-direction: column; padding-left: 0.8em; }
-.arthur-pi-toolbar-sublist.is-open { display: flex; }
 .arthur-pi-toolbar-subitem { font-size: var(--font-ui-smaller); color: var(--text-muted); }
 .arthur-pi-toolbar-empty { padding: 0.3em 0.5em; color: var(--text-muted); font-size: var(--font-ui-smaller); }
 
@@ -2810,18 +2834,43 @@
 	white-space: nowrap;
 	padding: 0 4px;
 }
-/* The hide button sits at the far right of the toolbar row. */
-.arthur-pi-composer-toolbar .arthur-pi-composer-btn:last-child { margin-left: auto; }
+/* The flexible spacer pushes everything after it into a right-aligned,
+ * icon-only cluster (Wave 4/FIX D) — the pi command buttons sit BEFORE it
+ * (directly visible at the left of the same row, Wave 4/FIX C). */
+.arthur-pi-composer-spacer {
+	flex: 1 1 auto;
+	min-width: 0;
+}
+/* pi command cluster (New / Resume… / Compact / Thinking) — same button
+ * chrome as the composer controls, flagged so it can be tinted as a group. */
+.arthur-pi-composer-toolbar .arthur-pi-cmd-btn {
+	color: var(--text-normal);
+}
+/* Session-file list popover under the Resume… button (opens over the
+ * textarea; anchored by the view with an inline top). */
+.arthur-pi-resume-popover {
+	top: 30px;
+	left: 4px;
+	margin-top: 0;
+	max-height: 50%;
+	overflow-y: auto;
+}
 .arthur-pi-composer-input {
 	flex: 1 1 auto;
 	min-height: 0;
+	/* Full width of the view: the text element takes 100% minus the composer's
+	 * own padding (box-sizing) — no narrow fixed column (Wave 4/FIX D). */
+	width: 100%;
+	box-sizing: border-box;
 	resize: none;
 	border: none;
 	outline: none;
 	background: transparent;
 	color: var(--text-normal);
 	font-family: var(--font-text, var(--font-interface));
-	font-size: var(--font-text-size, 14px);
+	/* Fallback only — the construct-time `promptFontSize` setting (default 16)
+	 * lands as an inline style on the element. */
+	font-size: 16px;
 	padding: 4px 8px;
 	line-height: 1.4;
 	white-space: pre-wrap;
@@ -2861,6 +2910,53 @@
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
+
+/* ---- Wave 4 (FIX C): pi slash-command picker (local ~/.pi scan) ----
+   Reference CommandPickerModal UX on a plain Obsidian Modal: search box,
+   ↑↓/↵/esc instructions, name + description + source-tag rows. */
+.arthur-pi-cmd-picker { display: flex; flex-direction: column; gap: 0.4em; min-width: 24em; }
+.arthur-pi-cmd-input {
+	width: 100%;
+	box-sizing: border-box;
+}
+.arthur-pi-cmd-hint {
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+}
+.arthur-pi-cmd-list {
+	display: flex;
+	flex-direction: column;
+	gap: 0.1em;
+	max-height: 50vh;
+	overflow-y: auto;
+}
+.arthur-pi-cmd-item {
+	display: flex;
+	align-items: baseline;
+	gap: 0.5em;
+	padding: 0.3em 0.5em;
+	border-radius: var(--radius-s);
+	cursor: pointer;
+}
+.arthur-pi-cmd-item.is-selected,
+.arthur-pi-cmd-item:hover,
+.arthur-pi-cmd-item.is-active { background: var(--background-modifier-hover); }
+.arthur-pi-cmd-item.is-active { box-shadow: inset 2px 0 0 var(--interactive-accent); }
+.arthur-pi-cmd-name { font-family: var(--font-monospace); font-weight: 600; }
+.arthur-pi-cmd-desc {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.arthur-pi-cmd-source {
+	margin-left: auto;
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+	text-transform: uppercase;
+}
+.arthur-pi-cmd-empty { color: var(--text-muted); padding: 0.4em 0.5em; }
 .arthur-instance-picker .arthur-instance-list { display: flex; flex-direction: column; gap: 0.2em; min-width: 32em; }
 .arthur-instance-row {
 	display: flex; align-items: center; gap: 0.5em;

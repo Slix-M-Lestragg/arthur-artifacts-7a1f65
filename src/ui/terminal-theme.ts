@@ -29,21 +29,55 @@ export const FALLBACK_THEME_VARS: ObsidianThemeVars = {
 	interactiveAccent: "#7c3aed",
 };
 
+/** Read a single CSS custom property off the live document body ("" when the
+ *  document/window is missing or the smoke getComputedStyle stub returns ""). */
+export function readCssVar(name: string): string {
+	const win = typeof window !== "undefined" ? window : null;
+	const style = win && typeof document !== "undefined" && document.body ? win.getComputedStyle(document.body) : null;
+	const v = style?.getPropertyValue(name) ?? "";
+	return typeof v === "string" ? v.trim() : "";
+}
+
 /** Read the three theme vars off the live document body. Returns "" for each
  *  on the smoke harness (getComputedStyle stub), so callers should merge with
  *  the fallbacks. */
 export function readObsidianThemeVars(): ObsidianThemeVars {
-	const win = typeof window !== "undefined" ? window : null;
-	const style = win && typeof document !== "undefined" && document.body ? win.getComputedStyle(document.body) : null;
-	const get = (name: string): string => {
-		const v = style?.getPropertyValue(name) ?? "";
-		return typeof v === "string" ? v.trim() : "";
-	};
 	return {
-		backgroundPrimary: get("--background-primary"),
-		textNormal: get("--text-normal"),
-		interactiveAccent: get("--interactive-accent"),
+		backgroundPrimary: readCssVar("--background-primary"),
+		textNormal: readCssVar("--text-normal"),
+		interactiveAccent: readCssVar("--interactive-accent"),
 	};
+}
+
+/**
+ * Monospace stack used when the user set NO explicit terminal font family:
+ * Obsidian's `--font-monospace` (the vault's chosen monospace, read live via
+ * getComputedStyle) fronting a plain macOS/Windows fallback chain.
+ *
+ * WAVE 4 (FIX A): xterm measures glyph widths with DOM spans that inherit
+ * their `font-family` context, so an EMPTY setting falling through to xterm's
+ * built-in generic `monospace` let the measured metrics drift from what the
+ * canvas renderer actually draws (spaced-out glyphs). Resolving an explicit,
+ * fully-qualified monospace chain at construct time keeps measurement and
+ * rendering on the same stack.
+ */
+export const FALLBACK_MONOSPACE = "Menlo, Consolas, monospace";
+
+/**
+ * Resolve the xterm `fontFamily` for a NEW terminal (pure over its reader so
+ * smoke can inject a fake `getComputedStyle`):
+ *   1. an explicit user setting wins verbatim,
+ *   2. else `--font-monospace` (trimmed) fronting FALLBACK_MONOSPACE,
+ *   3. else FALLBACK_MONOSPACE.
+ */
+export function resolveTerminalFontFamily(
+	settingValue: string | null | undefined,
+	readVar: (name: string) => string = readCssVar,
+): string {
+	const explicit = (settingValue ?? "").trim();
+	if (explicit) return explicit;
+	const mono = readVar("--font-monospace").trim();
+	return mono ? `${mono}, ${FALLBACK_MONOSPACE}` : FALLBACK_MONOSPACE;
 }
 
 /** Resolve vars with fallbacks for any empty string. Pure. */

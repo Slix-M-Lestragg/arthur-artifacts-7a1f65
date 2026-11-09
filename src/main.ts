@@ -33,7 +33,7 @@ import { fmtBytes, fmtGigCompact, normalizeHost } from "./util";
 // lucide fallback on unknown service ids). Not used at runtime.
 export { normalizeHost };
 export { WsConnection, WsState } from "./connection";
-export { injectIcon, injectServiceIcon, serviceLabel, SERVICE_META } from "./icons";
+export { injectIcon, injectServiceIcon, serviceLabel, SERVICE_META, PI_ROW_ICONS } from "./icons";
 export { isWebViewerEnabled, openWebUrl, openUiTooltip, WEBVIEWER_VIEW_TYPE } from "./ui/webviewer";
 // Pi service-button flow surface (smoke-tests assert the picker helpers and
 // the modal class directly against the compiled main.js export surface). Not
@@ -67,10 +67,11 @@ export type { LocalPiSession, SessionFileInfo } from "./ui/terminal-picker";
 export { spawnPi, resolvePtyModulePath, buildSpawnEnv } from "./api/local-pty";
 export type { LocalPty, PtySpawnFn, SpawnPiOpts, SpawnEnvDeps } from "./api/local-pty";
 // pi terminal visual state + heuristics (smoke asserts transitions + classes).
-export { terminalStateClass, computeActivityState, detectAwaitingInput, questionStillLive, ALL_TERMINAL_STATES } from "./ui/terminal-state";
-export type { TerminalState, ActivityInputs } from "./ui/terminal-state";
-// pi terminal theme-follow builder (smoke asserts the var → ITheme mapping).
-export { buildXtermTheme, readObsidianThemeVars, resolveThemeVars, FALLBACK_THEME_VARS } from "./ui/terminal-theme";
+export { terminalStateClass, computeActivityState, detectAwaitingInput, questionStillLive, ALL_TERMINAL_STATES, IDLE_MS, DONE_SILENCE_MS, DONE_REARM_BYTES, initialActivityMemory, isDoneState, syncActivityMemory } from "./ui/terminal-state";
+export type { TerminalState, ActivityInputs, ActivityMemory } from "./ui/terminal-state";
+// pi terminal theme-follow builder (smoke asserts the var → ITheme mapping)
+// + the Wave 4 (FIX A) monospace font-chain resolution.
+export { buildXtermTheme, readObsidianThemeVars, resolveThemeVars, FALLBACK_THEME_VARS, resolveTerminalFontFamily, FALLBACK_MONOSPACE, readCssVar } from "./ui/terminal-theme";
 export type { ObsidianThemeVars } from "./ui/terminal-theme";
 // send-note payload + wikilink rewrite (smoke asserts the byte shape).
 export { buildNotePayload, buildNotePayloadWith, rewriteWikilinks } from "./ui/terminal-note";
@@ -79,8 +80,11 @@ export type { LinkResolver } from "./ui/terminal-note";
 // Wave 2 — prompt composer surface (bracketed-paste submit, context rewrite,
 // @-file suggester): exported for smoke.
 export { rewriteContextLinks } from "./ui/link-rewrite";
-export { buildPasteSubmit, clampComposerHeight, PromptComposer, PASTE_START, PASTE_END, COMPOSER_MIN_HEIGHT, COMPOSER_MAX_HEIGHT_PCT } from "./ui/prompt-composer";
-export type { ComposerHost, PromptComposerOpts } from "./ui/prompt-composer";
+export { buildPasteSubmit, clampComposerHeight, PromptComposer, PASTE_START, PASTE_END, COMPOSER_MIN_HEIGHT, COMPOSER_MAX_HEIGHT_PCT, COMPOSER_DEFAULT_HEIGHT } from "./ui/prompt-composer";
+export type { ComposerHost, PromptComposerOpts, PiRowAction } from "./ui/prompt-composer";
+// Wave 4 (FIX C) — local pi slash-command list + picker (fs source of truth).
+export { listPiCommands, BUILTIN_PI_COMMANDS, defaultPiAgentDir, PiCommandPickerModal } from "./ui/pi-commands";
+export type { PiCommand } from "./ui/pi-commands";
 export { extractAtPrefix, parseAtQuery, listAtSuggestions, insertCompletion, fuzzyScore, walkFilesystem, MAX_WALK_DEPTH, MAX_WALK_ENTRIES, MAX_SUGGESTIONS } from "./ui/at-suggester";
 export type { FsDeps, FileSuggestion, DirentLike, WalkEntry } from "./ui/at-suggester";
 // instance picker (open-instances + new) — asserted against the export surface.
@@ -165,8 +169,10 @@ export interface ArthurSettings {
 	 *  Default `pi` — resolved from the machine PATH at runtime. Desktop-only;
 	 *  the native pty module resolves from the plugin dir's node_modules. */
 	piExecutable: string;
-	/** xterm font family for new pi terminals (default '' = xterm's built-in
-	 *  monospace stack). Applies to NEW terminals only. */
+	/** xterm font family for new pi terminals (default '' = a resolved
+	 *  monospace chain: Obsidian's `--font-monospace` fronting
+	 *  'Menlo, Consolas, monospace' — see resolveTerminalFontFamily). Applies
+	 *  to NEW terminals only. */
 	piTerminalFontFamily: string;
 	/** xterm font size for new pi terminals (default 13). Applies to NEW
 	 *  terminals only. */
@@ -192,6 +198,9 @@ export interface ArthurSettings {
 	/** Prompt composer max height as a PERCENT of the leaf's height
 	 *  (20–60, default 50 — the drag resizer clamps to this). */
 	piTerminalComposerMaxHeight: number;
+	/** Prompt composer textarea font size in px (10–32, default 16 — FIX D).
+	 *  Applied to NEW composers at construct time. */
+	promptFontSize: number;
 }
 
 /** Clients built from the active profile — rebuilt when settings change. */
@@ -246,6 +255,7 @@ const DEFAULT_SETTINGS: ArthurSettings = {
 	piTerminalClearPromptOnSubmit: true,
 	piTerminalComposerVisible: true,
 	piTerminalComposerMaxHeight: 50,
+	promptFontSize: 16,
 };
 
 /** Parse a bounded positive int; invalid/missing → fallback. */
@@ -560,10 +570,19 @@ class ArthurSettingTab extends PluginSettingTab {
 			);
 		new Setting(containerEl)
 			.setName("Composer max height (%)")
-			.setDesc("Maximum prompt-composer height as a percentage of the terminal leaf (20–60, default 50). The drag resizer clamps to this.")
+			.setDesc("Maximum prompt-composer height as a percentage of the terminal leaf (20–60, default 50). The drag resizer clamps to this; the textarea auto-grows with content up to the same ceiling.")
 			.addText((text) =>
 				text.setValue(String(s.piTerminalComposerMaxHeight)).onChange(async (value) => {
 					s.piTerminalComposerMaxHeight = clampInt(value, 50, 20, 60);
+					await this.plugin.saveSettings();
+				})
+			);
+		new Setting(containerEl)
+			.setName("Prompt font size (px)")
+			.setDesc("Font size of the prompt composer's text (10–32, default 16). Applied to NEW terminal leaves; the full-width textarea auto-grows with content up to the composer max height.")
+			.addText((text) =>
+				text.setValue(String(s.promptFontSize)).onChange(async (value) => {
+					s.promptFontSize = clampInt(value, 16, 10, 32);
 					await this.plugin.saveSettings();
 				})
 			);
@@ -1065,6 +1084,7 @@ export default class ArthurPlugin extends Plugin {
 			piTerminalClearPromptOnSubmit: data?.piTerminalClearPromptOnSubmit !== false,
 			piTerminalComposerVisible: data?.piTerminalComposerVisible !== false,
 			piTerminalComposerMaxHeight: clampInt(data?.piTerminalComposerMaxHeight, 50, 20, 60),
+			promptFontSize: clampInt(data?.promptFontSize, 16, 10, 32),
 		};
 	}
 

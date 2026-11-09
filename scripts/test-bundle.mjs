@@ -195,7 +195,15 @@ globalThis.window = {
 	removeEventListener() {},
 	devicePixelRatio: 1,
 	matchMedia: () => ({ matches: false, media: "", addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} }),
-	getComputedStyle: () => ({ getPropertyValue: () => "" }),
+	// Property reads return "" EXCEPT --font-monospace, which sections may
+	// poison via globalThis.__fakeFontMono to prove the Wave-4 FIX A font-chain
+	// read (resolveTerminalFontFamily → Terminal options.fontFamily).
+	getComputedStyle: () => ({
+		getPropertyValue: (name) =>
+			name === "--font-monospace" && globalThis.__fakeFontMono
+				? String(globalThis.__fakeFontMono)
+				: "",
+	}),
 	setInterval: (fn, ms) => {
 		const id = nextTimerId++;
 		timerMap.set(id, setInterval(fn, ms));
@@ -6502,17 +6510,108 @@ try {
 		assert(bundle.detectAwaitingInput("Here is the result.\n") === false, "(b) plain prose does not trip");
 		assert(bundle.detectAwaitingInput("\x1b[1;32mDone\x1b[0m") === false, "(b) ANSI-only chunk does not trip");
 
-		// (c) computeActivityState transitions (pure, controlled `now`).
+		// (c) computeActivityState transitions (pure, controlled `now`) —
+		//     Wave 4/FIX B hysteresis: input gate, 5s silence, byte/input re-arm.
 		const T0 = 10_000_000;
-		assert(bundle.computeActivityState({ focused: false, exited: false, lastDataAt: null, lastInputAt: null, lastQuestionAt: null, now: T0 }) === "idle", "(c) nothing happened → idle");
-		assert(bundle.computeActivityState({ focused: false, exited: false, lastDataAt: T0 - 500, lastInputAt: null, lastQuestionAt: null, now: T0 }) === "running", "(c) data within ACTIVE_MS → running");
-		assert(bundle.computeActivityState({ focused: false, exited: false, lastDataAt: T0 - 2000, lastInputAt: null, lastQuestionAt: null, now: T0 }) === "done-unseen", "(c) data stopped > IDLE_MS, unfocused → done-unseen");
-		assert(bundle.computeActivityState({ focused: true, exited: false, lastDataAt: T0 - 2000, lastInputAt: null, lastQuestionAt: null, now: T0 }) === "seen", "(c) data stopped, focused → seen");
-		assert(bundle.computeActivityState({ focused: false, exited: false, lastDataAt: T0 - 100, lastInputAt: null, lastQuestionAt: T0 - 100, now: T0 }) === "awaiting-input", "(c) fresh question + unfocused → awaiting-input");
-		assert(bundle.computeActivityState({ focused: true, exited: false, lastDataAt: T0 - 100, lastInputAt: null, lastQuestionAt: T0 - 100, now: T0 }) === "running", "(c) fresh question + focused → running (awaiting clears on focus)");
-		assert(bundle.computeActivityState({ focused: false, exited: true, exitCode: 1, lastDataAt: T0 - 100, lastInputAt: null, lastQuestionAt: null, now: T0 }) === "error", "(c) non-zero exit → error");
-		assert(bundle.computeActivityState({ focused: true, exited: true, exitCode: 0, lastDataAt: T0 - 100, lastInputAt: null, lastQuestionAt: null, now: T0 }) === "seen", "(c) clean exit + focused → seen");
-		assert(bundle.computeActivityState({ focused: false, exited: true, exitCode: 0, lastDataAt: T0 - 100, lastInputAt: null, lastQuestionAt: null, now: T0 }) === "done-unseen", "(c) clean exit + unfocused → done-unseen");
+		const B = { focused: false, exited: false, lastQuestionAt: null };
+		assert(bundle.DONE_SILENCE_MS === 5000, "(c) FIX B silence window = 5000ms");
+		assert(bundle.IDLE_MS === 1500, "(c) awaiting-input window unchanged (1500ms)");
+		assert(bundle.DONE_REARM_BYTES === 2048, "(c) FIX B re-arm bar = 2048 bytes");
+		assert(bundle.computeActivityState({ ...B, lastDataAt: null, lastInputAt: null, now: T0 }) === "idle", "(c) nothing happened → idle");
+		assert(bundle.computeActivityState({ ...B, alive: true, lastDataAt: null, lastInputAt: null, now: T0 }) === "running", "(c) fresh alive pty, no data → running");
+		assert(bundle.computeActivityState({ ...B, lastDataAt: T0 - 500, lastInputAt: null, now: T0 }) === "running", "(c) recent data → running");
+		// awaiting-input detection is UNCHANGED (FIX B keeps it as-is).
+		assert(bundle.computeActivityState({ ...B, lastDataAt: T0 - 100, lastInputAt: null, lastQuestionAt: T0 - 100, now: T0 }) === "awaiting-input", "(c) fresh question + unfocused → awaiting-input");
+		assert(bundle.computeActivityState({ ...B, focused: true, lastDataAt: T0 - 100, lastInputAt: null, lastQuestionAt: T0 - 100, now: T0 }) === "running", "(c) fresh question + focused → running (awaiting clears on focus)");
+		// INPUT GATE: a never-prompted session NEVER reaches done/seen.
+		for (const gap of [2000, 6000, 60_000, 3_600_000]) {
+			assert(bundle.computeActivityState({ ...B, lastDataAt: T0 - gap, lastInputAt: null, now: T0 }) === "running",
+				`(c) never-prompted + ${gap}ms silence stays running (never done-unseen)`);
+		}
+		assert(bundle.computeActivityState({ ...B, focused: true, lastDataAt: T0 - 60_000, lastInputAt: null, now: T0 }) === "running",
+			"(c) never-prompted + focused quiet → running (never seen)");
+		// SILENCE WINDOW: prompted + >5s true silence → done-unseen (focused → seen).
+		assert(bundle.computeActivityState({ ...B, lastDataAt: T0 - 6000, lastInputAt: T0 - 6000, now: T0 }) === "done-unseen",
+			"(c) prompted + 6s silence, unfocused → done-unseen");
+		assert(bundle.computeActivityState({ ...B, lastDataAt: T0 - 4900, lastInputAt: T0 - 6000, now: T0 }) === "running",
+			"(c) silence < 5000ms stays running");
+		assert(bundle.computeActivityState({ ...B, focused: true, lastDataAt: T0 - 6000, lastInputAt: T0 - 6000, now: T0 }) === "seen",
+			"(c) prompted + 6s silence, focused → seen");
+		// RE-ARM: a done stretch holds against stray frames until input/burst.
+		assert(bundle.computeActivityState({ ...B, lastDataAt: T0 - 100, lastInputAt: T0 - 60_000, doneSince: T0 - 5000, bytesAtDone: 1000, totalBytes: 1500, now: T0 }) === "done-unseen",
+			"(c) 500 stray bytes since done → stays done-unseen (no bounce)");
+		assert(bundle.computeActivityState({ ...B, lastDataAt: T0 - 100, lastInputAt: T0 - 60_000, doneSince: T0 - 5000, bytesAtDone: 1000, totalBytes: 4000, now: T0 }) === "running",
+			"(c) ≥ DONE_REARM_BYTES since done → re-armed to running");
+		assert(bundle.computeActivityState({ ...B, lastDataAt: T0 - 6000, lastInputAt: T0 - 100, doneSince: T0 - 5000, bytesAtDone: 4000, totalBytes: 4000, now: T0 }) === "running",
+			"(c) fresh user input re-arms a done stretch → running");
+		// Exits are EVENTS, not the gated heuristic — unchanged.
+		assert(bundle.computeActivityState({ ...B, exited: true, exitCode: 1, lastDataAt: T0 - 100, lastInputAt: null, now: T0 }) === "error", "(c) non-zero exit → error");
+		assert(bundle.computeActivityState({ ...B, focused: true, exited: true, exitCode: 0, lastDataAt: T0 - 100, lastInputAt: null, now: T0 }) === "seen", "(c) clean exit + focused → seen");
+		assert(bundle.computeActivityState({ ...B, exited: true, exitCode: 0, lastDataAt: T0 - 100, lastInputAt: null, now: T0 }) === "done-unseen", "(c) clean exit + unfocused → done-unseen");
+
+		// (c2) FLAP-FREE TICK LOOPS through the shared compute+sync pair — the
+		//      exact call shape the view runs every STATE_TICK_MS (500ms).
+		//  (i) 1s spinner ticks with a prompt NEVER leave running (the Wave-1 bug).
+		let mem = bundle.initialActivityMemory();
+		mem.totalBytes = 500;
+		const statesSeen = new Set();
+		for (let t = 0; t <= 30_000; t += 500) {
+			const now = T0 + t;
+			const lastData = T0 + Math.floor(t / 1000) * 1000; // spinner frame each 1s
+			const s = bundle.computeActivityState({
+				...B, lastDataAt: lastData, lastInputAt: T0 - 1000, now,
+				totalBytes: mem.totalBytes, doneSince: mem.doneSince, bytesAtDone: mem.bytesAtDone,
+			});
+			mem = bundle.syncActivityMemory(mem, s, now);
+			statesSeen.add(s);
+		}
+		assert(statesSeen.size === 1 && statesSeen.has("running"),
+			"(c2i) periodic 1s spinner ticks over 30s never flap (running only)");
+
+		// (ii) sustained post-input silence flips to done-unseen EXACTLY ONCE.
+		mem = bundle.initialActivityMemory();
+		mem.totalBytes = 2000;
+		let prev = "running";
+		let flips = 0;
+		for (let t = 0; t <= 20_000; t += 500) {
+			const now = T0 + t;
+			const lastData = T0 + Math.min(t, 1000); // traffic stops at +1s
+			const s = bundle.computeActivityState({
+				...B, lastDataAt: lastData, lastInputAt: T0, now,
+				totalBytes: mem.totalBytes, doneSince: mem.doneSince, bytesAtDone: mem.bytesAtDone,
+			});
+			mem = bundle.syncActivityMemory(mem, s, now);
+			if (s !== prev) {
+				if (s === "done-unseen") flips++;
+				prev = s;
+			}
+		}
+		assert(flips === 1, "(c2ii) 5s+ post-input silence flips to done-unseen exactly once");
+		assert(mem.doneSince != null && mem.bytesAtDone === 2000,
+			"(c2ii) the done stretch stamps doneSince + the byte snapshot (re-arm armed)");
+
+		// (iii) stray frames after done don't bounce it; a real burst re-arms.
+		mem = bundle.initialActivityMemory();
+		mem.totalBytes = 0;
+		const step3 = (now, lastData, addBytes) => {
+			mem.totalBytes += addBytes;
+			const st = bundle.computeActivityState({
+				...B, lastDataAt: lastData, lastInputAt: T0, now,
+				totalBytes: mem.totalBytes, doneSince: mem.doneSince, bytesAtDone: mem.bytesAtDone,
+			});
+			mem = bundle.syncActivityMemory(mem, st, now);
+			return st;
+		};
+		assert(step3(T0 + 1000, T0 + 1000, 1000) === "running", "(c2iii) live traffic → running");
+		assert(step3(T0 + 7000, T0 + 1000, 0) === "done-unseen", "(c2iii) 6s silence → done-unseen");
+		let bounced = false;
+		for (let k = 1; k <= 40; k++) {
+			const now = T0 + 7000 + k * 500;
+			if (step3(now, now, 50) !== "done-unseen") bounced = true;
+		}
+		assert(!bounced, "(c2iii) 40 stray spinner frames (2000B < re-arm bar) never bounce done");
+		assert(step3(T0 + 28_000, T0 + 28_000, 500) === "running",
+			"(c2iii) a cumulative burst past DONE_REARM_BYTES re-arms → running");
 
 		// (d) view badge class application + setVisualState/getVisualState round-trip.
 		const T = "arthur-pi-terminal";
@@ -6545,8 +6644,8 @@ try {
 		assert(viewD.getVisualState() === "error", "(f) non-zero exit → error visual state");
 	})();
 
-	// ---- 34. slash toolbar payload bytes written to the pty ------------------
-	console.log("== 34. slash toolbar payload bytes (New / Compact / Thinking) ==");
+	// ---- 34. inline pi toolbar row (direct buttons + reference icons) + payloads --
+	console.log("== 34. inline pi toolbar row (New/Resume/Compact/Thinking) + reference icons + slash picker ==");
 	await (async () => {
 		const T = "arthur-pi-terminal";
 		await app.workspace.detachLeavesOfType(T);
@@ -6555,29 +6654,111 @@ try {
 		await plugin.activatePiTerminal({ cwd: "/tmp/tb" });
 		const view = app.workspace.getLeavesOfType(T)[0].view;
 		const pty = s34.ptys[0];
+		const comp = view.composer;
+		assert(!!comp && comp.isVisible === true, "(a) the composer row host is attached and default-visible");
 
-		// Open the toolbar popover (the '≡' button) and click each action.
-		const openPopover = () => {
-			const menuBtn = findButton(view.contentEl, "≡");
-			assert(!!menuBtn, "(a) the slash toolbar menu button renders");
-			menuBtn.handlers.get("click")[0]?.({ preventDefault() {}, stopPropagation() {} });
+		// (b) ROW ORDER: pi commands first, composer controls after the spacer —
+		//     ALL directly visible (no '≡' dropdown anymore).
+		const rowIds = comp.toolbarEl.children
+			.map((c) => (c.attributes?.get?.("id") ?? ""))
+			.filter((id) => id.startsWith("pi-btn-"));
+		assert(JSON.stringify(rowIds) === JSON.stringify([
+			"pi-btn-new", "pi-btn-resume", "pi-btn-compact", "pi-btn-thinking",
+			"pi-btn-send", "pi-btn-clear", "pi-btn-note", "pi-btn-selection",
+			"pi-btn-command", "pi-btn-link", "pi-btn-stats", "pi-btn-hide",
+		]), `(b) row order = pi commands → spacer → composer controls (got: ${rowIds.join(",")})`);
+		assert(findButton(view.contentEl, "≡") == null, "(b) the Wave-1 '≡' dropdown button is gone");
+
+		// (c) PORTED REFERENCE ICONS (the lucide id recorded by the setIcon stub).
+		const iconOf = (id) => findById(comp.toolbarEl, id)?.attributes?.get?.("data-icon") ?? null;
+		const expectedIcons = {
+			"pi-btn-new": "file-plus", "pi-btn-resume": "layers", "pi-btn-compact": "weight", "pi-btn-thinking": "gauge",
+			"pi-btn-send": "send", "pi-btn-clear": "eraser", "pi-btn-note": "file-text",
+			"pi-btn-selection": "text-cursor-input", "pi-btn-command": "square-slash",
+			"pi-btn-link": "link", "pi-btn-stats": "bar-chart-3",
 		};
+		for (const [id, icon] of Object.entries(expectedIcons)) {
+			assert(iconOf(id) === icon, `(c) ${id} renders the reference lucide icon '${icon}'`);
+		}
+		assert(typeof bundle.PI_ROW_ICONS === "object" && bundle.PI_ROW_ICONS.compact === "weight",
+			"(c) bundle exports the PI_ROW_ICONS port registry");
 
-		openPopover();
-		const writesBeforeNew = pty.writes.length;
-		findButton(view.contentEl, "New")?.handlers.get("click")[0]?.();
-		assert(pty.writes.slice(writesBeforeNew).some((w) => w === "/new\r"), "(b) New writes '/new\\r' to the pty");
+		// (d) DIRECT button actions → pty payloads (no popover round-trip).
+		const clickBtn = (id) => findById(comp.toolbarEl, id)?.handlers?.get("click")?.[0]?.({ preventDefault() {}, stopPropagation() {} });
+		let w = pty.writes.length;
+		clickBtn("pi-btn-new");
+		assert(pty.writes.slice(w).includes("/new\r"), "(d) New writes '/new\\r' to the pty");
+		w = pty.writes.length;
+		clickBtn("pi-btn-compact");
+		assert(pty.writes.slice(w).includes("/compact\r"), "(d) Compact writes '/compact\\r' to the pty");
+		w = pty.writes.length;
+		clickBtn("pi-btn-thinking");
+		assert(pty.writes.slice(w).includes("\x1b[Z") && !pty.writes.slice(w).includes("\x1b[Z\r"),
+			"(d) Thinking writes the bare Shift+Tab escape (no \\r)");
 
-		openPopover();
-		const writesBeforeCompact = pty.writes.length;
-		findButton(view.contentEl, "Compact")?.handlers.get("click")[0]?.();
-		assert(pty.writes.slice(writesBeforeCompact).some((w) => w === "/compact\r"), "(c) Compact writes '/compact\\r' to the pty");
+		// (e) Resume… → the session-file LIST popover (the only popup left).
+		clickBtn("pi-btn-resume");
+		assert(findByClass(comp.rootEl, "arthur-pi-resume-popover").length === 1,
+			"(e) Resume… opens the session-file list popover inline");
+		clickBtn("pi-btn-resume"); // toggle closed again
+		assert(findByClass(comp.rootEl, "arthur-pi-resume-popover").length === 0,
+			"(e) a second Resume… click closes the popover");
 
-		openPopover();
-		const writesBeforeThink = pty.writes.length;
-		findButton(view.contentEl, "Thinking")?.handlers.get("click")[0]?.();
-		assert(pty.writes.slice(writesBeforeThink).some((w) => w === "\x1b[Z"), "(d) Thinking writes the Shift+Tab escape (no \\r)");
-		assert(!pty.writes.slice(writesBeforeThink).some((w) => w === "\x1b[Z\r"), "(d) Thinking writes NO trailing carriage return");
+		// (f) SLASH PICKER — LOCAL source of truth (fake ~/.pi tree injected).
+		assert(typeof bundle.listPiCommands === "function" && typeof bundle.PiCommandPickerModal === "function",
+			"(f) bundle exports listPiCommands + PiCommandPickerModal");
+		const D34 = (name) => ({ name, isDirectory: () => true });
+		const F34 = (name) => ({ name, isDirectory: () => false });
+		const tree34 = {
+			"/h/.pi/agent/prompts": [F34("release.md"), F34("pipeline-status.md"), D34("nested-dir")],
+			"/h/.pi/agent/skills": [D34("comfy"), D34("vision")],
+		};
+		const fs34 = { readdir: (p) => { if (!tree34[p]) throw new Error(`ENOENT ${p}`); return tree34[p]; } };
+		const cmds34 = bundle.listPiCommands(fs34, "/h/.pi/agent");
+		const names34 = cmds34.map((c) => c.name);
+		assert(names34.includes("new") && names34.includes("compact"), "(f) hardcoded builtin shortlist present");
+		assert(names34.includes("release") && names34.includes("pipeline-status"), "(f) ~/.pi/agent/prompts/*.md → slash commands");
+		assert(names34.includes("comfy") && names34.includes("vision"), "(f) ~/.pi/agent/skills/* → slash commands");
+		assert(!names34.includes("nested-dir"), "(f) prompt SUBdirectories are skipped");
+		assert(cmds34.find((c) => c.name === "release")?.source === "prompt"
+			&& cmds34.find((c) => c.name === "comfy")?.source === "skill", "(f) source tags record the local origin");
+		const onlyBuiltins = bundle.listPiCommands({ readdir: () => { throw new Error("ENOENT"); } }, "/missing");
+		assert(onlyBuiltins.length > 0 && onlyBuiltins.every((c) => c.source === "builtin"),
+			"(f) missing ~/.pi dirs degrade to the builtins only (scan never throws)");
+		const shadow34 = { readdir: (p) => (p.endsWith("prompts") ? [F34("new.md")] : []) };
+		const deduped34 = bundle.listPiCommands(shadow34, "/h/.pi/agent").filter((c) => c.name === "new");
+		assert(deduped34.length === 1 && deduped34[0].source === "builtin",
+			"(f) a local file cannot shadow a builtin (builtin wins the dedupe)");
+
+		// (g) PICKER MODAL: opens from the row's square-slash button, lists the
+		//     local commands, row-click / Enter inserts '/<name>' at the cursor.
+		StubModal.reset();
+		clickBtn("pi-btn-command");
+		assert(StubModal.opened.length === 1, "(g) the command button opens exactly one picker modal");
+		const modal34 = StubModal.opened[0];
+		assert(modal34.contentEl.hasClass("arthur-pi-cmd-picker") === true, "(g) the modal renders the picker surface");
+		const rows34 = findByClass(modal34.contentEl, "arthur-pi-cmd-item");
+		assert(rows34.length >= bundle.BUILTIN_PI_COMMANDS.length,
+			"(g) rows = builtins + the machine's local prompts/skills");
+		assert(allText(modal34.contentEl).includes("/new"), "(g) the builtin '/new' is listed");
+		comp.textarea.value = "go ";
+		rows34[0].handlers.get("click")[0]?.(); // first row = '/new'
+		assert(modal34._closed === true, "(g) choosing a row closes the modal");
+		assert(comp.textarea.value === "go /new", "(g) choosing inserts '/<name>' at the cursor");
+		// keyboard path: filter + Enter.
+		StubModal.reset();
+		clickBtn("pi-btn-command");
+		const modal34b = StubModal.opened[0];
+		const input34b = findByTag(modal34b.contentEl, "INPUT")[0];
+		assert(typeof input34b?.handlers.get("input")?.[0] === "function", "(g) the search box is wired");
+		input34b.value = "compact";
+		input34b.handlers.get("input")[0]?.();
+		const rows34b = findByClass(modal34b.contentEl, "arthur-pi-cmd-item");
+		assert(rows34b.length === 1 && allText(rows34b[0]).includes("/compact"), "(g) the fuzzy filter narrows the list (compact)");
+		const evEnter = { key: "Enter", defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, stopPropagation() {} };
+		input34b.handlers.get("keydown")[0]?.(evEnter);
+		assert(evEnter.defaultPrevented && comp.textarea.value.includes("/compact"), "(g) Enter inserts the selected command");
+		modal34b.close();
 	})();
 
 	// ---- 35. session resume spawn args (--session <abs>) + per-cwd lister ----
@@ -6702,6 +6883,31 @@ try {
 		assert(viewDflt.terminal.options.fontSize === 13, "(b) default fontSize applied to the constructed xterm");
 		assert(viewDflt.terminal.options.scrollback === 5000, "(b) default scrollback applied to the constructed xterm");
 
+		// (b2) WAVE 4/FIX A — explicit typography metrics on the constructed
+		//      Terminal: letterSpacing 0, lineHeight 1, and a RESOLVED monospace
+		//      family (the empty setting no longer falls through to xterm's
+		//      bare generic 'monospace').
+		assert(viewDflt.terminal.options.letterSpacing === 0, "(b2) Terminal constructed with letterSpacing: 0");
+		assert(viewDflt.terminal.options.lineHeight === 1, "(b2) Terminal constructed with lineHeight: 1");
+		assert(viewDflt.terminal.options.fontFamily === "Menlo, Consolas, monospace",
+			"(b2) empty setting + empty --font-monospace → the fallback monospace chain");
+		assert(typeof bundle.resolveTerminalFontFamily === "function" && typeof bundle.FALLBACK_MONOSPACE === "string",
+			"(b2) bundle exports resolveTerminalFontFamily + FALLBACK_MONOSPACE");
+		assert(bundle.resolveTerminalFontFamily("", () => "") === "Menlo, Consolas, monospace",
+			"(b2) pure resolver: empty var → fallback chain");
+		assert(bundle.resolveTerminalFontFamily("", () => "  JetBrains Mono  ") === "JetBrains Mono, Menlo, Consolas, monospace",
+			"(b2) pure resolver: Obsidian's --font-monospace fronts the chain");
+		assert(bundle.resolveTerminalFontFamily("Comic Sans, monospace", () => "X") === "Comic Sans, monospace",
+			"(b2) pure resolver: an explicit setting wins verbatim");
+		// Live path: poison the injected getComputedStyle stub, open a NEW
+		// terminal with an empty setting, read the constructed options back.
+		globalThis.__fakeFontMono = "JetBrains Mono";
+		await plugin.activatePiTerminal({ cwd: "/tmp/mono" });
+		const viewMono = app.workspace.getLeavesOfType(T).find((l) => l.view.boundCwd === "/tmp/mono").view;
+		assert(viewMono.terminal.options.fontFamily === "JetBrains Mono, Menlo, Consolas, monospace",
+			"(b2) --font-monospace read via getComputedStyle → xterm fontFamily");
+		delete globalThis.__fakeFontMono;
+
 		// (c) changing settings applies to NEW terminals only — change + open a
 		//     new cwd: the new terminal picks up the new fontSize; the old keeps 13.
 		plugin.settings.piTerminalFontSize = 20;
@@ -6711,6 +6917,7 @@ try {
 		const viewNew = app.workspace.getLeavesOfType(T).find((l) => l.view.boundCwd === "/tmp/new").view;
 		assert(viewNew.terminal.options.fontSize === 20, "(c) NEW terminal picks up the changed fontSize");
 		assert(viewNew.terminal.options.scrollback === 9000, "(c) NEW terminal picks up the changed scrollback");
+		assert(viewNew.terminal.options.fontFamily === "Mono, monospace", "(c) NEW terminal picks up the explicit fontFamily setting (wins over --font-monospace)");
 		assert(viewDflt.terminal.options.fontSize === 13, "(c) existing terminal keeps its original fontSize");
 	})();
 
@@ -7215,6 +7422,103 @@ try {
 	})();
 
 
+	// ---- 42. Wave 4 FIX D — promptFontSize default+apply / full-width
+	//      auto-grow / styles.css metrics+width guards ------------------------
+	console.log("== 42. Wave 4 — promptFontSize (default/apply), full-width auto-grow, CSS guards ==");
+	await (async () => {
+		const T = "arthur-pi-terminal";
+
+		// (a) settings: default 16 + loadSettings clamp window.
+		assert(plugin.settings.promptFontSize === 16, "(a) default promptFontSize = 16");
+		const raw42 = JSON.parse(JSON.stringify(plugin._data ?? {}));
+		// Section 40 left the PERSISTED composerVisible flag false (it restored
+		// the live value only) — re-persist it on so the composer (this section's
+		// row host) is default-visible again.
+		raw42.piTerminalComposerVisible = true;
+		// Section 40 also left the persisted max-height at 80 (clamped live only).
+		raw42.piTerminalComposerMaxHeight = 50;
+		raw42.promptFontSize = 99;
+		plugin._data = raw42;
+		await plugin.loadSettings();
+		assert(plugin.settings.promptFontSize === 32, "(a) promptFontSize 99 clamps to the 32px cap");
+		raw42.promptFontSize = 4;
+		plugin._data = raw42;
+		await plugin.loadSettings();
+		assert(plugin.settings.promptFontSize === 10, "(a) promptFontSize 4 clamps to the 10px floor");
+		raw42.promptFontSize = 16;
+		plugin._data = raw42;
+		await plugin.loadSettings();
+		assert(plugin.settings.promptFontSize === 16, "(a) a valid saved promptFontSize round-trips");
+
+		// (b) CONSTRUCT-TIME application to the textarea (class + style + attr).
+		await app.workspace.detachLeavesOfType(T);
+		await plugin.onunload(); await plugin.onload();
+		const s42 = makeFakePtyFactory(); plugin.terminalManager.ptyFactory = s42.factory;
+		await plugin.activatePiTerminal({ cwd: "/tmp/fd" });
+		const view42 = app.workspace.getLeavesOfType(T).find((l) => l.view.boundCwd === "/tmp/fd").view;
+		const comp42 = view42.composer;
+		assert(comp42.textarea.classList.contains("arthur-pi-composer-input") === true,
+			"(b) the textarea carries the composer input class");
+		assert(comp42.textarea.style.fontSize === "16px", "(b) default promptFontSize applied as a construct-time style");
+		assert(comp42.textarea.attributes.get("data-prompt-font-size") === "16",
+			"(b) the applied size is recorded on the element");
+		// A settings change applies to NEW composers only (like xterm's fonts).
+		plugin.settings.promptFontSize = 20;
+		await plugin.activatePiTerminal({ cwd: "/tmp/fd2" });
+		const view42b = app.workspace.getLeavesOfType(T).find((l) => l.view.boundCwd === "/tmp/fd2").view;
+		assert(view42b.composer.textarea.style.fontSize === "20px",
+			"(b) a NEW composer picks up the changed promptFontSize");
+		assert(comp42.textarea.style.fontSize === "16px",
+			"(b) the existing composer keeps its construct-time size");
+		plugin.settings.promptFontSize = 16;
+
+		// (c) auto-grow: full-width textarea, panel grows with content up to the
+		//     composer max-height % of the view (400px host → 200/240px).
+		const host42 = {
+			cwd: () => "/tmp/fd",
+			getDraft: () => "",
+			setDraft: () => {},
+			resolver: () => () => null,
+			submit: () => true,
+			viewHeight: () => 400,
+			scheduleFit: () => {},
+			activeNote: async () => null,
+			activeSelection: () => null,
+		};
+		const compC = new bundle.PromptComposer(new StubEl("div"), host42, plugin);
+		compC.textarea.scrollHeight = 600;
+		compC.textarea.handlers.get("input")[0]?.();
+		assert(compC.rootEl.style.height === "200px",
+			"(c) a tall draft grows the panel to the 50% max-height ceiling (400px view → 200px)");
+		compC.textarea.scrollHeight = 120;
+		compC.textarea.handlers.get("input")[0]?.();
+		assert(compC.rootEl.style.height === "200px",
+			"(c) grow-only: a shorter draft never yanks the panel back mid-session");
+		plugin.settings.piTerminalComposerMaxHeight = 60;
+		plugin.settings.promptFontSize = 18;
+		const compD = new bundle.PromptComposer(new StubEl("div"), host42, plugin);
+		compD.textarea.scrollHeight = 600;
+		compD.textarea.handlers.get("input")[0]?.();
+		assert(compD.rootEl.style.height === "240px",
+			"(c) the max-height setting bounds the auto-grow (60% of 400 = 240px)");
+		assert(compD.textarea.style.fontSize === "18px", "(c) construct-time font follows the live setting");
+		plugin.settings.piTerminalComposerMaxHeight = 50;
+		plugin.settings.promptFontSize = 16;
+		compC.destroy();
+		compD.destroy();
+
+		// (d) styles.css guards (text-level — the smoke has no CSS engine).
+		const css42 = fs.readFileSync(path.join(root, "styles.css"), "utf8");
+		assert(/\.xterm-char-measure-element\s*\{[^}]*letter-spacing:\s*0\s*!important/s.test(css42),
+			"(d) the xterm measure spans are pinned to letter-spacing:0 (FIX A metrics guard)");
+		assert(css42.includes(".xterm-width-cache-measure-container"),
+			"(d) the width-cache measure container is covered by the guard");
+		assert(/\.arthur-pi-composer-input\s*\{[^}]*width:\s*100%/s.test(css42),
+			"(d) the prompt textarea is full-width (width:100%, FIX D)");
+		await app.workspace.detachLeavesOfType(T);
+	})();
+
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();
@@ -7233,4 +7537,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / local-pty-terminal-spawn-args+pty→xterm+xterm→pty+resize+exit-state / local-pty-resolver-absolute-path-require+no-native-load / local-terminal-view-lazy-no-cwd+attach+close-kill+reopen / local-terminal-manager-per-cwd-routing+3-leaves+isolation+reuse+full-unload-kill-all / local-terminal-picker-fake-sessions-dir+select→open+vault-root+cwd-input+mobile-hide / ahp-client-load-retry-resilience-819e2bb-regression / pi-instance-states+badge-CSS-classes+focus-clears-awaiting / slash-toolbar-payload-bytes-new+compact+thinking / session-resume-spawn-args+listSessionFilesForCwd+respawn / send-active-note+selection-payload+wikilink-rewrite+no-terminal-notice / terminal-settings-plumbing-fontSize+scrollback+new-only / theme-follow-xterm-styling-var→ITheme+fallbacks+applyTheme / instance-picker+ribbon-command-routing+open-instances / pi-prompt-composer-drafts+bracketed-paste-submit+wikilink-context+@-files+image-paste+resizer-clamp / pi-farm-view-open+dormant-merge+resume/focus-actions+refresh-interval-lifecycle+empty-state+picker-browse-affordance all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / local-pty-terminal-spawn-args+pty→xterm+xterm→pty+resize+exit-state / local-pty-resolver-absolute-path-require+no-native-load / local-terminal-view-lazy-no-cwd+attach+close-kill+reopen / local-terminal-manager-per-cwd-routing+3-leaves+isolation+reuse+full-unload-kill-all / local-terminal-picker-fake-sessions-dir+select→open+vault-root+cwd-input+mobile-hide / ahp-client-load-retry-resilience-819e2bb-regression / pi-instance-states+badge-CSS-classes+focus-clears-awaiting / slash-toolbar-payload-bytes-new+compact+thinking / session-resume-spawn-args+listSessionFilesForCwd+respawn / send-active-note+selection-payload+wikilink-rewrite+no-terminal-notice / terminal-settings-plumbing-fontSize+scrollback+new-only / theme-follow-xterm-styling-var→ITheme+fallbacks+applyTheme / instance-picker+ribbon-command-routing+open-instances / pi-prompt-composer-drafts+bracketed-paste-submit+wikilink-context+@-files+image-paste+resizer-clamp / pi-farm-view-open+dormant-merge+resume/focus-actions+refresh-interval-lifecycle+empty-state+picker-browse-affordance / wave4-state-hysteresis-input-gate+5s-silence+re-arm-tick-loops-no-flap / inline-pi-toolbar-row-order+reference-lucide-icons+resume-popover+local-slash-picker-fake-fs / xterm-metrics-letterSpacing-0+lineHeight-1+font-monospace-chain / promptFontSize-default-clamp-apply+full-width-autogrow+css-guards all clean");

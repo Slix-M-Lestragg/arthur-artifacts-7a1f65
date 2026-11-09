@@ -5,10 +5,16 @@
  * plain multiline textarea here, since our submit path is bracketed paste,
  * not the APC marker that needs the obsidian-bridge pi extension).
  *
- * Contents (top → bottom): drag resizer → toolbar (send / insert note /
- * insert selection / insert `[[wikilink]]` token / word-char count toggle /
- * hide) → textarea → transient "sent" flash. An `@`-file suggester
- * (at-suggester.ts) rides the textarea.
+ * Contents (top → bottom): drag resizer → ONE toolbar row (Wave 4/FIX C:
+ * directly-visible pi commands New / Resume… / Compact / Thinking at the LEFT,
+ * then a spacer, then the reference-ported composer controls — send / clear /
+ * insert note / insert selection / slash-command picker / insert
+ * `[[wikilink]]` token / word-char count — as a right-aligned icon-only
+ * cluster, then the count/flash/hide tail) → full-width textarea that
+ * AUTO-GROWS with content up to the composer max-height setting (Wave
+ * 4/FIX D) → transient "sent" flash. An `@`-file suggester
+ * (at-suggester.ts) rides the textarea, and the `square-slash` button opens
+ * the LOCAL command picker (pi-commands.ts).
  *
  * Submit semantics — BRACKETED PASTE (reference PtyClient
  * `submitPromptViaPaste`): the composer hands the raw text to the host, which
@@ -28,11 +34,13 @@
  */
 import { getIcon, setIcon } from "obsidian";
 
+import { PI_ROW_ICONS } from "../icons";
 import type ArthurPlugin from "../main";
 import { el } from "../util";
 import type { LinkResolver } from "./link-rewrite";
 import { rewriteContextLinks } from "./link-rewrite";
 import { FileAtSuggester, insertCompletion, type FsDeps } from "./at-suggester";
+import { listPiCommands, PiCommandPickerModal, type PiCommand } from "./pi-commands";
 
 /** Bracketed-paste markers + the single trailing Enter of a submit. */
 export const PASTE_START = "\x1b[200~";
@@ -52,6 +60,11 @@ export function buildPasteSubmit(text: string): string {
 export const COMPOSER_MIN_HEIGHT = 72;
 /** Hard ceiling for the composer's share of the leaf (settings clamp to this). */
 export const COMPOSER_MAX_HEIGHT_PCT = 60;
+/** CSS default panel height (px) — the auto-grow floor before content grows. */
+export const COMPOSER_DEFAULT_HEIGHT = 140;
+/** Fixed chrome the auto-grow math must budget above the textarea content:
+ *  resizer strip (6px, matches CSS) + toolbar (~28px) + textarea padding. */
+const COMPOSER_GROW_CHROME = 6 + 28 + 8;
 
 /**
  * Clamp a dragged composer height: ≥ COMPOSER_MIN_HEIGHT px and ≤ `maxPct`
@@ -90,9 +103,28 @@ export interface ComposerHost {
 	activeSelection(): { note: string; text: string } | null;
 }
 
+/** One directly-visible pi command button on the composer row (Wave 4/FIX C)
+ *  — the view supplies the actions so the pty wiring stays in the view. */
+export interface PiRowAction {
+	/** Stable id → the button's `id="pi-btn-<id>"` (smoke asserts row order). */
+	id: string;
+	/** Lucide icon name (PI_ROW_ICONS values in production). */
+	icon: string;
+	/** Tooltip / aria-label (the buttons are icon-only). */
+	label: string;
+	/** Click handler — receives the anchor button (popovers position off it). */
+	run: (btn: HTMLButtonElement) => void;
+}
+
 export interface PromptComposerOpts {
 	/** Injected fs for the `@` suggester (tests); production = real fs. */
 	fs?: FsDeps;
+	/** Inline pi command buttons rendered FIRST on the row (New/Resume…/
+	 *  Compact/Thinking) — no dropdown for the common ones. */
+	piActions?: PiRowAction[];
+	/** Command-list source for the slash picker (tests inject a fake ~.pi
+	 *  tree); production default = listPiCommands()' local scan. */
+	piCommands?: () => PiCommand[];
 }
 
 export class PromptComposer {
@@ -121,7 +153,7 @@ export class PromptComposer {
 		parent: HTMLElement,
 		private readonly host: ComposerHost,
 		private readonly plugin: ArthurPlugin,
-		opts: PromptComposerOpts = {},
+		private readonly opts: PromptComposerOpts = {},
 	) {
 		this.rootEl = el("div", { cls: "arthur-pi-composer" });
 		this.resizerEl = el("div", { cls: "arthur-pi-composer-resizer", attrs: { title: "drag to resize" } });
@@ -135,20 +167,31 @@ export class PromptComposer {
 		this.statsEl = el("span", { cls: "arthur-pi-composer-stats" });
 		this.statsEl.style.display = "none";
 
-		this.hideBtn = this.iconBtn("chevron-down", "Hide the prompt composer", () => this.setVisible(false));
+		this.hideBtn = this.iconBtn("chevron-down", "Hide the prompt composer", () => this.setVisible(false), "hide");
 
-		// Toolbar (reference actionbar subset): send │ note / selection /
-		// wikilink token │ count toggle … hide (right-aligned with the flash).
-		const sendBtn = this.iconBtn("send", "Send to pi (Mod+Enter)", () => this.submitNow());
-		const noteBtn = this.iconBtn("file-text", "Insert the active note as context", () => void this.insertActiveNote());
-		const selBtn = this.iconBtn("text-cursor-input", "Insert the current selection", () => this.insertSelection());
-		const linkBtn = this.iconBtn("link", "Insert a [[wikilink]] token", () => this.insertWikilinkToken());
-		const statsBtn = this.iconBtn("bar-chart-3", "Toggle word/char count", () => this.toggleStats());
+		// WAVE 4 (FIX C): ONE row. Pi commands are DIRECTLY VISIBLE at the left
+		// (the Wave-1 "≡" dropdown is gone), then a spacer pushes the composer's
+		// reference-ported controls into a right-aligned icon-only cluster (FIX D).
+		// Every button carries a stable `pi-btn-<id>` id for smoke.
+		const piActions = this.opts.piActions ?? [];
+		for (const action of piActions) this.toolbarEl.append(this.piBtn(action));
+		if (piActions.length > 0) this.toolbarEl.append(this.sep());
+
+		const sendBtn = this.iconBtn(PI_ROW_ICONS.send, "Send to pi (Mod+Enter)", () => this.submitNow(), "send");
+		const clearBtn = this.iconBtn(PI_ROW_ICONS.clear, "Clear the composer", () => this.clearNow(), "clear");
+		const noteBtn = this.iconBtn(PI_ROW_ICONS.note, "Insert the active note as context", () => void this.insertActiveNote(), "note");
+		const selBtn = this.iconBtn(PI_ROW_ICONS.selection, "Insert the current selection", () => this.insertSelection(), "selection");
+		const cmdBtn = this.iconBtn(PI_ROW_ICONS.command, "Insert a pi slash command", () => this.openCommandPicker(), "command");
+		const linkBtn = this.iconBtn(PI_ROW_ICONS.link, "Insert a [[wikilink]] token", () => this.insertWikilinkToken(), "link");
+		const statsBtn = this.iconBtn(PI_ROW_ICONS.stats, "Toggle word/char count", () => this.toggleStats(), "stats");
 		this.toolbarEl.append(
+			this.spacer(),
 			sendBtn,
+			clearBtn,
 			this.sep(),
 			noteBtn,
 			selBtn,
+			cmdBtn,
 			linkBtn,
 			this.sep(),
 			statsBtn,
@@ -169,11 +212,16 @@ export class PromptComposer {
 
 		this.suggester = new FileAtSuggester(this.textarea, {
 			baseDir: () => this.host.cwd(),
-			fs: opts.fs,
+			fs: this.opts.fs,
 			onInsert: () => this.afterInput(),
 		});
 
 		this.restoredDraft();
+		// FIX D: the prompt font size is applied at CONSTRUCT time (settings
+		// change → new terminals/new leaves pick it up, mirroring xterm's font
+		// settings), then the panel is fit to the restored content.
+		this.applyPromptFont();
+		this.autoGrow();
 		this.setVisible(this.plugin.settings.piTerminalComposerVisible);
 	}
 
@@ -206,6 +254,7 @@ export class PromptComposer {
 	private restoredDraft(): void {
 		const draft = this.host.getDraft();
 		if ((this.textarea.value ?? "") !== draft) this.textarea.value = draft;
+		this.autoGrow();
 	}
 
 	/** Persist every input into the per-instance draft store. */
@@ -214,6 +263,7 @@ export class PromptComposer {
 	private afterInput(): void {
 		this.host.setDraft(this.textarea.value ?? "");
 		if (this.statsOn) this.updateStats();
+		this.autoGrow();
 	}
 
 	/** Mod+Enter submits; plain Enter is a plain newline. When the @-suggester
@@ -245,6 +295,7 @@ export class PromptComposer {
 			this.host.setDraft("");
 		}
 		if (this.statsOn) this.updateStats();
+		this.autoGrow();
 		this.flash("✓ sent");
 		return true;
 	}
@@ -260,6 +311,22 @@ export class PromptComposer {
 	}
 
 	// -------------------------------------------------------------- inserts
+
+	/** Reference `eraser` action: empty the composer (draft + count follow). */
+	private clearNow(): void {
+		this.textarea.value = "";
+		this.afterInput();
+		this.flash("cleared");
+		if (typeof this.textarea.focus === "function") this.textarea.focus();
+	}
+
+	/** Reference `square-slash` action: the LOCAL command picker (pi-commands.ts
+	 *  scans ~/.pi/agent/{prompts,skills} + builtins — no RPC), inserting
+	 *  `/<name>` at the cursor. */
+	private openCommandPicker(): void {
+		const commands = this.opts.piCommands ? this.opts.piCommands() : listPiCommands();
+		new PiCommandPickerModal(this.plugin.app, commands, (commandText) => this.insertAtCursor(commandText)).open();
+	}
 
 	/** Splice `text` at the cursor, store the draft, restore focus. */
 	insertAtCursor(text: string): void {
@@ -318,6 +385,36 @@ export class PromptComposer {
 
 	// ---------------------------------------------------------- stats/resizer
 
+	/** FIX D: apply the `promptFontSize` setting to the textarea (construct time
+	 *  + settings change → new leaves). The class/style pair is what smoke
+	 *  asserts. */
+	private applyPromptFont(): void {
+		const size = this.plugin.settings.promptFontSize || 16;
+		this.textarea.style.fontSize = `${size}px`;
+		this.textarea.addClass("arthur-pi-composer-input");
+		this.textarea.setAttribute("data-prompt-font-size", String(size));
+	}
+
+	/**
+	 * FIX D: content-driven growth — the textarea has NO line cap; the PANEL
+	 * grows to fit it, clamped to the composer max-height % of the view (the
+	 * setting). GROW-ONLY: a user drag or an earlier larger content is never
+	 * yanked back mid-typing; shrink happens only via the drag handle / hide.
+	 * No-op where layout metrics are unavailable (smoke's zero-sized stubs
+	 * report scrollHeight 0), and it keeps the text scrollable once the panel
+	 * is at its max-height ceiling.
+	 */
+	autoGrow(): void {
+		if (!this.visible) return;
+		const contentH = Number(this.textarea.scrollHeight) || 0;
+		if (!(contentH > 0)) return;
+		const toolbarH = Number(this.toolbarEl.getBoundingClientRect?.().height) || 0;
+		const needed = COMPOSER_GROW_CHROME + (toolbarH || 28) + contentH;
+		const target = Math.max(this.currentHeight(), needed, COMPOSER_MIN_HEIGHT);
+		const h = clampComposerHeight(target, this.host.viewHeight(), this.maxHeightPct());
+		if (Number.isFinite(h) && h > 0) this.rootEl.style.height = `${h}px`;
+	}
+
 	toggleStats(): void {
 		this.statsOn = !this.statsOn;
 		this.statsEl.style.display = this.statsOn ? "" : "none";
@@ -367,20 +464,25 @@ export class PromptComposer {
 		return this.startHeight();
 	}
 
-	/** Measure (or fall back) the anchor height once per drag. */
+	/** Measure (or fall back to the CSS default height) once per drag. */
 	private startHeight(): number {
 		const measured = this.rootEl.getBoundingClientRect?.().height ?? 0;
-		return measured > 0 ? measured : COMPOSER_MIN_HEIGHT * 2;
+		return measured > 0 ? measured : COMPOSER_DEFAULT_HEIGHT;
 	}
 
 	// ---------------------------------------------------------------- misc
 
 	/** Small lucide icon button (falls back to the label text when the icon
-	 *  registry lacks the id — mirrors TerminalView.getIcon's fallback). */
-	private iconBtn(icon: string, label: string, onClick: () => void): HTMLButtonElement {
+	 *  registry lacks the id — mirrors TerminalView.getIcon's fallback).
+	 *  `id` (optional) becomes `id="pi-btn-<id>"` — smoke's row-order probe. */
+	private iconBtn(icon: string, label: string, onClick: () => void, id?: string): HTMLButtonElement {
 		const btn = el("button", {
 			cls: "arthur-pi-composer-btn",
-			attrs: { "aria-label": label, title: label },
+			attrs: {
+				"aria-label": label,
+				title: label,
+				...(id ? { id: `pi-btn-${id}` } : {}),
+			},
 		}) as HTMLButtonElement;
 		if (getIcon(icon)) setIcon(btn, icon);
 		else btn.setText(label);
@@ -394,6 +496,18 @@ export class PromptComposer {
 
 	private sep(): HTMLElement {
 		return el("span", { cls: "arthur-pi-composer-sep" });
+	}
+
+	/** Flexible gap: pushes everything after it into the right-aligned cluster. */
+	private spacer(): HTMLElement {
+		return el("span", { cls: "arthur-pi-composer-spacer" });
+	}
+
+	/** One directly-visible pi command button (left cluster, FIX C). */
+	private piBtn(action: PiRowAction): HTMLButtonElement {
+		const btn = this.iconBtn(action.icon, action.label, () => action.run(btn), action.id);
+		btn.addClass("arthur-pi-cmd-btn");
+		return btn;
 	}
 
 	/** Teardown (view close): timers, drag listeners, suggester. Idempotent. */
