@@ -232,8 +232,11 @@ export class PromptComposer {
 		// NOTE: the composer's own input/keydown listeners are registered BEFORE
 		// the suggester so they run FIRST — the keydown handler must be able to
 		// see `suggester.isActive` and yield every key to it (reference order).
+		// Capture at the textarea so Mod+Enter is handled before Obsidian's
+		// bubbling keymap scope. The composer still runs before the suggester's
+		// bubble listener: plain Enter/Escape remain available to an active popup.
 		this.textarea.addEventListener("input", this.onInput);
-		this.textarea.addEventListener("keydown", this.onKeydown);
+		this.textarea.addEventListener("keydown", this.onKeydown, true);
 		this.resizerEl.addEventListener("mousedown", this.onResizeStart);
 
 		this.suggester = new FileAtSuggester(this.textarea, {
@@ -263,6 +266,7 @@ export class PromptComposer {
 		this.rootEl.style.display = visible ? "" : "none";
 		this.resizerEl.style.display = visible ? "" : "none";
 		if (visible) this.host.scheduleFit();
+		else this.suggester.hide();
 	}
 
 	toggle(): void {
@@ -315,16 +319,20 @@ export class PromptComposer {
 		this.autoGrow();
 	}
 
-	/** Mod+Enter submits; plain Enter is a plain newline. When the @-suggester
-	 *  owns the keyboard (active popup) every key goes to it untouched. */
+	/** Cmd+Enter (macOS) and Ctrl+Enter submit, including while the @ popup is
+	 *  open. Capture + immediate propagation stop prevent Obsidian commands from
+	 *  double-firing. Shift+Enter and plain Enter remain native newlines. When
+	 *  the @-suggester owns the keyboard every other key goes to it untouched. */
 	private onKeydown = (e: KeyboardEvent): void => {
-		if (this.suggester.isActive) return;
 		if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
 			e.preventDefault();
 			e.stopPropagation();
+			e.stopImmediatePropagation?.();
 			this.submitNow();
+			return;
 		}
-		// plain Enter → default textarea newline (NEVER submits)
+		if (this.suggester.isActive) return;
+		// plain/Shift+Enter → default textarea newline (NEVER submits)
 	};
 
 	/** Hand the draft to the host for rewrite + bracketed-paste submit.
@@ -339,6 +347,7 @@ export class PromptComposer {
 			this.flash("no live terminal");
 			return false;
 		}
+		this.suggester.hide();
 		if (this.plugin.settings.piTerminalClearPromptOnSubmit) {
 			this.textarea.value = "";
 			this.host.setDraft("");
@@ -517,6 +526,7 @@ export class PromptComposer {
 		if (!this.visible) return;
 		const h = clampComposerHeight(this.currentHeight(), this.host.viewHeight(), this.maxHeightPct());
 		if (Number.isFinite(h) && h > 0) this.rootEl.style.height = `${h}px`;
+		this.suggester.reposition();
 	}
 
 	/** Current height in px: inline style → measured box → CSS default. */
@@ -574,6 +584,6 @@ export class PromptComposer {
 		this.stopDrag();
 		this.suggester.destroy();
 		this.textarea.removeEventListener("input", this.onInput);
-		this.textarea.removeEventListener("keydown", this.onKeydown);
+		this.textarea.removeEventListener("keydown", this.onKeydown, true);
 	}
 }

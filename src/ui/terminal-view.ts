@@ -1064,7 +1064,7 @@ export class TerminalView extends ItemView {
 	 *  the Wave 6b run boundary (lastSubmitAt). Refused with no live pty. */
 	private submitPrompt(text: string): boolean {
 		if (!this.pty || this.exited) return false;
-		const rewritten = rewriteContextLinks(text, this.makeLinkResolver());
+		const rewritten = rewriteContextLinks(text, this.makeLinkResolver(), this.activeNoteAbsolutePath());
 		this.pty.write(buildPasteSubmit(rewritten));
 		const now = Date.now();
 		this.lastInputAt = now;
@@ -1090,6 +1090,17 @@ export class TerminalView extends ItemView {
 		};
 	}
 
+	/** Absolute path of the note supplying the composer's link context. Same-note
+	 *  [[#heading]] / [[#^block]] links use it directly; no active note → null. */
+	private activeNoteAbsolutePath(): string | null {
+		const app = this.plugin.app;
+		const file = app.workspace.getActiveFile?.();
+		if (!(file instanceof TFile)) return null;
+		const base =
+			(app.vault?.adapter as { getBasePath?: () => string } | null)?.getBasePath?.() ?? "";
+		return [base.replace(/[\/]+$/, ""), file.path].filter(Boolean).join("/");
+	}
+
 	/** The active note's name + absolute path + content for the composer's
 	 *  insert-note button; null when there is no active file (or the vault can't
 	 *  read it — the smoke harness has no cachedRead). */
@@ -1101,9 +1112,8 @@ export class TerminalView extends ItemView {
 		if (typeof cachedRead !== "function") return null;
 		try {
 			const content = await cachedRead.call(app.vault, file);
-			const base =
-				(app.vault?.adapter as { getBasePath?: () => string } | null)?.getBasePath?.() ?? "";
-			const absPath = [base.replace(/[\/]+$/, ""), file.path].filter(Boolean).join("/");
+			const absPath = this.activeNoteAbsolutePath();
+			if (!absPath) return null;
 			return { name: file.basename || file.path, absPath, content };
 		} catch {
 			return null;

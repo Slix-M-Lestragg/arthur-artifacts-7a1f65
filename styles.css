@@ -2942,19 +2942,22 @@
 }
 .arthur-pi-composer-input::placeholder { color: var(--text-faint); }
 
-/* @-file suggest popup (fixed-positioned under the textarea cursor). */
+/* @-file hover tooltip: body-portaled and fixed ABOVE the textarea's top edge.
+ * Inline geometry supplies the full composer width and a ≤240px height budget;
+ * the tooltip layer keeps it above both xterm and the bottom composer. */
 .arthur-pi-file-suggest {
 	position: fixed;
-	z-index: var(--layer-popover, 60);
+	z-index: var(--layer-tooltip, 1000);
+	box-sizing: border-box;
 	background: var(--background-secondary);
 	border: 1px solid var(--background-modifier-border);
 	border-radius: var(--radius-m);
 	box-shadow: var(--shadow-l);
-	max-height: 16em;
+	max-height: 240px;
 	overflow-y: auto;
-	min-width: 20em;
-	max-width: 36em;
+	overscroll-behavior: contain;
 	padding: 2px;
+	pointer-events: auto;
 }
 .arthur-pi-file-item {
 	display: flex;
@@ -2965,7 +2968,8 @@
 	cursor: pointer;
 	font-size: var(--font-ui-smaller);
 }
-.arthur-pi-file-item.is-selected { background: var(--background-modifier-hover); color: var(--text-accent); }
+.arthur-pi-file-item.is-selected,
+.arthur-pi-file-item:hover { background: var(--background-modifier-hover); color: var(--text-accent); }
 .arthur-pi-file-item-name { white-space: nowrap; }
 .arthur-pi-file-item-path {
 	color: var(--text-muted);

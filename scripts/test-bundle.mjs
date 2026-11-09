@@ -8275,6 +8275,181 @@ try {
 	})();
 
 
+	// ---- 48. Wave C — notation-first composer, send chords, hovering @ tooltip
+	console.log("== 48. composer wikilink notation + Cmd/CtrlEnter + hovering @ tooltip ==");
+	await (async () => {
+		let checks48 = 0;
+		const failuresBefore48 = failures;
+		const assert48 = (cond, label) => { checks48++; assert(cond, label); };
+		const T = "arthur-pi-terminal";
+
+		// (a) Full wikilink rewrite table. arthur keeps its readable absolute-path
+		// contract, preserves heading/block anchors, and only resolves same-note
+		// links when the view supplies the active note's absolute path.
+		const resolve48 = (target) => target === "Note" ? "/vault/notes/Note.md" : null;
+		const rewriteCases48 = [
+			["[[Note]]", "/vault/notes/Note.md", "/vault/Current.md"],
+			["[[Note|alias]]", "/vault/notes/Note.md", "/vault/Current.md"],
+			["[[Note#heading]]", "/vault/notes/Note.md#heading", "/vault/Current.md"],
+			["[[Note#heading|alias]]", "/vault/notes/Note.md#heading", "/vault/Current.md"],
+			["[[Note#^blockid]]", "/vault/notes/Note.md#^blockid", "/vault/Current.md"],
+			["[[#heading]]", "/vault/Current.md#heading", "/vault/Current.md"],
+			["[[#^blockid]]", "/vault/Current.md#^blockid", "/vault/Current.md"],
+			["[[#heading|alias]]", "/vault/Current.md#heading", "/vault/Current.md"],
+			["[[#heading]]", "[[#heading]]", null],
+			["[[#^blockid]]", "[[#^blockid]]", undefined],
+			["[[Missing]]", "[[Missing]]", "/vault/Current.md"],
+			["[[Missing#heading]]", "[[Missing#heading]]", "/vault/Current.md"],
+			["[ordinary](Note.md)", "[ordinary](Note.md)", "/vault/Current.md"],
+		];
+		for (const [input, expected, current] of rewriteCases48) {
+			assert48(bundle.rewriteContextLinks(input, resolve48, current) === expected,
+				`(a) rewrite ${input} → ${expected}${current ? " (with note context)" : " (without note context)"}`);
+		}
+
+		// (b) Real view + pty: both modifiers send, with exact rewritten bytes.
+		await app.workspace.detachLeavesOfType(T);
+		await plugin.onunload(); await plugin.onload();
+		const current48 = new obsidianStub.TFile("folder/Current.md");
+		app.workspace.getActiveFile = () => current48;
+		app.metadataCache.getFirstLinkpathDest = (target) =>
+			target === "Note" ? new obsidianStub.TFile("notes/Note.md") : null;
+		const s48 = makeFakePtyFactory(); plugin.terminalManager.ptyFactory = s48.factory;
+		await plugin.activatePiTerminal({ cwd: "/tmp/wave-c48" });
+		const view48 = app.workspace.getLeavesOfType(T)[0].view;
+		const comp48 = view48.composer;
+		const pty48 = s48.ptys[0];
+		const fireKey48 = (init) => {
+			const ev = {
+				key: "Enter", metaKey: false, ctrlKey: false, shiftKey: false, altKey: false,
+				defaultPrevented: false, stopped: false, immediateStopped: false, ...init,
+				preventDefault() { this.defaultPrevented = true; },
+				stopPropagation() { this.stopped = true; },
+				stopImmediatePropagation() { this.immediateStopped = true; this.stopped = true; },
+			};
+			for (const h of comp48.textarea.handlers.get("keydown") ?? []) h(ev);
+			return ev;
+		};
+		comp48.textarea.value = "read [[Note#Heading]] + [[#^block48]]";
+		const writesCmd48 = pty48.writes.length;
+		const cmd48 = fireKey48({ metaKey: true });
+		assert48(cmd48.defaultPrevented && cmd48.stopped && cmd48.immediateStopped,
+			"(b) Cmd+Enter prevents the native key and stops Obsidian propagation");
+		assert48(pty48.writes.length === writesCmd48 + 1
+			&& pty48.writes.at(-1) === "\x1b[200~read /tmp/arthur-vault-root/notes/Note.md#Heading + /tmp/arthur-vault-root/folder/Current.md#^block48\x1b[201~\r",
+			"(b) Cmd+Enter writes exact bracketed-paste bytes with heading + same-note block paths");
+		comp48.textarea.value = "[[Note|alias]] [[Note#^block]]";
+		const ctrl48 = fireKey48({ ctrlKey: true });
+		assert48(ctrl48.defaultPrevented
+			&& pty48.writes.at(-1) === "\x1b[200~/tmp/arthur-vault-root/notes/Note.md /tmp/arthur-vault-root/notes/Note.md#^block\x1b[201~\r",
+			"(b) Ctrl+Enter sends too (alias stripped, block anchor retained)");
+		const beforeShift48 = pty48.writes.length;
+		comp48.textarea.value = "line one";
+		const shift48 = fireKey48({ shiftKey: true });
+		assert48(!shift48.defaultPrevented && pty48.writes.length === beforeShift48 && comp48.textarea.value === "line one",
+			"(b) Shift+Enter remains an unconsumed native newline and never sends");
+		const escIdle48 = fireKey48({ key: "Escape" });
+		assert48(!escIdle48.defaultPrevented && pty48.writes.length === beforeShift48,
+			"(b) Escape without a popup is untouched (existing close/cancel behavior preserved)");
+
+		// (c) @ overlay: newline trigger, body portal, full-width above-anchor
+		// geometry, keyboard navigation, hover + click accept.
+		const D48 = (name) => ({ name, isDirectory: () => true });
+		const F48 = (name) => ({ name, isDirectory: () => false });
+		const tree48 = {
+			"/tmp/wave-c48": [F48("alpha.md"), F48("beta.md"), D48("src")],
+			"/tmp/wave-c48/src": [F48("index.ts")],
+		};
+		comp48.suggester.opts.fs = { readdir: (dir) => {
+			if (!tree48[dir]) throw new Error(`ENOENT ${dir}`);
+			return tree48[dir];
+		} };
+		let anchorTop48 = 500;
+		comp48.textarea.getBoundingClientRect = () => ({
+			top: anchorTop48, left: 40, right: 520, bottom: anchorTop48 + 120,
+			width: 480, height: 120, x: 40, y: anchorTop48,
+		});
+		window.innerHeight = 800; window.innerWidth = 1000;
+		const openAt48 = async (text = "@") => {
+			comp48.suggester.hide();
+			comp48.textarea.value = text;
+			comp48.textarea.selectionStart = text.length;
+			comp48.textarea.selectionEnd = text.length;
+			for (const h of comp48.textarea.handlers.get("input") ?? []) h({});
+			await sleep(190);
+			return comp48.suggester;
+		};
+		const sug48 = await openAt48("first line\n@a");
+		assert48(sug48.isActive, "(c) @ at the start of a NEW LINE triggers completion");
+		const popup48 = sug48.popup;
+		assert48(!!popup48 && popup48._parent === document.body
+			&& popup48.classList.contains("arthur-pi-file-suggest--hover"),
+			"(c) hover tooltip is created at document.body, outside every clipping composer ancestor");
+		assert48(popup48.style.position === "fixed" && popup48.style.left === "40px"
+			&& popup48.style.width === "480px" && popup48.style.maxHeight === "240px"
+			&& parseFloat(popup48.style.top) < 500,
+			"(c) fixed overlay uses the full composer width and hovers above its top edge");
+		await openAt48("@");
+		const initial48 = sug48.selectedIndex;
+		fireKey48({ key: "ArrowDown" });
+		assert48(sug48.selectedIndex === (initial48 + 1) % sug48.items.length
+			&& sug48.itemEls[sug48.selectedIndex].classList.contains("is-selected"),
+			"(c) ArrowDown changes the active row and its highlight");
+		fireKey48({ key: "ArrowUp" });
+		assert48(sug48.selectedIndex === initial48, "(c) ArrowUp navigates back to the prior active row");
+		const betaIndex48 = sug48.items.findIndex((item) => item.value === "@beta.md");
+		sug48.itemEls[betaIndex48].handlers.get("mouseenter")[0]();
+		assert48(sug48.selectedIndex === betaIndex48, "(c) mouse hover highlights the row under the pointer");
+		sug48.itemEls[betaIndex48].handlers.get("click")[0]({ preventDefault() {} });
+		assert48(comp48.textarea.value === "@beta.md" && !sug48.isActive,
+			"(c) click accepts the hovered row, injects @path, and dismisses the tooltip");
+
+		// (d) Enter + Tab accept, Escape/blur dismiss, and ResizeObserver refit
+		// recomputes the fixed anchor after the composer moves.
+		await openAt48("@");
+		fireKey48({ key: "ArrowDown" });
+		const enterValue48 = sug48.items[sug48.selectedIndex].value;
+		fireKey48({ key: "Enter" });
+		assert48(comp48.textarea.value === enterValue48 && !sug48.isActive,
+			"(d) Enter accepts the keyboard-selected completion");
+		await openAt48("@");
+		const tabValue48 = sug48.items[sug48.selectedIndex].value;
+		fireKey48({ key: "Tab" });
+		assert48(comp48.textarea.value === tabValue48 && !sug48.isActive,
+			"(d) Tab accepts the active completion");
+		await openAt48("@");
+		const escPopup48 = fireKey48({ key: "Escape" });
+		assert48(escPopup48.defaultPrevented && escPopup48.stopped && !sug48.isActive,
+			"(d) Escape dismisses an active tooltip without leaking to the view");
+		await openAt48("@");
+		const oldTop48 = sug48.popup.style.top;
+		anchorTop48 = 420;
+		const ro48 = globalThis.ResizeObserver.instances.find((r) => !r.disconnected
+			&& String(r.target?.className ?? "").includes("arthur-pi-terminal-surface"));
+		ro48.cb([]);
+		assert48(sug48.popup.style.top !== oldTop48 && parseFloat(sug48.popup.style.top) < 420,
+			"(d) the existing view ResizeObserver → composer.refit re-anchors the visible tooltip");
+		for (const h of comp48.textarea.handlers.get("blur") ?? []) h({});
+		await sleep(180);
+		assert48(!sug48.isActive, "(d) textarea blur dismisses the tooltip after the mouse-safe delay");
+
+		// (e) Mod+Enter must ALSO send while @ owns ordinary keyboard input.
+		await openAt48("@");
+		const beforePopupSend48 = pty48.writes.length;
+		const popupSend48 = fireKey48({ metaKey: true });
+		assert48(popupSend48.defaultPrevented && pty48.writes.length === beforePopupSend48 + 1
+			&& pty48.writes.at(-1) === "\x1b[200~@\x1b[201~\r" && !sug48.isActive,
+			"(e) Cmd+Enter sends through an active @ tooltip and dismisses it after send");
+		const css48 = fs.readFileSync(path.join(root, "styles.css"), "utf8");
+		assert48(/\.arthur-pi-file-suggest\s*\{[^}]*z-index:\s*var\(--layer-tooltip,\s*1000\)[^}]*max-height:\s*240px/s.test(css48),
+			"(e) tooltip CSS uses Obsidian theme chrome, tooltip stacking, and a 240px scroll cap");
+
+		await app.workspace.detachLeavesOfType(T);
+		assert48(failuresBefore48 === failures, "§48 all composer Wave-C assertions passed");
+		if (failuresBefore48 === failures) console.log(`§48 PASS: ${checks48} assertions`);
+	})();
+
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();

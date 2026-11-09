@@ -65,7 +65,7 @@ function realFs(): FsDeps {
 
 // ------------------------------------------------------------------ trigger
 
-const PATH_DELIMITERS = new Set([" ", "\t", "\"", "'", "="]);
+const PATH_DELIMITERS = new Set([" ", "\t", "\n", "\r", "\"", "'", "="]);
 
 function findLastDelimiter(text: string): number {
 	for (let i = text.length - 1; i >= 0; i--) {
@@ -296,9 +296,11 @@ export interface FileAtSuggesterOptions {
 }
 
 /**
- * The popup controller: watches the composer textarea, shows the fuzzy list
- * under the cursor, and handles Esc / arrows / Enter+Tab selection. Popup rows
- * are kept in an array (no querySelectorAll — the smoke DOM shim lacks it).
+ * The popup controller: watches the composer textarea and shows a document-level
+ * hover list ABOVE the composer's top edge (a bottom-docked textarea has no
+ * usable space below it). Handles Esc / arrows / Enter+Tab selection and mouse
+ * hover/click. Popup rows are kept in an array (no querySelectorAll — the smoke
+ * DOM shim lacks it).
  */
 export class FileAtSuggester {
 	private popup: HTMLElement | null = null;
@@ -316,6 +318,7 @@ export class FileAtSuggester {
 		// Delay so a row mousedown (preventDefault → no blur) still registers.
 		window.setTimeout(() => this.hide(), 150);
 	};
+	private readonly onReposition = (): void => this.reposition();
 
 	constructor(
 		private readonly textarea: HTMLTextAreaElement,
@@ -325,6 +328,9 @@ export class FileAtSuggester {
 		textarea.addEventListener("input", this.onInput);
 		textarea.addEventListener("keydown", this.onKeydown);
 		textarea.addEventListener("blur", this.onBlur);
+		const doc = textarea.ownerDocument ?? document;
+		(doc.defaultView ?? window).addEventListener("resize", this.onReposition);
+		doc.addEventListener("scroll", this.onReposition, true);
 	}
 
 	get isActive(): boolean {
@@ -380,37 +386,81 @@ export class FileAtSuggester {
 		}
 		const doc = this.textarea.ownerDocument ?? document;
 		if (!this.popup) {
-			this.popup = el("div", { cls: "arthur-pi-file-suggest" });
+			this.popup = el("div", {
+				cls: "arthur-pi-file-suggest arthur-pi-file-suggest--hover",
+				attrs: { role: "listbox", "aria-label": "File completions" },
+			});
+			// Portal to body: neither composer overflow nor xterm stacking can clip it.
 			doc.body.appendChild(this.popup);
 		}
 		const popup = this.popup;
 		popup.empty();
 		this.itemEls = [];
 		this.items.forEach((item, i) => {
-			const row = el("div", { cls: "arthur-pi-file-item" + (i === this.selectedIndex ? " is-selected" : "") });
+			const row = el("div", {
+				cls: "arthur-pi-file-item" + (i === this.selectedIndex ? " is-selected" : ""),
+				attrs: { role: "option", "aria-selected": String(i === this.selectedIndex) },
+			});
 			row.append(el("span", { cls: "arthur-pi-file-item-name", text: item.label }));
 			if (item.description) {
 				row.append(el("span", { cls: "arthur-pi-file-item-path", text: ` — ${item.description}` }));
 			}
-			row.addEventListener("mousedown", (e) => {
-				e.preventDefault(); // keep focus in the textarea
+			row.addEventListener("mouseenter", () => {
+				this.selectedIndex = i;
+				this.updateSelection();
+			});
+			row.addEventListener("mousedown", (e) => e.preventDefault()); // keep textarea focus
+			row.addEventListener("click", (e) => {
+				e.preventDefault();
 				this.select(i);
 			});
 			popup.append(row);
 			this.itemEls.push(row);
 		});
+		popup.style.display = "block";
+		this.reposition();
+	}
+
+	/** Re-anchor the body-portaled overlay to the textarea's TOP edge. Called by
+	 *  render, window/document scroll+resize, and PromptComposer.refit() (the
+	 *  terminal view's existing ResizeObserver path). */
+	reposition(): void {
+		const popup = this.popup;
+		if (!this.active || !popup) return;
 		const rect = this.textarea.getBoundingClientRect();
+		const doc = this.textarea.ownerDocument ?? document;
+		const win = doc.defaultView ?? window;
+		const viewportH = Number(win.innerHeight) || 0;
+		const viewportW = Number(win.innerWidth) || 0;
+		const gap = 6;
+		const margin = 8;
+		const available = Math.max(0, rect.top - gap - margin);
+		const maxHeight = rect.top > 0 ? Math.max(48, Math.min(240, available)) : 240;
+		const width = Math.max(0, rect.width);
+		const left = viewportW > 0 && width > 0
+			? Math.max(margin, Math.min(rect.left, viewportW - width - margin))
+			: rect.left;
 		popup.style.position = "fixed";
-		popup.style.top = `${rect.bottom + 4}px`;
-		popup.style.left = `${rect.left}px`;
-		popup.style.minWidth = `${Math.max(rect.width, 200)}px`;
+		popup.style.left = `${left}px`;
+		popup.style.width = `${width}px`;
+		popup.style.minWidth = "0";
+		popup.style.maxWidth = "none";
+		popup.style.maxHeight = `${maxHeight}px`;
+		const measured = Number(popup.offsetHeight) || Math.min(maxHeight, this.items.length * 28 + 4);
+		const height = Math.min(maxHeight, measured);
+		let top = Math.max(margin, rect.top - height - gap);
+		if (viewportH > 0) top = Math.min(top, Math.max(margin, viewportH - height - margin));
+		popup.style.top = `${top}px`;
+		popup.style.bottom = "auto";
 		popup.style.display = "block";
 	}
 
 	private updateSelection(): void {
 		this.itemEls.forEach((elm, i) => {
 			elm.classList.toggle("is-selected", i === this.selectedIndex);
+			elm.setAttribute("aria-selected", String(i === this.selectedIndex));
 		});
+		this.itemEls[this.selectedIndex]?.scrollIntoView?.({ block: "nearest" });
 	}
 
 	// -- keyboard -------------------------------------------------------------
@@ -465,6 +515,10 @@ export class FileAtSuggester {
 	// -- lifecycle ------------------------------------------------------------
 
 	hide(): void {
+		if (this.debounceTimer != null) {
+			window.clearTimeout(this.debounceTimer);
+			this.debounceTimer = null;
+		}
 		this.active = false;
 		this.currentPrefix = null;
 		this.items = [];
@@ -481,6 +535,9 @@ export class FileAtSuggester {
 		this.textarea.removeEventListener("input", this.onInput);
 		this.textarea.removeEventListener("keydown", this.onKeydown);
 		this.textarea.removeEventListener("blur", this.onBlur);
+		const doc = this.textarea.ownerDocument ?? document;
+		(doc.defaultView ?? window).removeEventListener("resize", this.onReposition);
+		doc.removeEventListener("scroll", this.onReposition, true);
 		this.popup?.remove();
 		this.popup = null;
 		this.active = false;
