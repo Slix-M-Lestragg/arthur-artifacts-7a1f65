@@ -6806,6 +6806,220 @@ try {
 	})();
 
 
+	// ---- 40. pi prompt composer (drafts / bracketed-paste submit / rewrite / @-files / image paste / clamp) -
+	console.log("== 40. pi prompt composer (drafts / bracketed-paste submit / wikilink context / @-files / image paste / clamp) ==");
+	await (async () => {
+		const T = "arthur-pi-terminal";
+		// Fresh lifecycle — clean manager (draft store) + terminal leaves.
+		await app.workspace.detachLeavesOfType(T);
+		await plugin.onunload();
+		await plugin.onload();
+
+		// (a) exports + settings additions (incl. forced 'paste' + clamps).
+		assert(typeof bundle.buildPasteSubmit === "function" && typeof bundle.clampComposerHeight === "function",
+			"(a) bundle exports buildPasteSubmit + clampComposerHeight");
+		assert(bundle.PASTE_START === "\x1b[200~" && bundle.PASTE_END === "\x1b[201~",
+			"(a) bracketed-paste marker constants are the xterm paste sequences");
+		assert(typeof bundle.rewriteContextLinks === "function" && typeof bundle.PromptComposer === "function",
+			"(a) bundle exports rewriteContextLinks + PromptComposer");
+		assert(typeof bundle.extractAtPrefix === "function" && typeof bundle.listAtSuggestions === "function"
+			&& typeof bundle.insertCompletion === "function" && typeof bundle.walkFilesystem === "function",
+			"(a) bundle exports the @-suggester surface");
+		assert(plugin.settings.piTerminalPromptSubmitMode === "paste", "(a) default submit mode = paste (APC not offered)");
+		assert(plugin.settings.piTerminalClearPromptOnSubmit === true, "(a) default clearPromptOnSubmit = true");
+		assert(plugin.settings.piTerminalComposerVisible === true, "(a) default composer visible = true");
+		assert(plugin.settings.piTerminalComposerMaxHeight === 50, "(a) default composer max height = 50%");
+		// Saved drift: 'apc' is forced back to paste; max-height clamps to the 60% cap.
+		const raw40 = JSON.parse(JSON.stringify(plugin._data ?? {}));
+		raw40.piTerminalPromptSubmitMode = "apc";
+		raw40.piTerminalComposerMaxHeight = 80;
+		raw40.piTerminalComposerVisible = false;
+		raw40.piTerminalClearPromptOnSubmit = false;
+		plugin._data = raw40;
+		await plugin.loadSettings();
+		assert(plugin.settings.piTerminalPromptSubmitMode === "paste", "(a) loadSettings FORCES submit mode back to paste (no APC option)");
+		assert(plugin.settings.piTerminalComposerMaxHeight === 60, "(a) max-height 80% clamped to the 60% hard cap");
+		assert(plugin.settings.piTerminalComposerVisible === false && plugin.settings.piTerminalClearPromptOnSubmit === false,
+			"(a) saved composerVisible / clearPromptOnSubmit honored");
+		// Restore defaults for the interactive parts below.
+		plugin.settings.piTerminalPromptSubmitMode = "paste";
+		plugin.settings.piTerminalComposerMaxHeight = 50;
+		plugin.settings.piTerminalComposerVisible = true;
+		plugin.settings.piTerminalClearPromptOnSubmit = true;
+
+		// (b) composer panel: bottom-docked, visible by default, per-instance drafts.
+		const s40 = makeFakePtyFactory();
+		plugin.terminalManager.ptyFactory = s40.factory;
+		await plugin.activatePiTerminal({ cwd: "/tmp/c40a" });
+		const viewA = app.workspace.getLeavesOfType(T).find((l) => l.view.boundCwd === "/tmp/c40a")?.view;
+		const compA = viewA?.composer;
+		assert(!!compA, "(b) composer panel attached to the terminal view");
+		assert(compA.isVisible === true, "(b) composer visible by default (setting on)");
+		const wrapA = viewA.contentEl.children[0];
+		assert(wrapA.children[wrapA.children.length - 1] === compA.rootEl,
+			"(b) composer docked at the BOTTOM of the view (last flex child)");
+		assert(compA.textarea != null && compA.resizerEl != null && compA.suggester != null,
+			"(b) textarea + resizer + @-suggester present");
+		// Type into instance A → draft stored under ITS cwd.
+		compA.textarea.value = "draft alpha";
+		compA.textarea.handlers.get("input")[0]?.();
+		assert(plugin.terminalManager.getDraft("/tmp/c40a") === "draft alpha",
+			"(b) input persists a per-instance draft (in-memory, keyed by cwd)");
+		// Second instance: its own composer + independent draft.
+		await plugin.activatePiTerminal({ cwd: "/tmp/c40b" });
+		const viewB = app.workspace.getLeavesOfType(T).find((l) => l.view.boundCwd === "/tmp/c40b")?.view;
+		const compB = viewB?.composer;
+		assert(!!compB && compB !== compA, "(b) each terminal leaf owns its own composer");
+		assert(plugin.terminalManager.getDraft("/tmp/c40b") === "", "(b) instance B draft starts empty (no bleed from A)");
+		compB.textarea.value = "draft beta";
+		compB.textarea.handlers.get("input")[0]?.();
+		assert(plugin.terminalManager.getDraft("/tmp/c40a") === "draft alpha"
+			&& plugin.terminalManager.getDraft("/tmp/c40b") === "draft beta",
+			"(b) drafts stay per-instance after B types");
+		// Restore on leaf focus: wipe the textarea, fire the view's focusin.
+		compA.textarea.value = "";
+		document.activeElement = null;
+		for (const h of viewA.contentEl.handlers.get("focusin") ?? []) h({});
+		assert(compA.textarea.value === "draft alpha", "(b) leaf focus restores the instance draft into the composer");
+
+		// (c) submit semantics: bracketed paste + Enter, Mod+Enter vs plain Enter.
+		compA.textarea.value = "line1\nline2";
+		compA.textarea.handlers.get("input")[0]?.();
+		const writesC = s40.ptys[0].writes.length;
+		const evMod = {
+			key: "Enter", metaKey: true, ctrlKey: false, shiftKey: false, defaultPrevented: false,
+			preventDefault() { this.defaultPrevented = true; }, stopPropagation() {},
+		};
+		for (const h of compA.textarea.handlers.get("keydown") ?? []) h(evMod);
+		assert(evMod.defaultPrevented, "(c) Mod+Enter is captured in the composer (never reaches xterm)");
+		const submitted = s40.ptys[0].writes.slice(writesC);
+		assert(submitted.length === 1 && submitted[0] === "\x1b[200~line1\nline2\x1b[201~\r",
+			"(c) exact byte sequence: ESC[200~ + multi-line text + ESC[201~ + ONE trailing Enter");
+		assert(compA.textarea.value === "", "(c) clear-on-submit (default on) empties the textarea");
+		assert(plugin.terminalManager.getDraft("/tmp/c40a") === "", "(c) …and clears the stored draft");
+		assert(String(compA.sentEl.textContent ?? "").includes("sent"), "(c) transient 'sent' affordance shown");
+		// Plain Enter → newline only (no submit, no capture).
+		const writesPlain = s40.ptys[0].writes.length;
+		const evPlain = {
+			key: "Enter", metaKey: false, ctrlKey: false, shiftKey: false, defaultPrevented: false,
+			preventDefault() { this.defaultPrevented = true; }, stopPropagation() {},
+		};
+		for (const h of compA.textarea.handlers.get("keydown") ?? []) h(evPlain);
+		assert(!evPlain.defaultPrevented && s40.ptys[0].writes.length === writesPlain,
+			"(c) plain Enter is a plain newline (does NOT submit)");
+		// ESC stripping: text containing ESC can't break out of the paste.
+		plugin.settings.piTerminalClearPromptOnSubmit = false;
+		compA.textarea.value = "a\x1b[201~b";
+		const writesEsc = s40.ptys[0].writes.length;
+		for (const h of compA.textarea.handlers.get("keydown") ?? []) h({
+			key: "Enter", metaKey: true, ctrlKey: false, defaultPrevented: false,
+			preventDefault() { this.defaultPrevented = true; }, stopPropagation() {},
+		});
+		assert(s40.ptys[0].writes.slice(writesEsc).join("") === "\x1b[200~a[201~b\x1b[201~\r",
+			"(c) ESC bytes stripped from the text before wrapping (no mid-paste breakout)");
+		assert(compA.textarea.value === "a\x1b[201~b", "(c) clear-on-submit OFF keeps the text after send");
+		plugin.settings.piTerminalClearPromptOnSubmit = true;
+
+		// (d) context rewrite on submit: wikilink / image embed / section / alias / unresolved.
+		const res40 = (t) => (t === "Note" ? "/v/note.md" : t === "img.png" ? "/v/img.png" : null);
+		assert(bundle.rewriteContextLinks("[[Note|alias]]", res40) === "/v/note.md",
+			"(d) [[Note|alias]] → absolute path (alias dropped)");
+		assert(bundle.rewriteContextLinks("[[Note#Sec]]", res40) === "/v/note.md#Sec",
+			"(d) [[Note#Sec]] keeps the #section suffix");
+		assert(bundle.rewriteContextLinks("![[img.png]]", res40) === "/v/img.png",
+			"(d) ![[image]] → bare absolute path (embed marker + wikilink dropped)");
+		assert(bundle.rewriteContextLinks("![[img.png#page=2]]", res40) === "/v/img.png#page=2",
+			"(d) image embed keeps its #suffix");
+		assert(bundle.rewriteContextLinks("see [[Missing]] now", res40) === "see [[Missing]] now",
+			"(d) unresolved links left verbatim");
+		assert(bundle.rewriteContextLinks("[[Note]] + [[Missing]]", res40) === "/v/note.md + [[Missing]]",
+			"(d) mixed line rewrites only the resolved links");
+
+		// (e) @-suggester: trigger boundary + fuzzy filtering + dir drilling (fake fs).
+		assert(bundle.extractAtPrefix("read @src/") === "@src/", "(e) '@' after a space triggers");
+		assert(bundle.extractAtPrefix("foo@bar") === null, "(e) '@' mid-token does NOT trigger");
+		assert(bundle.extractAtPrefix("x = @") === "@", "(e) '@' after '=' delimiter triggers");
+		assert(bundle.extractAtPrefix("hello ") === null, "(e) bare text without '@' never triggers");
+		assert(bundle.extractAtPrefix('say @"my dir/f') === '@"my dir/f', "(e) quoted @path prefix captured");
+		const D = (name) => ({ name, isDirectory: () => true });
+		const F = (name) => ({ name, isDirectory: () => false });
+		const tree40 = {
+			"/w": [D("src"), F("README.md"), D(".git"), D("node_modules")],
+			"/w/src": [F("index.ts"), D("lib")],
+			"/w/src/lib": [F("util.ts")],
+		};
+		const fakeFs40 = { readdir: (p) => { if (!tree40[p]) throw new Error(`ENOENT ${p}`); return tree40[p]; } };
+		const vals0 = bundle.listAtSuggestions("/w", "", fakeFs40).map((s) => s.value);
+		assert(vals0.includes("@src/") && vals0.includes("@README.md"), "(e) root listing offers dirs + files");
+		assert(vals0.includes("@src/index.ts") && vals0.includes("@src/lib/"), "(e) walk recurses into subdirectories");
+		assert(!vals0.includes("@.git/") && !vals0.includes("@node_modules/"), "(e) .git + node_modules skipped");
+		const valsFuzz = bundle.listAtSuggestions("/w", "rdm", fakeFs40).map((s) => s.value);
+		assert(valsFuzz.includes("@README.md") && !valsFuzz.includes("@src/"), "(e) fuzzy filter keeps only matches (rdm → README.md)");
+		const ins40 = bundle.insertCompletion("look @sr", 5, 8, "@src/");
+		assert(ins40.value === "look @src/" && ins40.cursor === 10, "(e) dir completion inserts '@src/' at the cursor");
+		assert(bundle.extractAtPrefix(ins40.value) === "@src/", "(e) inserted dir prefix re-arms the trigger for drilling");
+		const valsDrill = bundle.listAtSuggestions("/w", "src/", fakeFs40).map((s) => s.value);
+		assert(valsDrill.includes("@src/index.ts") && valsDrill.includes("@src/lib/util.ts")
+			&& !valsDrill.includes("@README.md"), "(e) drilled query lists only under src/");
+		// Depth + entry caps.
+		assert(bundle.MAX_WALK_DEPTH === 4 && bundle.MAX_WALK_ENTRIES === 2000,
+			"(e) walk caps: depth 4, 2000 entries");
+		const deep40 = {};
+		for (let i = 1; i <= 5; i++) {
+			deep40[i === 1 ? "/d" : `/d/${Array.from({ length: i - 1 }, (_, j) => `x${j + 1}`).join("/")}`] = [D(`x${i}`)];
+		}
+		deep40["/d/x1/x2/x3/x4/x5"] = [];
+		const fsDeep40 = { readdir: (p) => { if (!deep40[p]) throw new Error("ENOENT"); return deep40[p]; } };
+		const valsDeep = bundle.listAtSuggestions("/d", "", fsDeep40).map((s) => s.value);
+		assert(valsDeep.includes("@x1/x2/x3/x4/"), "(e) level-4 directories are collected");
+		assert(!valsDeep.includes("@x1/x2/x3/x4/x5/"), "(e) level-5 never walked (depth cap)");
+		const fsBig40 = { readdir: (p) => (p === "/big" ? Array.from({ length: 2100 }, (_, i) => F(`f${i}.txt`)) : []) };
+		assert(bundle.walkFilesystem("/big", fsBig40).length === bundle.MAX_WALK_ENTRIES,
+			"(e) entry cap stops the walk at 2000 entries");
+
+		// (f) image-paste passthrough in the TERMINAL view (xterm surface).
+		const surface40 = findByClass(viewA.contentEl, "arthur-pi-terminal-surface")[0];
+		const pasteH = surface40?.handlers.get("paste")?.[0];
+		assert(typeof pasteH === "function", "(f) capture-phase paste interceptor wired on the xterm surface");
+		const mkPaste = (types) => ({
+			clipboardData: { items: types.map((t) => ({ type: t })) },
+			prevented: false, stopped: false,
+			preventDefault() { this.prevented = true; },
+			stopImmediatePropagation() { this.stopped = true; },
+			stopPropagation() { this.stopped = true; },
+		});
+		const writesF = s40.ptys[0].writes.length;
+		const imgEv = mkPaste(["image/png"]);
+		pasteH(imgEv);
+		assert(imgEv.prevented && imgEv.stopped, "(f) image-only paste swallowed (never reaches xterm text paste)");
+		assert(s40.ptys[0].writes.length === writesF + 1 && s40.ptys[0].writes.at(-1) === "\x16",
+			"(f) image paste writes Ctrl+V (\x16) so pi reads the OS clipboard itself");
+		const txtEv = mkPaste(["text/plain"]);
+		const writesF2 = s40.ptys[0].writes.length;
+		pasteH(txtEv);
+		assert(!txtEv.prevented && !txtEv.stopped && s40.ptys[0].writes.length === writesF2,
+			"(f) text-only paste untouched (xterm's own paste runs)");
+		const noItems = { clipboardData: null, prevented: false, preventDefault() { this.prevented = true; }, stopImmediatePropagation() {}, stopPropagation() {} };
+		pasteH(noItems);
+		assert(noItems.prevented === false, "(f) paste without clipboardData degrades to a no-op");
+
+		// (g) resizer clamp (pure).
+		assert(bundle.clampComposerHeight(500, 400, 50) === 200, "(g) drag clamps to 50% of a 400px leaf");
+		assert(bundle.clampComposerHeight(999, 400, 60) === 240, "(g) the 60% hard cap bounds the clamp");
+		assert(bundle.clampComposerHeight(10, 400, 50) === bundle.COMPOSER_MIN_HEIGHT,
+			"(g) never shrinks below the min height");
+		assert(bundle.clampComposerHeight(150, 400, 50) === 150, "(g) in-range heights pass through");
+
+		// (h) hide toggle: panel's `hide` button + the state-line ⌨ toggle.
+		compA.setVisible(false);
+		assert(compA.isVisible === false && compA.rootEl.style.display === "none", "(h) hide button hides the panel");
+		const toggleBtn = findButton(viewA.stateEl, "⌨");
+		assert(!!toggleBtn, "(h) state line carries the composer toggle button");
+		toggleBtn?.handlers.get("click")[0]?.({ preventDefault() {}, stopPropagation() {} });
+		assert(compA.isVisible === true && compA.rootEl.style.display === "", "(h) state-line toggle brings it back");
+	})();
+
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();
@@ -6824,4 +7038,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / local-pty-terminal-spawn-args+pty→xterm+xterm→pty+resize+exit-state / local-pty-resolver-absolute-path-require+no-native-load / local-terminal-view-lazy-no-cwd+attach+close-kill+reopen / local-terminal-manager-per-cwd-routing+3-leaves+isolation+reuse+full-unload-kill-all / local-terminal-picker-fake-sessions-dir+select→open+vault-root+cwd-input+mobile-hide / ahp-client-load-retry-resilience-819e2bb-regression / pi-instance-states+badge-CSS-classes+focus-clears-awaiting / slash-toolbar-payload-bytes-new+compact+thinking / session-resume-spawn-args+listSessionFilesForCwd+respawn / send-active-note+selection-payload+wikilink-rewrite+no-terminal-notice / terminal-settings-plumbing-fontSize+scrollback+new-only / theme-follow-xterm-styling-var→ITheme+fallbacks+applyTheme / instance-picker+ribbon-command-routing+open-instances all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / local-pty-terminal-spawn-args+pty→xterm+xterm→pty+resize+exit-state / local-pty-resolver-absolute-path-require+no-native-load / local-terminal-view-lazy-no-cwd+attach+close-kill+reopen / local-terminal-manager-per-cwd-routing+3-leaves+isolation+reuse+full-unload-kill-all / local-terminal-picker-fake-sessions-dir+select→open+vault-root+cwd-input+mobile-hide / ahp-client-load-retry-resilience-819e2bb-regression / pi-instance-states+badge-CSS-classes+focus-clears-awaiting / slash-toolbar-payload-bytes-new+compact+thinking / session-resume-spawn-args+listSessionFilesForCwd+respawn / send-active-note+selection-payload+wikilink-rewrite+no-terminal-notice / terminal-settings-plumbing-fontSize+scrollback+new-only / theme-follow-xterm-styling-var→ITheme+fallbacks+applyTheme / instance-picker+ribbon-command-routing+open-instances / pi-prompt-composer-drafts+bracketed-paste-submit+wikilink-context+@-files+image-paste+resizer-clamp all clean");

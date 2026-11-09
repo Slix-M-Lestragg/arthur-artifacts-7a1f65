@@ -99,3 +99,64 @@ On top of the local-pty backend, Wave 1 ports the obsidian-pi terminal-foundatio
 - **Theme-follow xterm styling** (`src/ui/terminal-theme.ts`): the xterm `ITheme` is derived from Obsidian CSS vars (`--background-primary` → background, `--text-normal` → foreground+cursor, `--interactive-accent` → selection) at construct and re-applied to every open terminal on `workspace.on('css-change')` (theme switch). Empty vars fall back to documented dark defaults.
 
 Smoke coverage (sections 33–39): state transitions + badge CSS classes on focus/blur, toolbar slash payload bytes written to the pty (incl. Thinking's no-`\r` escape), resume spawn args (`pi --session <abs>`) + `listSessionFilesForCwd` + `respawnWithSession`, send-note payload shape (title + abs path + wikilink rewrite + trailing `\r` + unresolved-left-verbatim + no-terminal Notice), settings plumbing (`fontSize`/`scrollback` → xterm options on construct, new-only), theme var → `ITheme` mapping + fallbacks + `applyTheme` re-apply, instance picker + ribbon command routing. All existing sections remain green.
+
+## Wave 2 — prompt surface (composer)
+
+The docked prompt composer ports the reference plugin's prompt surface (its
+`embedded` popout surface minus the popout/docked-window modes) as a plain
+textarea strip at the **bottom of each terminal view** — deliberately WITHOUT
+the APC submit marker: APC needs the obsidian-bridge pi extension, which arthur
+doesn't install, so submission uses the **bracketed-paste path**:
+`\x1b[200~<text>\x1b[201~` + a single trailing `\r` (the Enter lands after the
+paste-end marker, so a newline inside the text can never submit mid-paste;
+ESC bytes are stripped from the text first so embedded note content can't
+break out of the paste and inject keystrokes — reference `PtyClient.
+submitPromptViaPaste`).
+
+- **Composer panel** (`src/ui/prompt-composer.ts`, mounted by
+  `terminal-view.ts` after the xterm surface): drag resizer (min 72 px, clamped
+  to `piTerminalComposerMaxHeight` % of the leaf with a hard 60% cap),
+  multiline textarea, Mod+Enter submit / plain Enter newline (keystrokes in the
+  composer never reach xterm), transient `✓ sent` flash, `hide` button plus a
+  `⌨` toggle in the state line. Toolbar buttons (small lucide icons, text
+  fallback): send, insert active note (content block, links rewritten), insert
+  selection, insert a bare `[[…]]` token with the cursor between the brackets,
+  and a word/char-count toggle.
+- **Per-instance drafts**: in-memory on the `TerminalManager`, keyed by cwd
+  (`getDraft`/`setDraft`) — written on every input, restored on leaf focus and
+  on cwd change, cleared with the text when `piTerminalClearPromptOnSubmit` is
+  on (default true); wiped on plugin unload (`closeAll`), never persisted.
+- **Context rewriting on submit**: factored out of `terminal-note.ts` into
+  `src/ui/link-rewrite.ts` (`rewriteContextLinks`) so both the send-note
+  commands and the composer share it. Now also handles `![[image]]` embeds →
+  bare absolute path; `#section` suffixes preserved, aliases (and the embed
+  `!`) dropped, unresolved links verbatim. The composer's resolver is the same
+  `metadataCache.getFirstLinkpathDest` + vault-base-path wiring as send-note.
+- **@-file autocomplete** (`src/ui/at-suggester.ts`): `@` at a token boundary
+  (space/tab/quote/`=` delimiters, incl. unclosed `@"quoted paths`) opens a
+  fuzzy popup over the terminal's cwd — a **pure Node `fs` walk, no `fd`
+  binary**: depth ≤ 4 levels, ≤ 2000 entries per walk, `.git`/`node_modules`
+  skipped, top 50 scored (`MAX_WALK_*` / `MAX_SUGGESTIONS` exported). Files
+  insert `@path/to/file`, directories insert `@dir/` for drilling; Esc
+  dismisses, arrows + Enter/Tab select; the fs surface is injected (`FsDeps`)
+  so smoke drives it over a fake tree.
+- **Image paste passthrough**: a capture-phase `paste` listener on the xterm
+  SURFACE — image-only clipboard → swallowed + `pty.write('\x16')` (Ctrl+V) so
+  pi reads the OS clipboard itself (reference `TerminalView.bootTerminal`);
+  text pastes fall through to xterm untouched. The composer textarea sits
+  outside the surface, so composer pastes are unaffected.
+- **Settings** (Settings → Pi terminal): `piTerminalPromptSubmitMode` — fixed
+  to `paste`, documented, NO selector yet (APC needs the bridge extension) and
+  any saved value is forced back on load; `piTerminalClearPromptOnSubmit`
+  (bool, default true); `piTerminalComposerVisible` (bool, default true);
+  `piTerminalComposerMaxHeight` (number, default 50, clamped 20–60).
+
+Smoke coverage (section 40, 62 assertions): settings defaults + forced-paste
+normalization + clamps, bottom-docked composer, per-instance draft
+persist/restore, exact bracketed-paste byte sequence around multi-line text
+with one trailing Enter, ESC-strip breakout guard, clear-on-submit on/off,
+Mod+Enter vs plain Enter, all wikilink/embed rewrite cases, @-trigger
+boundaries + fuzzy filtering + dir drilling + depth/entry caps over an injected
+fake fs, image-paste gating (`\x16` vs untouched text paste), resizer clamp
+math, and the hide/state-line toggle round-trip. All existing sections remain
+green.

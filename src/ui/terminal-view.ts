@@ -25,6 +25,17 @@
  *     applied to NEW terminals (existing ones keep theirs — documented in the
  *     settings tab).
  *
+ * WAVE 2 additions (prompt surface):
+ *   - PROMPT COMPOSER (prompt-composer.ts): a drag-resizable multiline textarea
+ *     panel docked at the BOTTOM of the view — per-instance in-memory drafts
+ *     (TerminalManager), Mod+Enter submit / plain Enter newline, toolbar
+ *     inserters + word/char count + hide toggle, and an @-file suggester.
+ *   - BRACKETED-PASTE SUBMIT: links rewritten to absolute paths, then
+ *     `ESC[200~<text>ESC[201~\r` into the pty (the Enter lands after the
+ *     paste-end marker — a newline in the text never submits mid-paste).
+ *   - IMAGE PASTE passthrough: an image-only clipboard paste inside the xterm
+ *     surface writes `\x16` (Ctrl+V) so pi reads the OS clipboard itself.
+ *
  * Lifecycle (kept from the prior architecture, new backend):
  *   - LAZY everything: onOpen only builds the container + state line + toolbar;
  *     the xterm Terminal/FitAddon are constructed (and opened) on the FIRST
@@ -36,7 +47,7 @@
  *   - The state line reuses the ahp-view state classes (arthur-ahp-state /
  *     arthur-note) for a consistent vocabulary PLUS the new pi state badge.
  */
-import { getIcon, ItemView, WorkspaceLeaf } from "obsidian";
+import { getIcon, ItemView, TFile, WorkspaceLeaf } from "obsidian";
 import { Terminal, type IDisposable } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 
@@ -55,6 +66,8 @@ import {
 } from "./terminal-state";
 import { buildXtermTheme, readObsidianThemeVars } from "./terminal-theme";
 import { listSessionFilesForCwd, defaultPiSessionsDir } from "./terminal-picker";
+import { PromptComposer, buildPasteSubmit, type ComposerHost } from "./prompt-composer";
+import { rewriteContextLinks, type LinkResolver } from "./link-rewrite";
 
 export const VIEW_TYPE_PI_TERMINAL = "arthur-pi-terminal";
 
@@ -82,6 +95,12 @@ export class TerminalView extends ItemView {
 	private surfaceEl: HTMLElement | null = null;
 	/** The slash-toolbar root (state-line row). */
 	private toolbarEl: HTMLElement | null = null;
+	/** The Wave 2 prompt-composer panel (docked at the view's bottom). */
+	private composer: PromptComposer | null = null;
+	/** Capture-phase image-paste interceptor on the xterm surface. */
+	private pasteHandler: ((e: ClipboardEvent) => void) | null = null;
+	/** contentEl focusin → restore the composer draft (leaf focus). */
+	private contentFocusHandler: (() => void) | null = null;
 
 	/** The local pty for this leaf (one per terminal); null until a cwd
 	 *  arrives / after teardown. */
@@ -204,6 +223,8 @@ export class TerminalView extends ItemView {
 		this.sessionFile = sessionFile;
 		this.resetActivity();
 		this.renderState();
+		// A different instance's draft belongs to the new cwd.
+		this.composer?.restoreDraft();
 		await this.maybeAttach();
 	}
 
@@ -213,6 +234,12 @@ export class TerminalView extends ItemView {
 		this.stateEl = wrap.createEl("div", { cls: "arthur-ahp-state-line arthur-pi-state-line" });
 		this.badgeEl = this.stateEl.createEl("span", { cls: "arthur-pi-badge arthur-pi-state-idle" });
 		this.surfaceEl = wrap.createEl("div", { cls: "arthur-pi-terminal-surface" });
+		// Wave 2: the prompt composer docked BELOW the surface (wrap is a flex
+		// column — appending last pins it to the bottom of the leaf).
+		this.composer = new PromptComposer(wrap, this.makeComposerHost(), this.plugin);
+		// Leaf focus (xterm OR composer) restores this instance's draft.
+		this.contentFocusHandler = () => this.composer?.restoreDraft();
+		this.contentEl.addEventListener("focusin", this.contentFocusHandler);
 		// Belt-and-braces: if teardown ever skips onClose the cleanup still runs.
 		this.register(() => this.teardown());
 		// Container resize → debounced fit() → pty.resize.
@@ -350,6 +377,29 @@ export class TerminalView extends ItemView {
 		terminal.open(surface);
 		this.terminal = terminal;
 		this.fitAddon = fitAddon;
+		// Image paste: xterm's built-in paste only forwards TEXT — when the
+		// clipboard holds an image nothing reaches the pty and pi's Ctrl+V
+		// `app.clipboard.pasteImage` keybinding never fires. Capture-phase on
+		// the surface (the composer textarea lives OUTSIDE it, so composer
+		// pastes never hit this): image-only → swallow + write \x16 so pi reads
+		// the real OS clipboard; text pastes fall through to xterm untouched.
+		this.pasteHandler = (e: ClipboardEvent): void => {
+			const items = e.clipboardData?.items;
+			if (!items) return;
+			let hasImage = false;
+			for (let i = 0; i < items.length; i++) {
+				if (items[i]?.type.startsWith("image/")) {
+					hasImage = true;
+					break;
+				}
+			}
+			if (!hasImage) return;
+			e.preventDefault();
+			e.stopImmediatePropagation();
+			e.stopPropagation();
+			if (this.pty && !this.exited) this.pty.write("\x16");
+		};
+		surface.addEventListener("paste", this.pasteHandler, true);
 		// Keystrokes: raw chunks straight to the pty; xterm decodes keys itself.
 		// Refused once the process has exited. A keystroke counts as activity
 		// (clears awaiting-input — the user is answering).
@@ -498,6 +548,19 @@ export class TerminalView extends ItemView {
 			this.toggleToolbarPopover();
 		});
 		toolbar.append(menuBtn);
+		// Wave 2: composer visibility toggle (the panel's own `hide` button
+		// hides it; this is the way back).
+		const composerBtn = el("button", {
+			cls: "arthur-pi-toolbar-btn",
+			attrs: { "aria-label": "toggle prompt composer", title: "toggle prompt composer" },
+		});
+		composerBtn.setText("⌨");
+		composerBtn.addEventListener("click", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			this.composer?.toggle();
+		});
+		toolbar.append(composerBtn);
 		return toolbar;
 	}
 
@@ -604,6 +667,92 @@ export class TerminalView extends ItemView {
 		this.terminal?.focus();
 	}
 
+	// ------------------------------------------------------- prompt composer
+
+	/** Wire the Wave 2 composer to this leaf: drafts (per-instance, on the
+	 *  manager), bracketed-paste submit, link resolver, vault reads, fit. */
+	private makeComposerHost(): ComposerHost {
+		return {
+			cwd: () => this.cwd,
+			getDraft: () => this.plugin.terminalManager?.getDraft(this.cwd) ?? "",
+			setDraft: (text) => {
+				this.plugin.terminalManager?.setDraft(this.cwd, text);
+			},
+			resolver: () => this.makeLinkResolver(),
+			submit: (text) => this.submitPrompt(text),
+			viewHeight: () => this.contentEl.getBoundingClientRect().height,
+			scheduleFit: () => this.scheduleFit(),
+			activeNote: () => this.readActiveNote(),
+			activeSelection: () => this.readActiveSelection(),
+		};
+	}
+
+	/** Submit from the composer: rewrite Obsidian links to absolute paths,
+	 *  then BRACKETED-PASTE the text into the pty (`ESC[200~` … `ESC[201~` +
+	 *  ONE Enter — the Enter lands after the paste-end marker, so a newline
+	 *  inside the text can never submit mid-paste). Counts as user input
+	 *  (clears awaiting-input). Refused with no live pty. */
+	private submitPrompt(text: string): boolean {
+		if (!this.pty || this.exited) return false;
+		const rewritten = rewriteContextLinks(text, this.makeLinkResolver());
+		this.pty.write(buildPasteSubmit(rewritten));
+		this.lastInputAt = Date.now();
+		if (this.lastQuestionAt != null) this.lastQuestionAt = null;
+		this.recomputeState();
+		return true;
+	}
+
+	/** Wikilink/embed → absolute-path resolver for the composer (same wiring
+	 *  as main.ts's send-note commands: metadataCache + vault base path, the
+	 *  active file as the link source so shortest-path resolution matches the
+	 *  note the user is looking at). */
+	private makeLinkResolver(): LinkResolver {
+		const app = this.plugin.app;
+		const sourcePath = app.workspace.getActiveFile?.()?.path ?? "";
+		const base =
+			(app.vault?.adapter as { getBasePath?: () => string } | null)?.getBasePath?.() ?? "";
+		return (target) => {
+			const dest = app.metadataCache.getFirstLinkpathDest?.(target, sourcePath);
+			if (!(dest instanceof TFile)) return null;
+			return [base.replace(/[\/]+$/, ""), dest.path].filter(Boolean).join("/");
+		};
+	}
+
+	/** The active note's name + absolute path + content for the composer's
+	 *  insert-note button; null when there is no active file (or the vault can't
+	 *  read it — the smoke harness has no cachedRead). */
+	private async readActiveNote(): Promise<{ name: string; absPath: string; content: string } | null> {
+		const app = this.plugin.app;
+		const file = app.workspace.getActiveFile?.() ?? null;
+		if (!file) return null;
+		const cachedRead = app.vault?.cachedRead;
+		if (typeof cachedRead !== "function") return null;
+		try {
+			const content = await cachedRead.call(app.vault, file);
+			const base =
+				(app.vault?.adapter as { getBasePath?: () => string } | null)?.getBasePath?.() ?? "";
+			const absPath = [base.replace(/[\/]+$/, ""), file.path].filter(Boolean).join("/");
+			return { name: file.basename || file.path, absPath, content };
+		} catch {
+			return null;
+		}
+	}
+
+	/** The active editor's selection for the composer's insert-selection
+	 *  button; null when there is none. Structural read so the smoke stub's
+	 *  minimal workspace satisfies it. */
+	private readActiveSelection(): { note: string; text: string } | null {
+		const app = this.plugin.app;
+		const editor = (
+			app.workspace as unknown as {
+				activeEditor?: { editor?: { getSelection?: () => string } | null } | null;
+			}
+		).activeEditor?.editor;
+		const text = editor?.getSelection?.() ?? "";
+		if (!text) return null;
+		return { note: app.workspace.getActiveFile?.()?.basename ?? "", text };
+	}
+
 	// ------------------------------------------------------------------ fit
 
 	private scheduleFit(): void {
@@ -700,6 +849,19 @@ export class TerminalView extends ItemView {
 		this.resizeObserver?.disconnect();
 		this.resizeObserver = null;
 		this.detachSession();
+		// Wave 2 teardown: composer (timers + suggester listeners) + the two
+		// view-level listeners (image paste on the surface, draft restore on
+		// contentEl focus).
+		this.composer?.destroy();
+		this.composer = null;
+		if (this.pasteHandler && this.surfaceEl) {
+			this.surfaceEl.removeEventListener("paste", this.pasteHandler);
+		}
+		this.pasteHandler = null;
+		if (this.contentFocusHandler) {
+			this.contentEl.removeEventListener("focusin", this.contentFocusHandler);
+		}
+		this.contentFocusHandler = null;
 		if (this.surfaceEl && this.focusHandler) this.surfaceEl.removeEventListener("focusin", this.focusHandler);
 		if (this.surfaceEl && this.blurHandler) this.surfaceEl.removeEventListener("focusout", this.blurHandler);
 		this.focusHandler = null;

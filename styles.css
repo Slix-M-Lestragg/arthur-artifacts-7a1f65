@@ -2747,6 +2747,120 @@
 .arthur-pi-toolbar-sublist.is-open { display: flex; }
 .arthur-pi-toolbar-subitem { font-size: var(--font-ui-smaller); color: var(--text-muted); }
 .arthur-pi-toolbar-empty { padding: 0.3em 0.5em; color: var(--text-muted); font-size: var(--font-ui-smaller); }
+
+/* ---------------------------------------------------------------------- *
+ * Wave 2 — prompt composer: drag-resizable panel docked at the BOTTOM of the
+ * terminal view (resizer → toolbar → textarea), plus the @-file suggest popup.
+ * ---------------------------------------------------------------------- */
+.arthur-pi-composer {
+	flex: 0 0 auto;
+	height: 140px;
+	min-height: 72px;
+	display: flex;
+	flex-direction: column;
+	border-top: 1px solid var(--background-modifier-border);
+	background: var(--background-secondary);
+	position: relative;
+}
+.arthur-pi-composer-resizer {
+	flex: 0 0 auto;
+	height: 6px;
+	cursor: ns-resize;
+	background: transparent;
+}
+.arthur-pi-composer-resizer:hover { background: var(--interactive-accent); opacity: 0.5; }
+.arthur-pi-composer-toolbar {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	padding: 2px 4px;
+	flex-wrap: wrap;
+}
+.arthur-pi-composer-btn {
+	background: transparent;
+	border: none;
+	cursor: pointer;
+	padding: 2px 5px;
+	color: var(--text-muted);
+	border-radius: var(--radius-s);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	line-height: 1;
+}
+.arthur-pi-composer-btn:hover { color: var(--text-normal); background: var(--background-modifier-hover); }
+.arthur-pi-composer-btn svg { width: 15px; height: 15px; }
+.arthur-pi-composer-sep {
+	width: 1px;
+	height: 16px;
+	background: var(--background-modifier-border);
+	margin: 0 3px;
+	flex: 0 0 auto;
+}
+.arthur-pi-composer-stats {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	white-space: nowrap;
+	padding: 0 4px;
+}
+.arthur-pi-composer-sent {
+	font-size: var(--font-ui-smaller);
+	color: var(--color-green, #3fb950);
+	white-space: nowrap;
+	padding: 0 4px;
+}
+/* The hide button sits at the far right of the toolbar row. */
+.arthur-pi-composer-toolbar .arthur-pi-composer-btn:last-child { margin-left: auto; }
+.arthur-pi-composer-input {
+	flex: 1 1 auto;
+	min-height: 0;
+	resize: none;
+	border: none;
+	outline: none;
+	background: transparent;
+	color: var(--text-normal);
+	font-family: var(--font-text, var(--font-interface));
+	font-size: var(--font-text-size, 14px);
+	padding: 4px 8px;
+	line-height: 1.4;
+	white-space: pre-wrap;
+	overflow-y: auto;
+}
+.arthur-pi-composer-input::placeholder { color: var(--text-faint); }
+
+/* @-file suggest popup (fixed-positioned under the textarea cursor). */
+.arthur-pi-file-suggest {
+	position: fixed;
+	z-index: var(--layer-popover, 60);
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	box-shadow: var(--shadow-l);
+	max-height: 16em;
+	overflow-y: auto;
+	min-width: 20em;
+	max-width: 36em;
+	padding: 2px;
+}
+.arthur-pi-file-item {
+	display: flex;
+	align-items: baseline;
+	gap: 0.5em;
+	padding: 0.2em 0.5em;
+	border-radius: var(--radius-s);
+	cursor: pointer;
+	font-size: var(--font-ui-smaller);
+}
+.arthur-pi-file-item.is-selected { background: var(--background-modifier-hover); color: var(--text-accent); }
+.arthur-pi-file-item-name { white-space: nowrap; }
+.arthur-pi-file-item-path {
+	color: var(--text-muted);
+	opacity: 0.8;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
 .arthur-instance-picker .arthur-instance-list { display: flex; flex-direction: column; gap: 0.2em; min-width: 32em; }
 .arthur-instance-row {
 	display: flex; align-items: center; gap: 0.5em;

@@ -70,6 +70,14 @@ export type { ObsidianThemeVars } from "./ui/terminal-theme";
 // send-note payload + wikilink rewrite (smoke asserts the byte shape).
 export { buildNotePayload, buildNotePayloadWith, rewriteWikilinks } from "./ui/terminal-note";
 export type { LinkResolver } from "./ui/terminal-note";
+
+// Wave 2 — prompt composer surface (bracketed-paste submit, context rewrite,
+// @-file suggester): exported for smoke.
+export { rewriteContextLinks } from "./ui/link-rewrite";
+export { buildPasteSubmit, clampComposerHeight, PromptComposer, PASTE_START, PASTE_END, COMPOSER_MIN_HEIGHT, COMPOSER_MAX_HEIGHT_PCT } from "./ui/prompt-composer";
+export type { ComposerHost, PromptComposerOpts } from "./ui/prompt-composer";
+export { extractAtPrefix, parseAtQuery, listAtSuggestions, insertCompletion, fuzzyScore, walkFilesystem, MAX_WALK_DEPTH, MAX_WALK_ENTRIES, MAX_SUGGESTIONS } from "./ui/at-suggester";
+export type { FsDeps, FileSuggestion, DirentLike, WalkEntry } from "./ui/at-suggester";
 // instance picker (open-instances + new) — asserted against the export surface.
 export { InstancePickerModal } from "./ui/instance-picker";
 export type { InstanceRow, InstancePickerOpts } from "./ui/instance-picker";
@@ -165,6 +173,20 @@ export interface ArthurSettings {
 	 *  (default true): saved leaves re-attach and respawn with their saved
 	 *  `--session <file>` (or `-c` when none was saved). */
 	piTerminalRestoreOnRestart: boolean;
+	/** How the prompt composer submits a prompt to the pty. FIXED to `paste`
+	 *  (bracketed paste: `ESC[200~<text>ESC[201~` + Enter) — the alternative
+	 *  `apc` marker mode needs the obsidian-bridge pi extension, which arthur
+	 *  does NOT install, so there is no selector yet (documented in Settings →
+	 *  Pi terminal). Loaded value is always forced back to `paste`. */
+	piTerminalPromptSubmitMode: string;
+	/** Clear the prompt composer after a successful submit (default true). */
+	piTerminalClearPromptOnSubmit: boolean;
+	/** Show the prompt composer panel by default in new/reopened terminal
+	 *  leaves (default true). The per-leaf `hide`/⌨ toggle overrides at runtime. */
+	piTerminalComposerVisible: boolean;
+	/** Prompt composer max height as a PERCENT of the leaf's height
+	 *  (20–60, default 50 — the drag resizer clamps to this). */
+	piTerminalComposerMaxHeight: number;
 }
 
 /** Clients built from the active profile — rebuilt when settings change. */
@@ -215,6 +237,10 @@ const DEFAULT_SETTINGS: ArthurSettings = {
 	piTerminalFontSize: 13,
 	piTerminalScrollback: 5000,
 	piTerminalRestoreOnRestart: true,
+	piTerminalPromptSubmitMode: "paste",
+	piTerminalClearPromptOnSubmit: true,
+	piTerminalComposerVisible: true,
+	piTerminalComposerMaxHeight: 50,
 };
 
 /** Parse a bounded positive int; invalid/missing → fallback. */
@@ -502,6 +528,37 @@ class ArthurSettingTab extends PluginSettingTab {
 			.addToggle((toggle) =>
 				toggle.setValue(s.piTerminalRestoreOnRestart).onChange(async (value) => {
 					s.piTerminalRestoreOnRestart = value;
+					await this.plugin.saveSettings();
+				})
+			);
+		new Setting(containerEl)
+			.setName("Prompt submit mode")
+			.setDesc("Fixed to `paste` — prompts from the composer are wrapped in bracketed-paste markers (ESC[200~ … ESC[201~) and sent with a trailing Enter. The alternative APC marker mode would need the obsidian-bridge pi extension, which arthur does not install, so there is no selector yet.")
+			.addText((text) => text.setValue("paste").setDisabled(true));
+		new Setting(containerEl)
+			.setName("Clear prompt on submit")
+			.setDesc("Empty the prompt composer after a successful send. Default on.")
+			.addToggle((toggle) =>
+				toggle.setValue(s.piTerminalClearPromptOnSubmit).onChange(async (value) => {
+					s.piTerminalClearPromptOnSubmit = value;
+					await this.plugin.saveSettings();
+				})
+			);
+		new Setting(containerEl)
+			.setName("Show prompt composer")
+			.setDesc("Dock the prompt composer panel at the bottom of new/reopened pi terminal leaves. The per-terminal hide/toggle buttons override this at runtime. Default on.")
+			.addToggle((toggle) =>
+				toggle.setValue(s.piTerminalComposerVisible).onChange(async (value) => {
+					s.piTerminalComposerVisible = value;
+					await this.plugin.saveSettings();
+				})
+			);
+		new Setting(containerEl)
+			.setName("Composer max height (%)")
+			.setDesc("Maximum prompt-composer height as a percentage of the terminal leaf (20–60, default 50). The drag resizer clamps to this.")
+			.addText((text) =>
+				text.setValue(String(s.piTerminalComposerMaxHeight)).onChange(async (value) => {
+					s.piTerminalComposerMaxHeight = clampInt(value, 50, 20, 60);
 					await this.plugin.saveSettings();
 				})
 			);
@@ -982,6 +1039,13 @@ export default class ArthurPlugin extends Plugin {
 			piTerminalFontSize: clampInt(data?.piTerminalFontSize, DEFAULT_SETTINGS.piTerminalFontSize, 6, 72),
 			piTerminalScrollback: clampInt(data?.piTerminalScrollback, DEFAULT_SETTINGS.piTerminalScrollback, 0, 100000),
 			piTerminalRestoreOnRestart: data?.piTerminalRestoreOnRestart !== false,
+			// Fixed to bracketed paste — the APC alternative needs the
+			// obsidian-bridge pi extension (not installed); any saved value is
+			// forced back so data.json drift can't select a broken mode.
+			piTerminalPromptSubmitMode: "paste",
+			piTerminalClearPromptOnSubmit: data?.piTerminalClearPromptOnSubmit !== false,
+			piTerminalComposerVisible: data?.piTerminalComposerVisible !== false,
+			piTerminalComposerMaxHeight: clampInt(data?.piTerminalComposerMaxHeight, 50, 20, 60),
 		};
 	}
 

@@ -12,43 +12,28 @@
  *   ---
  *   \r
  *
- * Wikilink rewrite: `[[Target]]`, `[[Target|Alias]]`, `[[Target#Section]]`,
- * `[[Target#Section|Alias]]` are rewritten to the TARGET note's absolute vault
- * path (the `#Section` is preserved; the `|Alias` is dropped). Unresolved
- * targets are left verbatim (the agent can still read the original link text).
+ * The wikilink/embed rewrite itself moved to `link-rewrite.ts` (Wave 2 factored
+ * it out so the prompt composer reuses it on submit/insert); this module keeps
+ * the note-payload assembly and re-exports `rewriteWikilinks` for the send-note
+ * commands and existing smoke assertions.
  *
  * `buildNotePayload` + `rewriteWikilinks` are pure over their inputs (the link
  * resolver is injected) so smoke can assert the exact byte shape without a
  * vault. Production wires the resolver through `app.metadataCache.
  * getFirstLinkpathDest` + the vault base path (see main.ts).
  */
+import { rewriteContextLinks, type LinkResolver } from "./link-rewrite";
 
-/** A link resolver: given a wikilink target (no alias, no section), return its
- *  absolute vault path, or null when unresolved. Injected so the pure builder
- *  has no Obsidian dependency. */
-export type LinkResolver = (target: string) => string | null;
+export type { LinkResolver };
 
 /**
- * Rewrite `[[…]]` wikilinks in `content` to absolute vault paths. Leaves
- * unresolved links + non-link text untouched. The resolver receives the bare
- * target (alias and `#section` stripped); the `#section` is re-appended to the
- * resolved absolute path.
+ * Rewrite `[[…]]` wikilinks and `![[…]]` embeds in `content` to absolute vault
+ * paths (alias dropped, `#section` preserved, unresolved left verbatim).
+ * Thin delegation to `rewriteContextLinks` — kept as the send-note command's
+ * public name.
  */
 export function rewriteWikilinks(content: string, resolve: LinkResolver): string {
-	// Match [[Target]], [[Target#Section]], [[Target|Alias]], [[Target#Section|Alias]].
-	return content.replace(/\[\[([^\]\n]+)\]\]/g, (whole, body: string) => {
-		const [targetPart, aliasPart] = body.split("|");
-		const target = (targetPart ?? "").trim();
-		if (!target) return whole;
-		const hashIdx = target.indexOf("#");
-		const link = hashIdx >= 0 ? target.slice(0, hashIdx).trim() : target;
-		const section = hashIdx >= 0 ? target.slice(hashIdx) : ""; // includes the '#'
-		if (!link) return whole;
-		const abs = resolve(link);
-		if (!abs) return whole; // unresolved → leave the original [[…]] for the agent
-		// Drop the alias entirely; keep the section anchor.
-		return abs + section;
-	});
+	return rewriteContextLinks(content, resolve);
 }
 
 /**

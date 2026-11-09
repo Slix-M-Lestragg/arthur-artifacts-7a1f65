@@ -50,7 +50,27 @@ export class TerminalManager {
 	 */
 	ptyFactory: PtySpawnFn | null = null;
 
+	/** Per-instance prompt-composer drafts (Wave 2), keyed by cwd — IN-MEMORY
+	 *  only (never persisted to data.json). Written by the composer on every
+	 *  input, restored on leaf focus; a leaf close keeps its entry so a reopen
+	 *  in the same session finds the draft, `closeAll` (plugin unload) clears. */
+	private readonly drafts = new Map<string, string>();
+
 	constructor(private readonly plugin: ArthurPlugin) {}
+
+	/** The stored composer draft for a cwd ('' when none / unbound). */
+	getDraft(cwd: string | null | undefined): string {
+		const key = typeof cwd === "string" && cwd.trim() ? cwd.trim() : null;
+		return key ? this.drafts.get(key) ?? "" : "";
+	}
+
+	/** Store (or clear, on '') the composer draft for a cwd. */
+	setDraft(cwd: string | null | undefined, text: string): void {
+		const key = typeof cwd === "string" && cwd.trim() ? cwd.trim() : null;
+		if (!key) return;
+		if (text) this.drafts.set(key, text);
+		else this.drafts.delete(key);
+	}
 
 	/**
 	 * Open (or reveal) a terminal leaf for a working directory. The target cwd
@@ -173,6 +193,7 @@ export class TerminalManager {
 		this.leaves.clear();
 		this.lastFocusedLeaf = null;
 		this.ptyFactory = null;
+		this.drafts.clear();
 	}
 
 	// ---------------------------------------------------------------- internals
