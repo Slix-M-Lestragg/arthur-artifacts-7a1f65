@@ -104,6 +104,8 @@ export function spawnRemotePi(
 		cols: number;
 		rows: number;
 		envExtra?: Record<string, string>;
+		/** Absolute plugin-local node-pty path for Electron's renderer require. */
+		ptyModulePath?: string;
 		ptyFactory?: PtyFactoryLike;
 	},
 ): PtyLike {
@@ -126,6 +128,7 @@ export function spawnRemotePi(
 		cols: opts.cols,
 		rows: opts.rows,
 		env: { ...process.env, ...(opts.envExtra ?? {}) } as Record<string, string>,
+		ptyModulePath: opts.ptyModulePath,
 	};
 	return spawn("ssh", args, ptyOptions);
 }

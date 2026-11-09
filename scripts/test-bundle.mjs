@@ -7944,6 +7944,9 @@ try {
 		assert46(remotePtys46.ptys[0].remoteProfile.piExecutable === profile46a.piExecutable
 			&& remotePtys46.ptys[0].remoteProfile.piArgs === "--verbose",
 			"(c) spawnRemotePi receives the full configured profile");
+		assert46(remotePtys46.ptys[0].opts.ptyModulePath === bundle.resolvePtyModulePath(
+			app.vault.adapter.getBasePath(), plugin.manifest.dir),
+			"(c) remote spawn receives the plugin-local absolute pty module path");
 		assert46(remoteView46.getDisplayText().includes("(remote)"),
 			"(c) leaf display title carries the remote suffix");
 

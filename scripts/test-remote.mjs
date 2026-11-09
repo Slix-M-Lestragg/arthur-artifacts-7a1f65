@@ -116,6 +116,7 @@ const returned = S.spawnRemotePi(profile, {
 	cols: 132,
 	rows: 43,
 	envExtra: { ARTHUR_REMOTE_TEST: "yes" },
+	ptyModulePath: "/vault/.obsidian/plugins/arthur/node_modules/@homebridge/node-pty-prebuilt-multiarch",
 	ptyFactory,
 });
 assertEq(returned, fake, "spawn returns the injected PtyLike unchanged");
@@ -135,6 +136,7 @@ assertEq(spawned.options.name, "xterm-256color", "pty terminfo");
 assertEq(spawned.options.cols, 132, "pty cols");
 assertEq(spawned.options.rows, 43, "pty rows");
 assertEq(spawned.options.env.ARTHUR_REMOTE_TEST, "yes", "envExtra passthrough");
+assertEq(spawned.options.ptyModulePath, "/vault/.obsidian/plugins/arthur/node_modules/@homebridge/node-pty-prebuilt-multiarch", "absolute pty module path passthrough");
 assert(!("cwd" in spawned.options), "local cwd is not sent to ssh");
 
 for (const method of ["write", "resize", "kill", "onData", "onExit"]) {

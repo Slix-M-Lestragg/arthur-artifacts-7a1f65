@@ -511,6 +511,7 @@ export class TerminalView extends ItemView {
 				pty = this.plugin.remoteBackend.spawnRemotePi(remoteProfile, {
 					cols: terminal.cols,
 					rows: terminal.rows,
+					ptyModulePath,
 					...(factory ? { ptyFactory: factory } : {}),
 				});
 			} else {
