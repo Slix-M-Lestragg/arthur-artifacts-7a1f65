@@ -1,0 +1,87 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - dev
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - run: npm install
+      - run: npm run build
+
+      # Read version from manifest.json
+      - name: Get version
+        id: version
+        run: echo "version=$(node -p "require('./manifest.json').version")" >> $GITHUB_OUTPUT
+
+      # Update main branch with built files
+      - name: Checkout main branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main-branch
+
+      - name: Copy built files to main
+        run: |
+          cp main.js main-branch/
+          cp styles.css main-branch/
+          cp package.json main-branch/
+          cp manifest.json main-branch/
+          cp versions.json main-branch/
+          cp menubar-registry.js main-branch/
+          mkdir -p main-branch/bridge
+          cp bridge/auth-bridge.mjs main-branch/bridge/
+          mkdir -p main-branch/extensions
+          cp extensions/obsidian-bridge.ts main-branch/extensions/
+
+      # Vendor a prebuilt node-pty (darwin-arm64 only — matches the laptop these
+      # vaults run on) so `git clone --branch main` needs no `npm install`/build
+      # in any vault. Source is the small tracked copy under vendor/, refreshed
+      # manually only when the node-pty dependency version changes (see README
+      # "Releasing to main").
+      - name: Vendor node-pty into main
+        run: |
+          rm -rf main-branch/node_modules/node-pty
+          mkdir -p main-branch/node_modules
+          cp -R vendor/node-pty-darwin-arm64 main-branch/node_modules/node-pty
+          chmod 755 main-branch/node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper
+
+      - name: Commit to main
+        working-directory: main-branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --staged --quiet && echo "No changes to commit" && exit 0
+          git commit -m "Release v${{ steps.version.outputs.version }}"
+          git push
+
+      # Create GitHub release with built assets
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          make_latest: true
+          files: |
+            main.js
+            styles.css
+            manifest.json
+            versions.json
+            menubar-registry.js
+            bridge/auth-bridge.mjs

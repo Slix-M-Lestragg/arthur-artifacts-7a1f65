@@ -1,0 +1,108 @@
+# .github/workflows/feature-release.yml
+#
+# Purpose: On every push to a feature/* branch (or manual workflow_dispatch),
+# build the plugin and update the companion feature/<name>-release distribution
+# branch with the regenerated build outputs (main.js, styles.css) and the
+# source-of-truth files copied verbatim from the feature branch
+# (manifest.json, package.json, versions.json, bridge/auth-bridge.mjs,
+# extensions/obsidian-bridge.ts).
+#
+# This generalizes the plugin -> plugin-release CI (see plugin-release.yml) to
+# feature branches, so a remote coding push produces a pullable artifact
+# branch for local testing (Mac/iPhone/iPad via vault sync) with NO local build
+# step and NO source/node_modules bloat synced to the phone.
+#
+# The feature/<name>-release branch must already exist (seeded once from
+# plugin-release so it inherits the darwin-arm64 node-pty prebuilds that a
+# generic ubuntu runner cannot regenerate). node_modules/node-pty/* is left
+# untouched, same as plugin-release.yml.
+#
+# NOTE: like all `push`-triggered workflows, GitHub runs this using the workflow
+# file version present on the pushed branch. This file therefore has to live
+# on each feature branch it should automate. Feature branches cut from `plugin`
+# inherit it automatically once it is also committed to `plugin`.
+
+name: feature-release
+
+on:
+  push:
+    branches:
+      - 'feature/*'
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: 'Feature source branch to build (e.g. feature/farm-view)'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.event.inputs.source_branch || github.ref_name }}-release
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve source branch
+        id: src
+        run: |
+          if [ -n "${{ github.event.inputs.source_branch }}" ]; then
+            echo "branch=${{ github.event.inputs.source_branch }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "branch=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout source branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.src.outputs.branch }}
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build plugin
+        run: npm run build
+
+      - name: Resolve release branch
+        id: rel
+        run: echo "branch=${{ steps.src.outputs.branch }}-release" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout release branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.rel.outputs.branch }}
+          path: release
+
+      - name: Copy built files and source-of-truth files to release branch
+        run: |
+          cp main.js release/
+          cp styles.css release/
+          cp manifest.json release/
+          cp package.json release/
+          cp versions.json release/
+          mkdir -p release/bridge
+          cp bridge/auth-bridge.mjs release/bridge/
+          mkdir -p release/extensions
+          cp extensions/obsidian-bridge.ts release/extensions/
+
+      - name: Commit and push to release branch
+        working-directory: release
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add main.js styles.css manifest.json package.json versions.json bridge/auth-bridge.mjs extensions/obsidian-bridge.ts
+          if git diff --cached --quiet; then
+            echo "No changes to commit; release branch already up to date."
+          else
+            git commit -m "Automated release: built from ${{ steps.src.outputs.branch }}@${{ github.sha }}"
+            git push origin HEAD:${{ steps.rel.outputs.branch }}
+          fi

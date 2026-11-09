@@ -10,31 +10,50 @@
  * tab badges for the common "agent is churning" / "agent went quiet while I
  * was elsewhere" / "pi is asking something" cases.
  *
+ * WAVE 5b — RUN-BOUNDARY SEMANTICS + the idle→ready RENAME. There is no
+ * RPC to tell us when a pi turn starts, so the run boundary is HEURISTIC
+ * and we document it honestly instead of pretending otherwise:
+ *   - 'ready' = the pty is alive and has NOT exited, and the user has sent
+ *     NO input yet. A NEWLY SPAWNED or freshly LOADED session replaying its
+ *     banner / initial output burst reads ready, NOT running — output the
+ *     user never asked for is not a run. Pre-input spinner ticks likewise
+ *     hold ready (the input gate below fences them; they can never flap it
+ *     to running).
+ *   - after the FIRST user input: running while data is live, done after
+ *     DONE_SILENCE_MS (5s) of true silence. A heuristic "run end", same
+ *     caveat as above.
+ * The vocabulary is ready|running|done-unseen|seen|awaiting-input|error
+ * (Wave 5b renamed the old "idle" → "ready" everywhere; the deprecated
+ * union alias was removed at integration once the view-side call sites
+ * landed on "ready").
+ *
  * WAVE 4 (FIX B) — HYSTERESIS. The Wave-1 heuristic (ACTIVE_MS=1200 /
  * IDLE_MS=1500) flapped running↔done-unseen with NO prompt sent, because pi's
  * TUI redraws a spinner every ~1s: a gap >1200ms read "done", the next
  * spinner frame read "running", over and over. Three rules fix that:
  *   1. INPUT GATE — a session only ever reaches done-unseen/seen AFTER it has
  *      seen USER INPUT (lastInputAt > 0). A never-prompted session stays
- *      idle|running forever (never done/seen). Chosen over the alternative
+ *      ready forever (never done/seen). Chosen over the alternative
  *      "cumulative-bytes threshold" gate because a spinner alone accumulates
  *      bytes without bound — bytes cannot distinguish "agent answered" from
  *      "agent is still spinning", while a keystroke/composer submit can.
  *      (A real pty EXIT still shows done/seen/error: that is an event, not a
  *      heuristic — the gate only fences the activity-based transitions.)
- *   2. SILENCE WINDOW — the idle→done/seen flip needs DONE_SILENCE_MS (5s) of
- *      TRUE silence (no data AND no input; every spinner frame resets it).
+ *   2. SILENCE WINDOW — the running→done/seen flip needs DONE_SILENCE_MS
+ *      (5s) of TRUE silence (no data AND no input; every spinner frame
+ *      resets it).
  *   3. RE-ARM — once a done stretch is entered, spinner/frame noise cannot
  *      bounce it back to running: leaving done requires fresh user input
  *      (lastInputAt after doneSince) or a real data burst since the stretch
  *      began (≥ DONE_REARM_BYTES). Stray frames stay below that bar.
  *
  * States (mirrors the reference PiTerminalIconState vocabulary):
- *   idle            — no pty / nothing has happened yet.
- *   running         — pty alive and data/input within DONE_SILENCE_MS of now
- *                     (spinner redraws keep it here), OR a fresh spawn with
- *                     no data yet (the agent is booting), OR a never-prompted
- *                     session that went quiet (see rule 1).
+ *   ready           — alive, not exited, no user input sent yet: a new or
+ *                     loaded session that hasn't generated anything on the
+ *                     user's behalf (banner bursts don't flip it).
+ *   running         — after first user input: pty alive and data/input
+ *                     within DONE_SILENCE_MS of now (spinner redraws keep
+ *                     it here).
  *   done-unseen     — the session was PROMPTED, then went silent for
  *                     >DONE_SILENCE_MS while the leaf was UNFOCUSED → accent
  *                     "breathing" badge until focused. Holds against spinner
@@ -52,9 +71,9 @@
  * them and applies the resulting class to its tab header + state-line badge.
  */
 
-/** The six visual states (see file header). */
+/** The visual states (see file header). */
 export type TerminalState =
-	| "idle"
+	| "ready"
 	| "running"
 	| "done-unseen"
 	| "seen"
@@ -63,7 +82,7 @@ export type TerminalState =
 
 /** All states, in a stable order (used to clear sibling CSS classes). */
 export const ALL_TERMINAL_STATES: readonly TerminalState[] = [
-	"idle",
+	"ready",
 	"running",
 	"done-unseen",
 	"seen",
@@ -83,9 +102,9 @@ export const PI_TERMINAL_LIVE_CLASS = "arthur-pi-live";
  *  reference. FIX B keeps awaiting-input detection exactly as it was — this
  *  window ONLY gates question liveness now, never the done transition. */
 export const IDLE_MS = 1500;
-/** True-silence window required before an idle session flips to done/seen
- *  (FIX B rule 2). Must comfortably exceed pi's spinner redraw period (~1s),
- *  so a chattering TUI never accumulates this much silence. */
+/** True-silence window required before a prompted, quiet session flips to
+ *  done/seen (FIX B rule 2). Must comfortably exceed pi's spinner redraw
+ *  period (~1s), so a chattering TUI never accumulates this much silence. */
 export const DONE_SILENCE_MS = 5000;
 /** Data-burst size (bytes) that re-arms a done stretch back to running
  *  (FIX B rule 3). Spinner frames trickle a few bytes at a time and stay
@@ -96,7 +115,7 @@ export const DONE_REARM_BYTES = 2048;
 /** Inputs to the activity-state heuristic. All epoch-ms timestamps; `now` is
  *  the evaluation time. `focused` is the leaf focus; `exited` short-circuits
  *  to error/seen; `alive` marks a pty that exists and hasn't exited (a freshly
- *  spawned agent that has emitted nothing yet reads `running`, not `idle`). */
+ *  spawned agent that has emitted nothing yet reads `ready`, not `running`). */
 export interface ActivityInputs {
 	/** Whether the leaf is currently focused (xterm has focus). */
 	focused: boolean;
@@ -119,7 +138,10 @@ export interface ActivityInputs {
 	/** totalBytes snapshot taken when the done stretch began (null = none). */
 	bytesAtDone?: number | null;
 	/** A live pty exists and hasn't exited (default false — pure callers with
-	 *  no pty stay `idle` until data arrives). */
+	 *  no user input read `ready` whether or not the pty has emitted anything
+	 *  (Wave-5b: `alive` no longer branches the verdict; `exited` is the only
+	 *  pty-liveness signal that changes it). Kept because the view relies on
+	 *  the signature. */
 	alive?: boolean;
 	/** Evaluation time (Date.now()). */
 	now: number;
@@ -177,12 +199,14 @@ export function syncActivityMemory(
  *       only fences activity-based transitions)
  *   4. a fresh question (within IDLE_MS) + unfocused → awaiting-input
  *      (unchanged detection, FIX B)
- *   5. nothing ever happened      → alive ? running : idle
+ *   5. nothing ever happened      → ready (fresh spawn or loaded-but-quiet;
+ *      the pre-Wave-5b code split this on `alive` — see below)
  *   6. inside a done stretch      → hold done/seen unless RE-ARMED (fresh
  *      input after doneSince, or ≥ DONE_REARM_BYTES since then) — spinner
  *      frames can't bounce it (FIX B rule 3)
- *   7. never prompted (lastInputAt null/0) → running — never done/seen,
- *      however quiet (FIX B rule 1, the input gate)
+ *   7. never prompted (lastInputAt null/0) → ready — never done/seen (FIX B
+ *      rule 1, the input gate) and never running (Wave-5b: pre-input output
+ *      is not a run — banner bursts and spinner ticks hold ready)
  *   8. silence ≤ DONE_SILENCE_MS  → running (spinner redraws reset this)
  *   9. silence > DONE_SILENCE_MS  → focused ? seen : done-unseen
  * Pure over the inputs (incl. the memory fields) so smoke can assert every
@@ -205,7 +229,10 @@ export function computeActivityState(inp: ActivityInputs): TerminalState {
 		return "awaiting-input";
 	}
 	const lastActivity = Math.max(inp.lastDataAt ?? -Infinity, inp.lastInputAt ?? -Infinity);
-	if (lastActivity === -Infinity) return inp.alive ? "running" : "idle";
+	// Nothing has EVER happened (no data, no input): a freshly spawned or
+	// freshly loaded session reads ready regardless of `alive` (Wave-5b) —
+	// a pty existing with zero output is the same "nothing generated yet".
+	if (lastActivity === -Infinity) return "ready";
 	// Rule 3: hold a done stretch until re-armed (input after doneSince, or a
 	// real data burst since it began — bytesSinceDone = totalBytes - bytesAtDone).
 	if (inp.doneSince != null) {
@@ -214,9 +241,11 @@ export function computeActivityState(inp: ActivityInputs): TerminalState {
 			(inp.totalBytes ?? 0) - (inp.bytesAtDone ?? 0) >= DONE_REARM_BYTES;
 		if (!freshInput && !burst) return inp.focused ? "seen" : "done-unseen";
 	}
-	// Rule 1: a session that has never seen user input can never read done/seen.
+	// Rule 1: a session that has never seen user input can never read
+	// done/seen — and, since Wave-5b, never running either: data no user
+	// asked for (banner bursts, spinner ticks) is not a run. It stays ready.
 	const prompted = inp.lastInputAt != null && inp.lastInputAt > 0;
-	if (!prompted) return "running";
+	if (!prompted) return "ready";
 	// Rule 2: done/seen only after DONE_SILENCE_MS of true silence.
 	if (inp.now - lastActivity <= DONE_SILENCE_MS) return "running";
 	return inp.focused ? "seen" : "done-unseen";

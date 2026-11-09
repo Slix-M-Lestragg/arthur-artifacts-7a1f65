@@ -1,0 +1,2638 @@
+/* obsidian-pi chat view */
+
+/* ─── Phase 8: Provider/Model/Settings SDK bridge UI ───────────────────────────── */
+
+.pi-provider-panel, .pi-model-browser { min-width: 480px; }
+
+.pi-provider-summary-line {
+  font-size: 0.9em;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.pi-provider-row, .pi-model-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.pi-provider-row:last-child, .pi-model-row:last-child { border-bottom: none; }
+
+.pi-provider-info, .pi-model-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.pi-provider-name, .pi-model-name { font-weight: 600; }
+.pi-model-meta { font-size: 0.85em; color: var(--text-muted); }
+
+.pi-provider-status { font-size: 0.85em; color: var(--text-error); }
+.pi-provider-status.is-configured { color: var(--text-success); }
+
+.pi-provider-actions, .pi-model-row .pi-chat-btn { display: flex; gap: 6px; flex: 0 0 auto; }
+
+.pi-model-filters { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.pi-model-filter-toggle { display: flex; align-items: center; gap: 4px; font-size: 0.9em; }
+
+.pi-settings-actions, .pi-confirm-row { display: flex; gap: 8px; margin-top: 16px; }
+
+.pi-oauth-body { min-width: 420px; }
+.pi-oauth-status { color: var(--text-muted); padding: 8px 0; }
+.pi-oauth-url-row { display: flex; align-items: center; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
+.pi-oauth-device-code {
+  display: block;
+  font-size: 1.4em;
+  letter-spacing: 0.1em;
+  padding: 8px 12px;
+  margin: 8px 0;
+  background: var(--background-secondary);
+  border-radius: 6px;
+  text-align: center;
+}
+.pi-oauth-select-item { margin-bottom: 4px; }
+
+.pi-chat-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ─── Messages area ────────────────────────────────────────────────────────── */
+
+.pi-chat-messages {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pi-msg {
+  max-width: 100%;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+
+.pi-msg-user {
+  align-self: flex-end;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  padding: 8px 12px;
+  border-radius: 12px 12px 2px 12px;
+  max-width: 80%;
+  white-space: pre-wrap;
+}
+
+.pi-msg-assistant {
+  align-self: flex-start;
+  width: 100%;
+  padding: 4px 0;
+}
+
+/* ─── Text + thinking blocks ───────────────────────────────────────────────── */
+
+.pi-text-block {
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+
+.pi-thinking-block {
+  margin: 6px 0;
+  border-left: 3px solid var(--text-faint);
+  padding: 4px 10px;
+  color: var(--text-muted);
+  font-size: 0.9em;
+}
+
+.pi-thinking-block > summary {
+  cursor: pointer;
+  user-select: none;
+  font-style: italic;
+  list-style: none;
+}
+
+.pi-thinking-block > summary::-webkit-details-marker { display: none; }
+.pi-thinking-block > summary::before { content: "💭 "; }
+.pi-thinking-block[open] > summary::before { content: "▼ "; }
+
+.pi-thinking-content {
+  white-space: pre-wrap;
+  margin-top: 4px;
+  opacity: 0.85;
+}
+
+/* ─── Tool execution blocks ────────────────────────────────────────────────── */
+
+.pi-tool-block {
+  margin: 6px 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.pi-tool-block > summary {
+  cursor: pointer;
+  user-select: none;
+  padding: 6px 10px;
+  background: var(--background-secondary);
+  font-family: var(--font-monospace);
+  font-size: 0.85em;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pi-tool-block > summary::-webkit-details-marker { display: none; }
+.pi-tool-block > summary::before { content: "▶ "; }
+.pi-tool-block[open] > summary::before { content: "▼ "; }
+
+.pi-tool-name {
+  font-weight: 600;
+}
+
+.pi-tool-args {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+}
+
+.pi-tool-status {
+  font-size: 0.8em;
+  color: var(--text-faint);
+}
+
+.pi-tool-block.pi-tool-error > summary { border-left: 3px solid var(--text-error); }
+.pi-tool-block.pi-tool-running > summary .pi-tool-status::after { content: " ⏳"; }
+
+.pi-tool-body {
+  padding: 8px 10px;
+  font-family: var(--font-monospace);
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  max-height: 400px;
+  overflow-y: auto;
+  background: var(--background-primary-alt);
+}
+
+.pi-tool-result-error { color: var(--text-error); }
+
+/* ─── Input area ───────────────────────────────────────────────────────────── */
+
+.pi-chat-input-area {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--background-modifier-border);
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pi-chat-input-row {
+  display: flex;
+  gap: 6px;
+  align-items: flex-end;
+}
+
+.pi-chat-textarea {
+  flex: 1 1 auto;
+  resize: none;
+  min-height: 44px;
+  max-height: 200px;
+  padding: 8px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-family: var(--font-interface);
+  font-size: 0.95em;
+  line-height: 1.4;
+}
+
+.pi-chat-textarea:focus {
+  border-color: var(--interactive-accent);
+  outline: none;
+}
+
+.pi-chat-btn {
+  flex: 0 0 auto;
+  padding: 8px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.pi-chat-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.pi-chat-secondary-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.pi-chat-secondary-row .pi-chat-btn {
+  padding: 4px 10px;
+  font-size: 0.85em;
+}
+
+/* ─── Queue indicator ──────────────────────────────────────────────────────── */
+
+.pi-queue-indicator {
+  flex: 0 0 auto;
+  padding: 4px 12px;
+  font-size: 0.8em;
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  border-top: 1px solid var(--background-modifier-border);
+  display: none;
+}
+
+.pi-queue-indicator.pi-queue-active { display: block; }
+
+.pi-queue-section { margin: 2px 0; }
+
+.pi-queue-label { font-weight: 600; }
+.pi-queue-item { margin-left: 12px; }
+
+/* ─── Status bar ───────────────────────────────────────────────────────────── */
+
+.pi-status-bar {
+  flex: 0 0 auto;
+  padding: 2px 12px;
+  font-size: 0.75em;
+  color: var(--text-faint);
+  border-top: 1px solid var(--background-modifier-border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.pi-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 4px;
+}
+
+.pi-status-connected .pi-status-dot { background: var(--text-success, #4caf50); }
+.pi-status-streaming .pi-status-dot { background: var(--text-accent, #ff9800); }
+.pi-status-disconnected .pi-status-dot { background: var(--text-error, #f44336); }
+.pi-status-reconnecting .pi-status-dot { background: var(--text-warning, #ff9800); }
+.pi-status-crashed .pi-status-dot { background: var(--text-error, #f44336); }
+
+/* ─── Turn summary ─────────────────────────────────────────────────────────── */
+
+.pi-turn-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  align-items: center;
+  padding: 6px 10px;
+  margin: 4px 0;
+  font-size: 0.8em;
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  border-radius: 6px;
+  border-left: 3px solid var(--text-faint);
+}
+
+.pi-turn-summary-status { font-weight: 600; color: var(--text-normal); }
+.pi-turn-summary-model  { font-family: var(--font-monospace); }
+.pi-turn-summary-tokens { font-family: var(--font-monospace); }
+.pi-turn-summary-cost   { font-family: var(--font-monospace); }
+.pi-turn-summary-context { font-family: var(--font-monospace); }
+
+.pi-apply-row {
+  display: flex;
+  gap: 6px;
+  width: 100%;
+  margin-top: 4px;
+}
+
+.pi-apply-btn {
+  padding: 3px 8px !important;
+  font-size: 0.85em !important;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.pi-apply-btn:hover {
+  border-color: var(--interactive-accent);
+  color: var(--text-normal);
+}
+
+/* ─── Context preview (input area) ────────────────────────────────────────── */
+
+.pi-context-preview {
+  margin-bottom: 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--background-secondary);
+}
+
+.pi-context-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 0.8em;
+  font-weight: 600;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.pi-context-count { flex: 1 1 auto; }
+
+.pi-context-item {
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.pi-context-item:last-child { border-bottom: none; }
+
+.pi-context-item-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px;
+}
+
+.pi-context-toggle {
+  flex: 1 1 auto;
+}
+
+.pi-context-toggle > summary {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85em;
+  list-style: none;
+}
+
+.pi-context-toggle > summary::-webkit-details-marker { display: none; }
+.pi-context-toggle > summary::before { content: '▶ '; font-size: 0.7em; opacity: 0.5; }
+.pi-context-toggle[open] > summary::before { content: '▼ '; font-size: 0.7em; opacity: 0.5; }
+
+.pi-context-item-label { font-weight: 600; }
+
+.pi-context-item-len {
+  font-size: 0.8em;
+  color: var(--text-faint);
+  font-family: var(--font-monospace);
+}
+
+.pi-context-remove {
+  border: none;
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 2px 6px;
+  font-size: 0.8em;
+}
+
+.pi-context-remove:hover { color: var(--text-error); }
+
+.pi-context-body {
+  padding: 6px 10px;
+  font-family: var(--font-monospace);
+  font-size: 0.8em;
+  white-space: pre-wrap;
+  max-height: 200px;
+  overflow-y: auto;
+  color: var(--text-muted);
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+/* ─── Context in sent messages ────────────────────────────────────────────── */
+
+.pi-msg-context {
+  max-width: 85% !important;
+  padding: 8px 12px !important;
+}
+
+.pi-context-block {
+  margin-bottom: 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.pi-context-block > summary {
+  cursor: pointer;
+  user-select: none;
+  padding: 4px 8px;
+  font-size: 0.85em;
+  font-weight: 600;
+  list-style: none;
+}
+
+.pi-context-block > summary::-webkit-details-marker { display: none; }
+.pi-context-block > summary::before { content: '▶ '; font-size: 0.7em; }
+.pi-context-block[open] > summary::before { content: '▼ '; font-size: 0.7em; }
+
+.pi-context-block .pi-context-body {
+  border-top: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+}
+
+.pi-context-instruction {
+  margin-top: 4px;
+  white-space: pre-wrap;
+}
+
+/* ─── Wikilink suggester ──────────────────────────────────────────────────── */
+
+.pi-wikilink-suggest {
+  z-index: 1000;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+  max-height: 240px;
+  overflow-y: auto;
+  display: none;
+}
+
+.pi-wikilink-item {
+  padding: 6px 12px;
+  font-size: 0.9em;
+  cursor: pointer;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.pi-wikilink-item:last-child { border-bottom: none; }
+
+.pi-wikilink-item.is-selected,
+.pi-wikilink-item:hover {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+/* ─── Command suggester ───────────────────────────────────────────────────── */
+
+.pi-command-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pi-command-source {
+  font-size: 0.7em;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+  flex: 0 0 auto;
+  text-transform: uppercase;
+}
+
+.pi-command-name {
+  font-weight: 600;
+  font-family: var(--font-monospace);
+  flex: 0 0 auto;
+}
+
+.pi-command-desc {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+}
+
+.pi-command-item.is-selected .pi-command-source {
+  background: rgba(255,255,255,0.2);
+  color: var(--text-on-accent);
+}
+
+.pi-command-item.is-selected .pi-command-desc {
+  color: var(--text-on-accent);
+  opacity: 0.8;
+}
+
+/* ─── AHP unified session picker ─────────────────────────────────────────── */
+
+.pi-ahp-suggester-badge {
+  display: inline-block;
+  font-size: 0.65em;
+  font-weight: 600;
+  padding: 1px 6px;
+  margin-left: 6px;
+  border-radius: var(--radius-s, 3px);
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+  text-transform: none;
+  vertical-align: middle;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.pi-ahp-suggester-badge.is-hosted { background: var(--interactive-accent); color: var(--text-on-accent); }
+.pi-ahp-suggester-badge.is-external { background: var(--color-blue, #4d8bf0); color: #fff; }
+.pi-ahp-suggester-badge.is-subagent { background: var(--color-purple, #9b59b6); color: #fff; }
+.pi-ahp-suggester-badge.is-live-mirror { color: var(--text-error); }
+.pi-ahp-suggester-badge.is-paused { background: var(--color-orange, #e0a030); color: #fff; }
+.pi-ahp-suggester-badge.is-archived { background: var(--text-faint); color: var(--text-muted); }
+/* Own-device external row — opens the local PTY instead of the broker relay
+   (mirrors FarmView's pi-farm-local-mirror-badge). */
+.pi-ahp-suggester-badge.is-local { background: var(--background-modifier-success); color: var(--text-on-accent); }
+
+/* Status dot before the session title */
+.pi-ahp-suggester-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.pi-ahp-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 8px;
+  background: var(--text-faint);
+}
+.pi-ahp-dot-running { background: var(--color-blue, #4d8bf0); box-shadow: 0 0 6px var(--color-blue, #4d8bf0); }
+.pi-ahp-dot-waiting { background: var(--color-orange, #e0a030); animation: pi-ahp-pulse 1.2s ease-in-out infinite; }
+.pi-ahp-dot-error { background: var(--text-error, #e53935); }
+.pi-ahp-dot-active { background: var(--color-green, #4caf50); }
+.pi-ahp-dot-offline { background: var(--text-faint); opacity: 0.4; }
+@keyframes pi-ahp-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+.pi-ahp-suggester-title { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Metadata row — dimmer, monospace-ish for the tokens/model */
+.suggestion-note.pi-ahp-suggester-meta {
+  display: block;
+  opacity: 0.75;
+  font-size: 0.78em;
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Subagent sessions: indent + left border to show nesting under their parent */
+.suggestion-item.pi-ahp-suggester-subagent {
+  padding-left: 28px;
+  border-left: 2px solid var(--color-purple, #9b59b6);
+  opacity: 0.92;
+}
+
+.suggestion-item.pi-ahp-suggester-new-item,
+.suggestion-item.is-selected.pi-ahp-suggester-new-item {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.suggestion-item.pi-ahp-suggester-new-item .suggestion-note,
+.suggestion-item.is-selected.pi-ahp-suggester-new-item .suggestion-note {
+  color: var(--text-on-accent);
+  opacity: 0.85;
+}
+
+/* ─── AHP chat-mode status note ──────────────────────────────────────────── */
+
+.pi-terminal-status.has-note .pi-status-text {
+  display: inline;
+  color: var(--text-muted);
+}
+
+
+/* ─── @-file-reference suggester ─────────────────────────────────────────── */
+
+.pi-file-suggest {
+  z-index: 1000;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+  max-height: 240px;
+  overflow-y: auto;
+  display: none;
+}
+
+.pi-file-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 0.9em;
+  cursor: pointer;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.pi-file-item:last-child { border-bottom: none; }
+
+.pi-file-item.is-selected,
+.pi-file-item:hover {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.pi-file-item.is-selected .pi-file-item-path,
+.pi-file-item:hover .pi-file-item-path {
+  color: var(--text-on-accent);
+  opacity: 0.8;
+}
+
+.pi-file-item-name {
+  flex: 0 1 auto;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pi-file-item-name::after {
+  content: ' ';
+}
+
+.pi-file-item-path {
+  color: var(--text-muted);
+  font-size: 0.85em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  direction: rtl;
+  text-align: left;
+}
+
+/* ─── Headless codeblock + modal ─────────────────────────────────────────── */
+
+.pi-codeblock {
+  padding: 2px 0;
+}
+
+.pi-codeblock-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pi-codeblock-run {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  font-size: 0.8em;
+  border-radius: 3px;
+  cursor: pointer;
+  border: 1px solid var(--background-modifier-border);
+  background: transparent;
+  color: var(--text-muted);
+  line-height: 1.4;
+  transition: all 0.15s;
+}
+
+.pi-codeblock-run:hover {
+  border-color: var(--interactive-accent);
+  color: var(--interactive-accent);
+}
+
+.pi-codeblock-prompt-toggle {
+  cursor: pointer;
+  user-select: none;
+  font-size: 0.75em;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.pi-codeblock-prompt-body pre {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  padding: 8px;
+  font-size: 0.85em;
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  border-radius: 4px;
+  margin: 4px 0;
+  user-select: text;
+}
+
+.pi-headless-modal {
+  max-width: 700px;
+}
+
+.pi-headless-error {
+  color: var(--text-error);
+}
+
+.pi-headless-edit-hint {
+  font-size: 0.8em;
+  color: var(--text-muted);
+  margin: 8px 0 4px;
+}
+
+.pi-headless-textarea {
+  width: 100% !important;
+  margin-bottom: 8px;
+}
+
+.pi-headless-rerun {
+  margin-bottom: 8px;
+}
+
+.pi-prompt-preview {
+  margin-bottom: 12px;
+}
+
+.pi-headless-apply-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+
+.pi-headless-apply-row button {
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  cursor: pointer;
+}
+
+.pi-headless-apply-row button.mod-cta {
+  border-color: var(--interactive-accent);
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+/* ─── Empty state ──────────────────────────────────────────────────────────── */
+
+.pi-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  text-align: center;
+  gap: 8px;
+  padding: 24px;
+}
+
+.pi-empty-state .pi-empty-icon { font-size: 2em; opacity: 0.4; }
+.pi-empty-state .pi-empty-actions { display: flex; gap: 8px; margin-top: 8px; }
+
+/* ─── Terminal view (xterm.js + PTY) ────────────────────────────────────────── */
+
+.pi-terminal-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  background: var(--background-primary);
+  position: relative;
+}
+
+/* Unfocused "agent is waiting for input" badge — pinned to the top-right
+   corner of the terminal view. Only shown while this leaf isn't the active
+   one (see TerminalView.updateAwaitingInputBadge); hidden the moment the
+   user clicks/focuses the pane. */
+.pi-terminal-awaiting-badge {
+  display: none;
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  z-index: 30;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+  background: var(--color-red, #e5484d);
+  box-shadow: 0 0 0 2px var(--background-primary), 0 1px 4px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  animation: pi-awaiting-badge-pulse 1.6s ease-in-out infinite;
+}
+
+.pi-terminal-awaiting-badge.is-visible {
+  display: flex;
+}
+
+@keyframes pi-awaiting-badge-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.15); opacity: 0.85; }
+}
+
+/* ── Shared live-state icon styling (terminal tab icon + ribbon instance hub) ──
+ * Colors/animations only — the glyph swap (number → "?") and the
+ * dashed → solid squircle shape (error) are baked into distinct registered
+ * icons (see TerminalIcon.ts); this just recolors/animates whichever one is
+ * currently shown, on any element carrying `.pi-icon-live` (applied by
+ * TerminalIcon.applyIconStateClasses — used by both
+ * TerminalIcon.refreshTerminalLeafIcon and RibbonInstanceHub). The
+ * `.pi-icon-shape-group` wraps only the dashed border paths so 'running'
+ * spin / breathe animations never move the glyph.
+ */
+.pi-icon-live.pi-icon-state-running svg .pi-icon-shape-group {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pi-icon-spin 2.4s linear infinite;
+}
+
+.pi-icon-live.pi-icon-state-done-unseen svg {
+  color: var(--color-yellow, #e0ac00);
+}
+.pi-icon-live.pi-icon-state-done-unseen svg .pi-icon-shape-group {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pi-icon-breathe 1.6s ease-in-out infinite;
+}
+
+.pi-icon-live.pi-icon-state-seen svg {
+  color: var(--color-green, #3cb371);
+}
+
+.pi-icon-live.pi-icon-state-awaiting-input svg {
+  color: var(--color-orange, #e8792f);
+}
+.pi-icon-live.pi-icon-state-awaiting-input svg .pi-icon-shape-group {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pi-icon-breathe 1.3s ease-in-out infinite;
+}
+
+.pi-icon-live.pi-icon-state-error svg {
+  color: var(--color-red, #e5484d);
+}
+
+@keyframes pi-icon-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+@keyframes pi-icon-breathe {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.16); }
+}
+
+/* Best-effort small red "needs attention" dot pinned to the icon's corner
+ * (done-unseen / awaiting-input / error), on both the terminal tab icon and
+ * ribbon instance-hub buttons. Obsidian's tab-header icon container may clip
+ * overflow depending on the active theme, in which case this dot silently
+ * fails to render there (the ribbon buttons aren't clipped). Safe to delete
+ * this block + the `.pi-icon-notify-dot` toggle in
+ * TerminalIcon.applyIconStateClasses() without affecting the state
+ * colors/animations above.
+ */
+.pi-icon-live.pi-icon-notify-dot {
+  position: relative;
+  overflow: visible;
+}
+.pi-icon-live.pi-icon-notify-dot::after {
+  content: "";
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-red, #e5484d);
+  box-shadow: 0 0 0 1.5px var(--background-primary);
+  pointer-events: none;
+}
+
+.pi-terminal-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  overflow-x: auto;
+}
+
+.pi-terminal-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 4px;
+  border: 1px solid var(--background-modifier-border);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.pi-terminal-btn:hover {
+  border-color: var(--interactive-accent);
+  color: var(--text-normal);
+}
+
+.pi-terminal-btn.is-active {
+  border-color: var(--interactive-accent);
+  background: var(--background-modifier-active-hover);
+  color: var(--interactive-accent);
+}
+
+.pi-terminal-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* ─── Ribbon instance hub (Phase 10) ────────────────────────────────────────── */
+
+.pi-ribbon-instance-hub {
+  position: fixed;
+  display: none;
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  z-index: 1000;
+  /* Vertically center on the ribbon icon: JS sets `top` to the icon's
+     vertical midpoint, this pulls the hub up by half its own height. */
+  transform: translateY(-50%);
+  /* Background/border/shadow moved to the .pi-ribbon-hub-bg child so it can
+     animate its reveal independently of the buttons. */
+}
+
+.pi-ribbon-instance-hub.is-visible {
+  display: flex;
+}
+
+/* Background layer: fills the hub, sits behind the buttons (z-index 0), and
+   reveals left-to-right via clip-path so the border/shadow grow rightward
+   in step with the buttons. Duration tracks the button stagger total
+   (--pi-hub-bg-duration, set inline in RibbonInstanceHub.ts). */
+.pi-ribbon-hub-bg {
+  position: absolute;
+  inset: 0;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  clip-path: inset(0 100% 0 0);
+  animation: pi-hub-bg-in var(--pi-hub-bg-duration, 400ms) ease-out forwards;
+  z-index: 0;
+  pointer-events: none;
+}
+@keyframes pi-hub-bg-in {
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+/* Staggered "unwrap" entrance: each button pops in left-to-right with a
+   slight overshoot, delayed by --pi-hub-stagger (set inline per button
+   index in RibbonInstanceHub.ts). Buttons are recreated fresh each time the
+   hub is shown, so the animation replays on every hover. */
+@keyframes pi-hub-btn-in {
+  from {
+    opacity: 0;
+    transform: scale(0.4) translateX(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateX(0);
+  }
+}
+
+.pi-ribbon-instance-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex: 0 0 auto;
+  opacity: 0;
+  position: relative;
+  z-index: 1;
+  animation: pi-hub-btn-in 240ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  animation-delay: var(--pi-hub-stagger, 0ms);
+}
+
+.pi-ribbon-instance-btn:hover {
+  background: var(--background-modifier-hover);
+  border-color: var(--background-modifier-border);
+  color: var(--text-normal);
+}
+
+.pi-ribbon-instance-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+.pi-ribbon-instance-add {
+  color: var(--interactive-accent);
+}
+
+.pi-ribbon-instance-add:hover {
+  border-color: var(--interactive-accent);
+}
+
+
+.pi-terminal-config-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+  flex-wrap: nowrap;
+}
+
+.pi-terminal-status {
+  margin-left: auto;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.75em;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+/* Status indicator is just a colored dot — the connected/disconnected label
+   is redundant (the dot color already conveys state) and made the row noisy. */
+.pi-status-text {
+  display: none;
+}
+
+/* Read-only badge for subagent terminal mirrors. Hidden by default; shown when
+   the view state carries ahpReadOnly: true. */
+.pi-terminal-readonly-badge {
+  display: none;
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.7em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.pi-terminal-readonly-badge.is-visible {
+  display: inline-flex;
+}
+
+/* In-view instance title: centered in the remaining toolbar space, smaller,
+   clickable (click = rename) with a hover affordance, and truncated so a long
+   name never breaks the single-row toolbar layout. The working directory is
+   intentionally NOT shown here — it's already visible inside the pi TUI. */
+.pi-terminal-instance-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: center;
+  font-size: 0.8em;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.pi-terminal-instance-label:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+/* ─── Inline config panel (Session/Model/Settings drop down under the toolbar) ─── */
+
+.pi-terminal-panel {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.pi-panel-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pi-panel-label {
+  flex: 0 0 auto;
+  width: 84px;
+  font-size: 0.8em;
+  color: var(--text-muted);
+}
+
+.pi-panel-subtitle {
+  font-size: 0.75em;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  margin-top: 4px;
+}
+
+.pi-panel-btn {
+  padding: 3px 10px;
+  font-size: 0.8em;
+  border-radius: 4px;
+  border: 1px solid var(--background-modifier-border);
+  background: transparent;
+  color: var(--text-normal);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.pi-panel-btn:hover {
+  border-color: var(--interactive-accent);
+}
+
+.pi-panel-btn.mod-cta {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+}
+
+.pi-panel-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 3px 8px;
+  font-size: 0.8em;
+  border-radius: 4px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+}
+
+.pi-panel-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 3px 8px;
+  font-size: 0.8em;
+  border-radius: 4px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+}
+
+.pi-panel-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 140px;
+  overflow-y: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+}
+
+.pi-panel-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px;
+  font-size: 0.8em;
+  cursor: pointer;
+}
+
+.pi-panel-list-item:hover {
+  background: var(--background-modifier-hover);
+}
+
+.pi-panel-list-item-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pi-panel-list-item-meta {
+  flex: 0 0 auto;
+  font-size: 0.9em;
+  color: var(--text-muted);
+}
+
+.pi-panel-empty {
+  padding: 8px;
+  font-size: 0.8em;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.pi-terminal-screen {
+  flex: 1 1 auto;
+  position: relative;
+  overflow: auto;
+  /* No padding: FitAddon reads offsetHeight/clientHeight including padding,
+     which causes a dimension mismatch → wrong row count on mobile keyboard
+     resize. Keep the terminal container padding-free; pad the xterm element
+     via its own internal spacing instead. */
+}
+/* Mobile: disable native touch scroll/overscroll on the terminal container so
+   the browser's pull-down gesture (Obsidian's command palette shortcut) doesn't
+   fire alongside our JS touch-to-pan handler. The JS handler (capture-phase
+   scrollLines) drives all vertical panning. */
+.is-mobile .pi-terminal-screen {
+  touch-action: none;
+}
+
+.pi-terminal-prompt-panel {
+  flex: 0 0 auto;
+  height: 200px;
+  max-height: 60%;
+  min-height: 80px;
+  overflow: hidden;
+  background: var(--background-primary);
+  border-top: 1px solid var(--background-modifier-border);
+  display: none;
+}
+.pi-terminal-prompt-panel.is-visible { display: block; }
+/* When the panel is actually hosting the embedded editor, lay it out as a column so the markdown view fills the height. */
+.pi-terminal-prompt-panel.pi-prompt-embedded.is-visible {
+  display: flex;
+  flex-direction: column;
+}
+.pi-terminal-prompt-resizer {
+  flex: 0 0 4px;
+  cursor: row-resize;
+  background: var(--background-modifier-border);
+  display: none;
+}
+.pi-terminal-prompt-resizer.is-visible { display: block; }
+.pi-prompt-embedded .workspace-tab-header,
+.pi-prompt-embedded .view-header { display: none !important; }
+/* The embedded header lives inside the main Obsidian window, so it must not be a window-drag region. */
+.pi-prompt-embedded .pi-prompt-header { -webkit-app-region: no-drag; }
+
+/* Embedded prompt editor — tighten Obsidian's default editor padding so text
+   sits close to the side borders, kill readable-line-length centering, and keep
+   the panel a FIXED height so pressing Enter scrolls inside the editor instead
+   of growing the panel (which was shifting the top resizer each line). */
+.pi-prompt-embedded .pi-prompt-header { flex: 0 0 auto; }
+.pi-prompt-embedded > .view-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.pi-prompt-embedded .markdown-source-view,
+.pi-prompt-embedded .markdown-reading-view {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  padding: 2px 2px !important;
+}
+.pi-prompt-embedded .cm-scroller {
+  overflow: auto;
+  padding: 2px 0 0 0 !important;
+}
+/* Strip the horizontal padding Obsidian puts on the CodeMirror gutter/content
+   so text almost aligns with the panel's side borders. Do NOT force
+   padding-left on .cm-line with !important — Obsidian sets that per line to
+   reserve space for list markers (ordered/unordered), and overriding it
+   clips the "1." numbers off the left edge. Only touch the right side. */
+.pi-prompt-embedded .cm-content {
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+.pi-prompt-embedded .cm-line {
+  padding-right: 2px !important;
+}
+.pi-prompt-embedded .cm-sizer,
+.pi-prompt-embedded .cm-contentContainer,
+.pi-prompt-embedded .markdown-preview-sizer {
+  max-width: none !important;
+  margin: 0 !important;
+  padding-right: 0 !important;
+}
+
+/* Send-button confirmation pulse (fires on submit, incl. ⌘/Ctrl+Enter). */
+@keyframes pi-send-pulse {
+  0%   { transform: scale(1); color: var(--text-muted); }
+  35%  { transform: scale(1.28); color: var(--interactive-accent); }
+  60%  { transform: scale(0.92); }
+  100% { transform: scale(1); }
+}
+.pi-prompt-actionbar-btn.is-sending {
+  animation: pi-send-pulse 0.45s ease;
+}
+
+.pi-terminal-screen .xterm {
+  height: 100%;
+  padding: 0;
+}
+
+.pi-terminal-screen .xterm .xterm-screen {
+  /* padding removed — see .pi-terminal-screen comment (FitAddon mismatch) */
+}
+
+/* Prevent inherited letter-spacing/ligatures (e.g. from theme CSS) from widening
+   character cells in xterm.js. */
+.pi-terminal-screen .xterm,
+.pi-terminal-screen .xterm-rows,
+.pi-terminal-screen .xterm-rows > div,
+.pi-terminal-screen .xterm-rows span,
+.pi-terminal-screen .xterm-normal,
+.pi-terminal-screen .xterm-bold {
+  letter-spacing: 0 !important;
+  font-variant-ligatures: none !important;
+  font-kerning: none !important;
+}
+
+/* ─── Floating prompt popout (chrome-stripped) ─────────────────────────────── */
+/* These mirror the runtime-injected rules in PromptPopout.ts; duplicated here
+   so the scoping works even if the plugin stylesheet already applies to popouts. */
+body.pi-prompt-popout { overflow: hidden; display: flex; flex-direction: column; }
+
+.pi-prompt-header {
+  flex: 0 0 38px;
+  display: flex; align-items: center; gap: 4px;
+  padding: 0 6px 0 10px;
+  -webkit-app-region: drag;
+  background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  font-size: 11px;
+  user-select: none;
+  z-index: 100;
+  overflow: hidden;
+}
+.pi-prompt-header-title { font-weight: 600; letter-spacing: .02em; white-space: nowrap; }
+.pi-prompt-header-grip { opacity: .45; letter-spacing: -3px; }
+.pi-prompt-header-spacer { flex: 1 1 auto; }
+.pi-prompt-header-hint { font-size: 10px; opacity: .6; white-space: nowrap; }
+.pi-prompt-header-btn {
+  -webkit-app-region: no-drag;
+  height: 28px; min-width: 28px; padding: 0 6px;
+  border: none; border-radius: 6px;
+  background: transparent; color: var(--text-muted); cursor: pointer;
+  font-size: 13px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+}
+.pi-prompt-header-btn:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
+.pi-prompt-header-btn.is-active { background: var(--background-modifier-hover); color: var(--text-accent); }
+body.pi-prompt-popout .pi-prompt-header .pi-prompt-actionbar-btn { -webkit-app-region: no-drag; }
+body.pi-prompt-mac .pi-prompt-header { padding-left: 78px; }
+
+body.pi-prompt-popout .workspace,
+body.pi-prompt-popout .app-container { flex: 1 1 auto; min-height: 0; height: auto !important; }
+body.pi-prompt-popout .workspace-tab-header-container { display: none !important; }
+body.pi-prompt-popout .view-header { display: none !important; }
+body.pi-prompt-popout .workspace-split.mod-root { padding: 0 !important; }
+body.pi-prompt-popout .workspace-tab-container { padding: 0 !important; }
+body.pi-prompt-popout .markdown-source-view,
+body.pi-prompt-popout .markdown-reading-view,
+.pi-prompt-docked .markdown-source-view,
+.pi-prompt-docked .markdown-reading-view { padding: 8px 12px; }
+/* Kill Obsidian's readable-line-length centering so prompt text flows near
+   edge-to-edge instead of being boxed into a narrow centered column. */
+body.pi-prompt-popout .cm-sizer,
+body.pi-prompt-popout .cm-contentContainer,
+body.pi-prompt-popout .markdown-preview-sizer,
+.pi-prompt-docked .cm-sizer,
+.pi-prompt-docked .cm-contentContainer,
+.pi-prompt-docked .markdown-preview-sizer {
+  max-width: none !important;
+  margin: 0 !important;
+  padding-right: 0 !important;
+}
+body.pi-prompt-popout .workspace-split.mod-left,
+body.pi-prompt-popout .workspace-split.mod-right,
+body.pi-prompt-popout .workspace-ribbon { display: none !important; }
+
+/* ─── Prompt action toolbar (shared by floating popout + docked pane) ────────── */
+/* Mirrors the runtime-injected rules in PromptPopout.ts PROMPT_POPOUT_CSS so
+   the docked pane (main document) is styled even without the inline injection. */
+.pi-prompt-docked { display: flex; flex-direction: column; }
+.pi-prompt-docked .pi-prompt-docked-bar,
+.pi-prompt-docked .pi-prompt-actionbar { flex: 0 0 auto; }
+.pi-prompt-docked .markdown-source-view,
+.pi-prompt-docked .markdown-reading-view { flex: 1 1 auto; min-height: 0; }
+
+.pi-prompt-actionbar {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 2px;
+  padding: 5px 8px;
+  background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+  z-index: 99;
+  user-select: none;
+}
+body.pi-prompt-popout .pi-prompt-actionbar { -webkit-app-region: no-drag; }
+.pi-prompt-actionbar-btn {
+  height: 28px; min-width: 28px; padding: 0 6px;
+  border: none; border-radius: 6px;
+  background: transparent; color: var(--text-muted); cursor: pointer;
+  display: flex; align-items: center; justify-content: center; gap: 4px;
+  font-size: 11px; line-height: 1;
+}
+.pi-prompt-actionbar-btn svg { width: 16px; height: 16px; }
+.pi-prompt-actionbar-btn:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
+.pi-prompt-actionbar-btn.is-active { background: var(--interactive-accent); color: var(--text-on-accent); }
+.pi-prompt-actionbar-btn:disabled { opacity: .4; cursor: default; }
+.pi-prompt-actionbar-sep { width: 1px; height: 20px; background: var(--background-modifier-border); margin: 0 4px; flex: 0 0 auto; }
+.pi-prompt-actionbar-spacer { flex: 1 1 auto; }
+.pi-prompt-actionbar-stats { font-size: 11px; color: var(--text-muted); white-space: nowrap; padding: 0 6px; }
+/* ── pi command output modal (pi update / update extensions) ─────────────── */
+.pi-cmd-status { font-weight: 600; margin-bottom: 8px; }
+.pi-cmd-status.is-ok { color: var(--text-success, var(--color-green)); }
+.pi-cmd-status.is-err { color: var(--text-error, var(--color-red)); }
+.pi-cmd-log {
+  max-height: 46vh; overflow: auto; margin: 0 0 10px;
+  padding: 8px 10px; border-radius: 6px;
+  background: var(--background-secondary); color: var(--text-normal);
+  font-family: var(--font-monospace); font-size: 12px; line-height: 1.4;
+  white-space: pre-wrap; word-break: break-word;
+}
+.pi-cmd-buttons { display: flex; justify-content: flex-end; }
+
+/* ─── Settings tab: multi-tab system (sticky icon+label tab bar) ─────────────── */
+
+.pi-settings-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding-top: 0;
+}
+
+/* Tab bar — sticky so it stays visible when scrolling a long tab (e.g. Terminal). */
+.pi-settings-tabs {
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 0;
+  border-bottom: 2px solid var(--background-modifier-border);
+  margin-bottom: 18px;
+  padding-top: 10px;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background-color: var(--background-primary);
+  width: 100%;
+}
+
+/* Each tab: equal width, centered icon + label, thick active indicator. */
+.pi-settings-tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  text-align: center;
+  background: none;
+  border: none;
+  box-shadow: none;
+  border-radius: 0;
+  padding: 10px 14px;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 3px solid transparent;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+/* Lucide icon inside the tab — inherits the tab's text color. */
+.pi-settings-tab svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.pi-settings-tab:hover {
+  color: var(--text-normal);
+  background-color: var(--background-secondary);
+}
+
+.pi-settings-tab-active {
+  color: var(--text-normal);
+  font-weight: 600;
+  border-bottom-color: var(--interactive-accent);
+  background-color: var(--background-secondary-alt);
+}
+
+.pi-settings-tab-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Compact-by-default: tighten Setting rows within the tab to reclaim vertical space. */
+.pi-settings-tab-content .setting-item {
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+
+/* Tighten the h3 section headers inside tabs (kept for sub-grouping within a tab). */
+.pi-settings-tab-content h3 {
+  margin-top: 1.4em;
+  margin-bottom: 0.6em;
+}
+.pi-settings-tab-content h3:first-child {
+  margin-top: 0;
+}
+
+/* ─── Mobile / narrow-screen responsive ─────────────────────────────────────── */
+
+.is-mobile .pi-settings-tabs {
+  overflow-x: auto;
+  padding-bottom: 0;
+  gap: 12px;
+}
+
+.is-mobile .pi-settings-tab {
+  white-space: nowrap;
+  padding: 8px 4px;
+}
+
+@media (max-width: 500px) {
+  .pi-settings-tab {
+    flex: 0 0 auto;            /* stop equal-width; let tabs size to content */
+    padding: 8px 10px;
+  }
+  .pi-settings-tabs {
+    justify-content: flex-start;
+  }
+}
+
+/* ─── Farm View (Phase 2 Run 2) ───────────────────────────────────────────── */
+
+.pi-farm-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.pi-farm-header {
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+}
+
+.pi-farm-title {
+  margin: 0 0 8px;
+  font-size: 1.2em;
+}
+
+.pi-farm-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.pi-farm-kill-btn {
+  padding: 4px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  cursor: pointer;
+}
+
+.pi-farm-batch-btn.is-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pi-farm-selection-count {
+  margin-left: auto;
+  font-size: 0.85em;
+  color: var(--text-muted);
+}
+
+.pi-farm-table-wrap {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 8px;
+}
+
+.pi-farm-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9em;
+}
+
+.pi-farm-table th,
+.pi-farm-table td {
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--background-modifier-border);
+  vertical-align: top;
+}
+
+.pi-farm-table th {
+  position: sticky;
+  top: 0;
+  background: var(--background-secondary);
+  z-index: 1;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.pi-farm-row:hover {
+  background: var(--background-modifier-hover);
+}
+
+.pi-farm-name {
+  cursor: pointer;
+  color: var(--text-accent);
+  text-decoration: none;
+}
+
+.pi-farm-name:hover {
+  text-decoration: underline;
+}
+
+.pi-farm-twisty {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 6px;
+  padding: 0 4px;
+  font-size: 0.85em;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.pi-farm-twisty:hover {
+  color: var(--text-normal);
+  border-color: var(--interactive-accent);
+}
+
+.pi-farm-subagent-row {
+  color: var(--text-muted);
+}
+
+.pi-farm-subagent-row td {
+  padding-top: 3px;
+  padding-bottom: 3px;
+  font-size: 0.92em;
+}
+
+.pi-farm-connector {
+  color: var(--text-faint);
+  margin-right: 2px;
+}
+
+.pi-farm-subagent-name {
+  color: var(--text-muted);
+}
+
+.pi-farm-group-header {
+  background: var(--background-secondary-alt);
+}
+
+.pi-farm-group-label {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 6px 8px;
+}
+
+.pi-farm-empty {
+  padding: 16px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* Density variants */
+.pi-farm-density-compact th,
+.pi-farm-density-compact td {
+  padding: 3px 6px;
+}
+
+.pi-farm-density-normal th,
+.pi-farm-density-normal td {
+  padding: 8px 10px;
+}
+
+.pi-farm-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.85em;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 10px;
+  white-space: nowrap;
+  text-transform: capitalize;
+}
+
+.pi-farm-status-running {
+  color: var(--text-on-accent, #fff);
+  background: var(--interactive-accent, #1976d2);
+}
+
+.pi-farm-status-running .pi-farm-status-spinner {
+  animation: pi-farm-spin 1.2s linear infinite;
+  display: inline-block;
+  font-size: 0.7em;
+  line-height: 1;
+}
+
+@keyframes pi-farm-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+.pi-farm-status-done {
+  color: var(--text-success, #2e7d32);
+  background: rgba(46, 125, 50, 0.12);
+}
+
+.pi-farm-status-error {
+  color: var(--text-error, #c62828);
+  background: rgba(198, 40, 40, 0.12);
+}
+
+.pi-farm-status-asking { background: var(--color-yellow, #e0a030); color: #fff; font-weight: 600; }
+.pi-farm-status-pulse { animation: pi-ahp-pulse 1.2s ease-in-out infinite; margin-left: 3px; }
+
+.pi-farm-status-input {
+  color: var(--text-warning, #b45309);
+  background: rgba(180, 83, 9, 0.12);
+}
+
+.pi-farm-status-active {
+  color: var(--text-muted);
+  background: var(--background-modifier-border);
+}
+
+.pi-farm-status-idle {
+  color: var(--text-faint);
+  background: transparent;
+}
+
+.pi-farm-status-archived {
+  color: var(--text-faint);
+  background: var(--background-modifier-border);
+  text-decoration: line-through;
+}
+
+.pi-farm-status-waiting {
+  color: var(--text-on-accent, #fff);
+  background: var(--text-warning, #b45309);
+}
+
+.pi-farm-status-queued {
+  color: var(--text-on-accent, #fff);
+  background: #0284c7;
+}
+
+.pi-farm-status-throttled {
+  color: #78350f;
+  background: #f59e0b;
+}
+
+.pi-farm-paused-badge,
+.pi-farm-priority-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 0.8em;
+  font-weight: 600;
+  border-radius: 10px;
+  white-space: nowrap;
+  text-transform: uppercase;
+}
+
+.pi-farm-paused-badge {
+  color: var(--text-on-accent, #fff);
+  background: var(--text-warning, #b45309);
+}
+
+.pi-farm-priority-badge {
+  color: var(--text-on-accent, #fff);
+  background: var(--interactive-accent, #1976d2);
+}
+
+.pi-farm-waiting-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 0.8em;
+  font-weight: 600;
+  color: var(--text-warning, #b45309);
+  background: rgba(180, 83, 9, 0.12);
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.pi-farm-subagent-running {
+  background: rgba(25, 118, 210, 0.06);
+}
+
+.pi-farm-subagent-running .pi-farm-subagent-name-running {
+  color: var(--interactive-accent, #1976d2);
+  font-weight: 600;
+}
+
+.pi-farm-subagent-pulse {
+  display: inline-block;
+  color: var(--interactive-accent, #1976d2);
+  animation: pi-farm-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pi-farm-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.pi-farm-subagent-done {
+  opacity: 0.65;
+}
+
+.pi-farm-row-archived {
+  opacity: 0.65;
+}
+
+.pi-farm-row-archived .pi-farm-name {
+  color: var(--text-muted);
+}
+
+/* M4 host-agent relay: external sessions render greyed/dim while their host
+   agent is offline (hostOnline:false), mirroring the archived-row treatment. */
+.pi-farm-row-offline {
+  opacity: 0.6;
+}
+
+.pi-farm-row-offline .pi-farm-name {
+  color: var(--text-muted);
+}
+
+/* Host tag on external (host-agent relayed) sessions — laptop icon + device
+   name, visually parallel to the local-instance 'local' monitor badge. */
+.pi-farm-host-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-right: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+  font-size: 0.7em;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+
+.pi-farm-host-badge svg {
+  width: 12px;
+  height: 12px;
+}
+
+.pi-farm-host-offline-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(198, 40, 40, 0.12);
+  color: var(--text-error, #c62828);
+  font-size: 0.7em;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+
+/* Local mirror badge on relay/external rows that actually map back to a local
+   instance on this device — keeps them from looking like true remote sessions. */
+.pi-farm-local-mirror-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-right: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--background-modifier-success);
+  color: var(--text-on-accent);
+  font-size: 0.7em;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+
+.pi-farm-local-mirror-badge svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* Registered Devices header above the session table */
+.pi-farm-devices-header {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+}
+
+.pi-farm-devices-title {
+  margin: 0 0 10px 0;
+  font-size: 0.95em;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.pi-farm-devices-empty {
+  margin: 0;
+  font-size: 0.85em;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.pi-farm-devices-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.pi-farm-device-card {
+  flex: 1 1 220px;
+  min-width: 200px;
+  max-width: 320px;
+  padding: 10px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 5px;
+  background: var(--background-primary);
+}
+
+.pi-farm-device-card.pi-farm-device-offline {
+  opacity: 0.65;
+}
+
+.pi-farm-device-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.pi-farm-device-status {
+  font-size: 0.75em;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.pi-farm-device-online {
+  color: var(--text-success, #2e7d32);
+}
+
+.pi-farm-device-offline-dot {
+  color: var(--text-faint);
+}
+
+.pi-farm-device-name {
+  font-weight: 600;
+  color: var(--text-normal);
+  font-size: 0.9em;
+}
+
+.pi-farm-device-count {
+  font-size: 0.75em;
+  color: var(--text-muted);
+  background: var(--background-modifier-border);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.pi-farm-device-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 0.78em;
+  color: var(--text-muted);
+}
+
+.pi-farm-device-detail {
+  white-space: nowrap;
+}
+
+.pi-farm-actions-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.pi-farm-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 4px;
+  border: 1px solid var(--background-modifier-border);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex: 0 0 auto;
+  line-height: 1;
+}
+
+.pi-farm-action-btn:hover {
+  border-color: var(--interactive-accent);
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.pi-farm-action-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* TUI composite icon: dashed squircle with a centered chevron */
+.pi-farm-tui-icon {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  line-height: 1;
+}
+
+.pi-farm-tui-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.pi-farm-tui-icon-inner {
+  position: absolute;
+  inset: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.pi-farm-tui-icon-inner svg {
+  width: 10px;
+  height: 10px;
+}
+
+/* Settings tab column picker + cap editor */
+.pi-farm-column-box,
+.pi-farm-cap-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0 16px;
+  padding: 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+}
+
+.pi-farm-column-row,
+.pi-farm-cap-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9em;
+}
+
+.pi-farm-cap-empty {
+  font-size: 0.9em;
+  color: var(--text-muted);
+}
+
+.pi-farm-cap-provider {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pi-farm-cap-row input[type='number'],
+.pi-farm-cap-add-row input {
+  width: 80px;
+}
+
+.pi-farm-cap-add-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.pi-farm-cap-remove {
+  padding: 2px 8px;
+  font-size: 0.85em;
+  border: 1px solid var(--background-modifier-border);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.pi-farm-cap-remove:hover {
+  color: var(--text-error);
+  border-color: var(--text-error);
+}
+
+/* ─── Pin button pulse animation ───────────────────────────────────────────── */
+@keyframes pi-pin-pulse {
+  0%   { transform: scale(1); }
+  35%  { transform: scale(1.35) rotate(-12deg); }
+  70%  { transform: scale(0.9); }
+  100% { transform: scale(1); }
+}
+.pi-prompt-header-btn.is-pulsing {
+  animation: pi-pin-pulse 350ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* ─── Instance settings carousel ───────────────────────────────────────────── */
+.pi-instances-carousel {
+  display: flex;
+  flex-direction: row;
+  gap: 16px;
+  overflow-x: auto;
+  padding: 8px 4px 16px;
+}
+.pi-instance-card {
+  flex: 0 0 auto;
+  width: 220px;
+  min-height: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-primary);
+}
+.pi-instance-card .setting-item {
+  border-top: none;
+  padding: 6px 0;
+  /* Stack name/desc ABOVE the control so a 220px-wide portrait card reads as
+     a vertical form (label then full-width input) instead of a cramped row. */
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+.pi-instance-card .setting-item-name {
+  font-size: 0.85em;
+  color: var(--text-muted);
+}
+.pi-instance-card .setting-item-info {
+  padding: 0;
+}
+.pi-instance-card .setting-item-control {
+  width: 100%;
+  justify-content: flex-start;
+}
+.pi-instance-card .setting-item-control input[type='text'],
+.pi-instance-card .setting-item-control input {
+  width: 100%;
+}
+.pi-instance-card-name {
+  font-weight: 600;
+  font-size: 1.05em;
+  margin-bottom: 4px;
+}
+.pi-instance-hint {
+  font-size: 0.85em;
+  color: var(--text-muted);
+  margin-top: -6px;
+  margin-bottom: 10px;
+}
+.pi-instance-card-add {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: transparent;
+  border: 1px dashed var(--background-modifier-border);
+  cursor: pointer;
+  color: var(--text-muted);
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+.pi-instance-card-add:hover {
+  border-color: var(--interactive-accent);
+  color: var(--text-normal);
+}
+.pi-instance-card-add .pi-instance-add-glyph {
+  font-size: 48px;
+  line-height: 1;
+  transition: transform 0.15s ease;
+}
+.pi-instance-card-add:hover .pi-instance-add-glyph {
+  transform: scale(1.12);
+}
+.pi-instance-card-add .pi-instance-add-label {
+  font-size: 0.9em;
+}
+.pi-instance-card-add .setting-item {
+  display: none;
+}
+
+/* Menu bar icon-style picker (SettingsTab) */
+.pi-menubar-icon-picker {
+  display: flex;
+  gap: 10px;
+  margin: 4px 0 16px;
+}
+.pi-menubar-icon-option {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  cursor: pointer;
+  background: var(--background-secondary);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.pi-menubar-icon-option:hover {
+  border-color: var(--interactive-accent);
+}
+.pi-menubar-icon-option.is-selected {
+  border-color: var(--interactive-accent);
+  background: var(--background-modifier-hover);
+  box-shadow: 0 0 0 1px var(--interactive-accent);
+}
+.pi-menubar-icon-option img {
+  width: 36px;
+  height: 36px;
+  display: block;
+}
+.pi-menubar-icon-option-label {
+  font-size: 0.78em;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* ─── AHP Session Browser (custom card modal) ──────────────────────────── */
+
+.pi-ahp-browser .modal {
+  width: min(680px, 95vw);
+  height: min(640px, 80vh);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+/* The modal-content is Obsidian's scroll wrapper — disable its scroll so only
+   the inner list scrolls (no double scrollbar). */
+.pi-ahp-browser .modal-content {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+  height: 100%;
+  flex: 1 1 auto;
+}
+.pi-ahp-browser-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  flex: 0 0 auto;
+  background: var(--background-primary);
+}
+.pi-ahp-browser-search {
+  flex: 1 1 auto;
+  background: var(--background-modifier-form-field);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 4px);
+  padding: 6px 10px;
+  font-size: 14px;
+  color: var(--text-normal);
+  outline: none;
+}
+.pi-ahp-browser-search:focus {
+  border-color: var(--interactive-accent);
+}
+.pi-ahp-browser-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 8px 10px 14px;
+}
+.pi-ahp-browser-section {
+  margin-bottom: 14px;
+}
+.pi-ahp-browser-section-label {
+  font-size: 0.72em;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  padding: 6px 6px 4px;
+  position: sticky;
+  top: 0;
+  background: var(--background-primary);
+}
+.pi-ahp-browser-empty {
+  text-align: center;
+  color: var(--text-faint);
+  padding: 40px 20px;
+  font-style: italic;
+}
+
+/* Card */
+.pi-ahp-browser-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px 12px;
+  margin-bottom: 5px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m, 6px);
+  background: var(--background-secondary);
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s, transform 0.06s;
+}
+.pi-ahp-browser-card:hover {
+  border-color: var(--interactive-accent);
+  background: var(--background-secondary-alt);
+}
+.pi-ahp-browser-card:active {
+  transform: scale(0.995);
+}
+.pi-ahp-browser-card.is-new {
+  border-style: dashed;
+  border-color: var(--interactive-accent);
+  background: transparent;
+}
+.pi-ahp-browser-card.is-new:hover {
+  background: var(--interactive-accent-hover, rgba(0,0,0,0.04));
+}
+.pi-ahp-browser-card.is-archive {
+  opacity: 0.82;
+}
+.pi-ahp-browser-card.is-archive:hover {
+  opacity: 1;
+}
+.pi-ahp-browser-card.is-subagent {
+  margin-left: 18px;
+  border-left: 3px solid var(--color-purple, #9b59b6);
+}
+
+/* Card row (dot + title + badges) */
+.pi-ahp-browser-card-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.pi-ahp-browser-card-title {
+  flex: 1 1 auto;
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pi-ahp-browser-new-icon {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--interactive-accent);
+  width: 14px;
+  text-align: center;
+}
+.pi-ahp-browser-archive-icon {
+  font-size: 13px;
+  color: var(--text-faint);
+  width: 10px;
+  text-align: center;
+}
+.pi-ahp-dot-idle { background: var(--text-faint); opacity: 0.5; }
+
+/* Metadata row */
+.pi-ahp-browser-card-meta {
+  display: block;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  padding-left: 21px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.35;
+}
+
+/* Mobile: cards take full width, smaller padding */
+.is-mobile .pi-ahp-browser .modal {
+  width: 100vw;
+  max-height: 90vh;
+  border-radius: 0;
+}
+.is-mobile .pi-ahp-browser-card {
+  padding: 12px 14px;
+}
+.is-mobile .pi-ahp-browser-card-title {
+  font-size: 15px;
+}
+.is-mobile .pi-ahp-browser-card-meta {
+  font-size: 12px;
+}
+
+
+/* ─── question_user options panel (in the PromptPopout) ─────────────────── */
+.pi-prompt-question-panel {
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m, 6px);
+  border-left: 3px solid var(--color-yellow, #e0a030);
+}
+.pi-prompt-question-text {
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--text-normal);
+}
+.pi-prompt-question-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.pi-prompt-question-option {
+  text-align: left;
+  padding: 6px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 4px);
+  background: var(--background-primary);
+  cursor: pointer;
+  font-size: 13px;
+}
+.pi-prompt-question-option:hover {
+  border-color: var(--interactive-accent);
+  background: var(--background-secondary-alt);
+}
+.pi-prompt-question-custom {
+  display: flex;
+  gap: 6px;
+}
+.pi-prompt-question-custom-input {
+  flex: 1 1 auto;
+  padding: 5px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 4px);
+  background: var(--background-primary);
+  font-size: 13px;
+}
+.pi-prompt-question-custom-input:focus { border-color: var(--interactive-accent); }
+.pi-prompt-question-custom-send {
+  padding: 5px 12px;
+  border: 1px solid var(--interactive-accent);
+  border-radius: var(--radius-s, 4px);
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+
+/* ─── Farm View mobile responsive (stacked card layout) ──────────────────── */
+/* On mobile/iPad the table is too wide. Transform each row into a stacked
+   card: the name is the title, the status a badge, the metadata columns
+   become compact labelled lines, and the actions column holds the buttons.
+   No horizontal scroll — everything stacks vertically. */
+.is-mobile .pi-farm-table-wrap { overflow-x: hidden; }
+.is-mobile .pi-farm-table,
+.is-mobile .pi-farm-table tbody,
+.is-mobile .pi-farm-table tr,
+.is-mobile .pi-farm-table th,
+.is-mobile .pi-farm-table td {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+}
+.is-mobile .pi-farm-table thead { display: none; }
+.is-mobile .pi-farm-table tr {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m, 8px);
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  background: var(--background-secondary);
+}
+/* The checkbox column (first td, no col- class) — small, top-left */
+.is-mobile .pi-farm-table tr > td:first-child {
+  flex: 0 0 auto;
+  width: auto;
+  padding: 0 8px 0 0;
+}
+/* Name = the card title (bold, takes the remaining width on the first line) */
+.is-mobile .pi-farm-table .col-name {
+  flex: 1 1 60%;
+  font-weight: 700;
+  font-size: 15px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Status badge sits on the same line as the name (right-aligned) */
+.is-mobile .pi-farm-table .col-status {
+  flex: 0 0 auto;
+  text-align: right;
+  padding-left: 6px;
+}
+/* Metadata columns (model, turns, tokens, cost, activity, subagents,
+   workingDirectory, modifiedAt) — compact labelled lines, full width */
+.is-mobile .pi-farm-table .col-model,
+.is-mobile .pi-farm-table .col-turns,
+.is-mobile .pi-farm-table .col-tokens,
+.is-mobile .pi-farm-table .col-cost,
+.is-mobile .pi-farm-table .col-activity,
+.is-mobile .pi-farm-table .col-subagents,
+.is-mobile .pi-farm-table .col-workingDirectory,
+.is-mobile .pi-farm-table .col-modifiedAt {
+  flex: 1 1 100%;
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 1px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Label each metadata line via ::before */
+.is-mobile .pi-farm-table .col-model::before { content: "Model: "; opacity: 0.7; }
+.is-mobile .pi-farm-table .col-turns::before { content: "Turns: "; opacity: 0.7; }
+.is-mobile .pi-farm-table .col-tokens::before { content: "Tokens: "; opacity: 0.7; }
+.is-mobile .pi-farm-table .col-cost::before { content: "Cost: "; opacity: 0.7; }
+.is-mobile .pi-farm-table .col-activity::before { content: "Activity: "; opacity: 0.7; }
+.is-mobile .pi-farm-table .col-subagents::before { content: "Subagents: "; opacity: 0.7; }
+.is-mobile .pi-farm-table .col-workingDirectory::before { content: "📁 "; opacity: 0.7; }
+.is-mobile .pi-farm-table .col-modifiedAt::before { content: "Edited: "; opacity: 0.7; }
+/* Actions column = the buttons row (full width, flex) */
+.is-mobile .pi-farm-table .col-actions {
+  flex: 1 1 100%;
+  padding-top: 6px;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+/* Hide empty metadata cells (don't show a labelled line for missing data) */
+.is-mobile .pi-farm-table .col-model:empty,
+.is-mobile .pi-farm-table .col-turns:empty,
+.is-mobile .pi-farm-table .col-tokens:empty,
+.is-mobile .pi-farm-table .col-cost:empty,
+.is-mobile .pi-farm-table .col-activity:empty,
+.is-mobile .pi-farm-table .col-subagents:empty,
+.is-mobile .pi-farm-table .col-workingDirectory:empty,
+.is-mobile .pi-farm-table .col-modifiedAt:empty {
+  display: none;
+}
+/* Subagent/child rows keep the card style but indented + dimmer */
+.is-mobile .pi-farm-table .pi-farm-child-row,
+.is-mobile .pi-farm-table .pi-farm-subagent-row {
+  margin-left: 12px;
+  background: var(--background-primary);
+  opacity: 0.92;
+}
+
+
+/* Farm View: actions button under session name + device badge */
+.pi-farm-name-actions { margin-top: 4px; }
+.pi-farm-open-btn {
+  font-size: 11px; padding: 2px 10px; border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 3px); background: var(--background-primary); cursor: pointer;
+}
+.pi-farm-open-btn:hover { border-color: var(--interactive-accent); }
+.pi-farm-device-badge {
+  display: inline-flex; align-items: center; gap: 2px;
+  font-size: 0.75em; color: var(--text-muted); margin-right: 6px;
+}
+.pi-farm-device-badge svg { width: 12px; height: 12px; opacity: 0.7; }

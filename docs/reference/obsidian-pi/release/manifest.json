@@ -1,0 +1,10 @@
+{
+  "id": "obsidian-pi",
+  "name": "obsidian-pi",
+  "version": "0.4.0",
+  "minAppVersion": "1.0.0",
+  "description": "Bring the pi coding agent into Obsidian with full control and deep vault integration.",
+  "author": "obsidian-pi contributors",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}

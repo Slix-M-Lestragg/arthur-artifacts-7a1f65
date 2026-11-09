@@ -1,0 +1,11 @@
+node_modules/
+main.js
+main.js.map
+.hotreload
+out/
+data.json
+sessions/
+sessions-terminal/
+prompts/
+.DS_Store
+*.log

@@ -2717,6 +2717,9 @@
 	border-bottom: 1px solid var(--background-modifier-border);
 	font-size: var(--font-ui-smaller);
 	flex: 0 0 auto;
+	/* Anchor for the Resume… session-list popover (Wave 5a: the button sits
+	 * on this row; the list drops below it over the terminal surface). */
+	position: relative;
 }
 .arthur-pi-badge {
 	font-weight: 600;
@@ -2731,7 +2734,7 @@
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
-.arthur-pi-state-idle { color: var(--text-muted); }
+.arthur-pi-state-ready { color: var(--text-muted); }
 .arthur-pi-state-running { color: var(--interactive-accent); }
 .arthur-pi-state-seen { color: var(--color-green, #3fb950); }
 .arthur-pi-state-error { color: var(--text-error); }
@@ -2748,6 +2751,7 @@
 	50% { opacity: 1; }
 }
 .workspace-tab-header-inner-icon.arthur-pi-live.arthur-pi-state-running { color: var(--interactive-accent); }
+.workspace-tab-header-inner-icon.arthur-pi-live.arthur-pi-state-ready { color: var(--text-muted); }
 .workspace-tab-header-inner-icon.arthur-pi-live.arthur-pi-state-awaiting-input { color: var(--text-error); }
 .workspace-tab-header-inner-icon.arthur-pi-live.arthur-pi-state-done-unseen { color: var(--interactive-accent); animation: arthur-pi-breathe 1.6s ease-in-out infinite; }
 .workspace-tab-header-inner-icon.arthur-pi-live.arthur-pi-state-error { color: var(--text-error); }
@@ -2774,12 +2778,15 @@
 
 /* ---------------------------------------------------------------------- *
  * Wave 2 — prompt composer: drag-resizable panel docked at the BOTTOM of the
- * terminal view (resizer → toolbar → textarea), plus the @-file suggest popup.
+ * terminal view. WAVE 5a structure: resizer → full-width TEXTAREA block (the
+ * panel body — fills the panel's remaining height, edge to edge) → slim
+ * footer toolbar strip. Plus the @-file suggest popup.
  * ---------------------------------------------------------------------- */
 .arthur-pi-composer {
 	flex: 0 0 auto;
 	height: 140px;
 	min-height: 72px;
+	min-width: 0;
 	display: flex;
 	flex-direction: column;
 	border-top: 1px solid var(--background-modifier-border);
@@ -2793,6 +2800,9 @@
 	background: transparent;
 }
 .arthur-pi-composer-resizer:hover { background: var(--interactive-accent); opacity: 0.5; }
+/* Slim FOOTER strip (Wave 5a): fixed-height chrome below the textarea —
+ * `flex: 0 0 auto` + `flex-wrap` so it can never steal the panel body's
+ * height (the classic flexbox squeeze that shrank the textarea). */
 .arthur-pi-composer-toolbar {
 	flex: 0 0 auto;
 	display: flex;
@@ -2835,32 +2845,37 @@
 	padding: 0 4px;
 }
 /* The flexible spacer pushes everything after it into a right-aligned,
- * icon-only cluster (Wave 4/FIX D) — the pi command buttons sit BEFORE it
- * (directly visible at the left of the same row, Wave 4/FIX C). */
+ * icon-only cluster (Wave 4/FIX D). */
 .arthur-pi-composer-spacer {
 	flex: 1 1 auto;
 	min-width: 0;
 }
-/* pi command cluster (New / Resume… / Compact / Thinking) — same button
- * chrome as the composer controls, flagged so it can be tinted as a group. */
-.arthur-pi-composer-toolbar .arthur-pi-cmd-btn {
+/* pi command cluster (New / Resume… / Compact / Thinking) on the TOP toolbar —
+ * same button chrome, flagged so it can be tinted as a group. */
+.arthur-pi-toolbar .arthur-pi-cmd-btn {
 	color: var(--text-normal);
 }
-/* Session-file list popover under the Resume… button (opens over the
- * textarea; anchored by the view with an inline top). */
+/* Session-file list popover under the TOP toolbar's Resume… button (Wave 5a
+ * moved the button to the state line — the popover anchors to the
+ * position:relative state line and drops over the terminal surface; the view
+ * aligns it under the button with an inline left). */
 .arthur-pi-resume-popover {
-	top: 30px;
+	top: 100%;
 	left: 4px;
 	margin-top: 0;
 	max-height: 50%;
 	overflow-y: auto;
 }
+/* The panel BODY: a block-level textarea spanning the panel's full width
+ * (box-sizing) and growing to fill its remaining height (`flex: 1 1 auto` +
+ * `min-height: 0` — Wave 5a; it never shares a row with the buttons, so no
+ * flex shrink/wrap/max-width can squeeze it). */
 .arthur-pi-composer-input {
+	display: block;
 	flex: 1 1 auto;
 	min-height: 0;
-	/* Full width of the view: the text element takes 100% minus the composer's
-	 * own padding (box-sizing) — no narrow fixed column (Wave 4/FIX D). */
 	width: 100%;
+	max-width: none;
 	box-sizing: border-box;
 	resize: none;
 	border: none;

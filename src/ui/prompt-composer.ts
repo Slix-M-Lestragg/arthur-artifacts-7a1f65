@@ -5,14 +5,16 @@
  * plain multiline textarea here, since our submit path is bracketed paste,
  * not the APC marker that needs the obsidian-bridge pi extension).
  *
- * Contents (top → bottom): drag resizer → ONE toolbar row (Wave 4/FIX C:
- * directly-visible pi commands New / Resume… / Compact / Thinking at the LEFT,
- * then a spacer, then the reference-ported composer controls — send / clear /
- * insert note / insert selection / slash-command picker / insert
- * `[[wikilink]]` token / word-char count — as a right-aligned icon-only
- * cluster, then the count/flash/hide tail) → full-width textarea that
- * AUTO-GROWS with content up to the composer max-height setting (Wave
- * 4/FIX D) → transient "sent" flash. An `@`-file suggester
+ * Contents (top → bottom): drag resizer → full-width textarea BLOCK that
+ * fills the panel's remaining height edge to edge and AUTO-GROWS with content
+ * up to the composer max-height setting (Wave 5a — the text element is the
+ * panel's BODY, never a squeezed row item) → ONE slim FOOTER toolbar strip
+ * (Wave 5a moved the Wave 4/FIX C pi command buttons New / Resume… /
+ * Compact / Thinking onto the terminal view's TOP toolbar; the strip carries
+ * the reference-ported composer controls — send / clear / insert note /
+ * insert selection / slash-command picker / insert `[[wikilink]]` token /
+ * word-char count — as a right-aligned icon-only cluster, then the
+ * count/flash/hide tail) → transient "sent" flash. An `@`-file suggester
  * (at-suggester.ts) rides the textarea, and the `square-slash` button opens
  * the LOCAL command picker (pi-commands.ts).
  *
@@ -63,7 +65,7 @@ export const COMPOSER_MAX_HEIGHT_PCT = 60;
 /** CSS default panel height (px) — the auto-grow floor before content grows. */
 export const COMPOSER_DEFAULT_HEIGHT = 140;
 /** Fixed chrome the auto-grow math must budget above the textarea content:
- *  resizer strip (6px, matches CSS) + toolbar (~28px) + textarea padding. */
+ *  resizer strip (6px, matches CSS) + footer toolbar (~28px) + padding. */
 const COMPOSER_GROW_CHROME = 6 + 28 + 8;
 
 /**
@@ -103,10 +105,11 @@ export interface ComposerHost {
 	activeSelection(): { note: string; text: string } | null;
 }
 
-/** One directly-visible pi command button on the composer row (Wave 4/FIX C)
- *  — the view supplies the actions so the pty wiring stays in the view. */
+/** One pi command button definition for the terminal view's TOP toolbar
+ *  (Wave 5a moved New/Resume…/Compact/Thinking OUT of the composer row; the
+ *  VIEW renders these itself so the pty wiring stays there). */
 export interface PiRowAction {
-	/** Stable id → the button's `id="pi-btn-<id>"` (smoke asserts row order). */
+	/** Stable id → the button's `id="pi-btn-<id>"` (smoke asserts order). */
 	id: string;
 	/** Lucide icon name (PI_ROW_ICONS values in production). */
 	icon: string;
@@ -119,9 +122,6 @@ export interface PiRowAction {
 export interface PromptComposerOpts {
 	/** Injected fs for the `@` suggester (tests); production = real fs. */
 	fs?: FsDeps;
-	/** Inline pi command buttons rendered FIRST on the row (New/Resume…/
-	 *  Compact/Thinking) — no dropdown for the common ones. */
-	piActions?: PiRowAction[];
 	/** Command-list source for the slash picker (tests inject a fake ~.pi
 	 *  tree); production default = listPiCommands()' local scan. */
 	piCommands?: () => PiCommand[];
@@ -133,6 +133,7 @@ export class PromptComposer {
 	/** Drag handle strip on the panel's top edge. */
 	readonly resizerEl: HTMLElement;
 	readonly toolbarEl: HTMLElement;
+	/** The panel-body textarea (full width, fills the panel's height). */
 	readonly textarea: HTMLTextAreaElement;
 	/** Transient "✓ sent" flash element. */
 	readonly sentEl: HTMLElement;
@@ -169,14 +170,10 @@ export class PromptComposer {
 
 		this.hideBtn = this.iconBtn("chevron-down", "Hide the prompt composer", () => this.setVisible(false), "hide");
 
-		// WAVE 4 (FIX C): ONE row. Pi commands are DIRECTLY VISIBLE at the left
-		// (the Wave-1 "≡" dropdown is gone), then a spacer pushes the composer's
-		// reference-ported controls into a right-aligned icon-only cluster (FIX D).
-		// Every button carries a stable `pi-btn-<id>` id for smoke.
-		const piActions = this.opts.piActions ?? [];
-		for (const action of piActions) this.toolbarEl.append(this.piBtn(action));
-		if (piActions.length > 0) this.toolbarEl.append(this.sep());
-
+		// WAVE 5a: the pi command buttons (New/Resume…/Compact/Thinking) moved
+		// OUT of this row onto the terminal view's TOP toolbar — this strip is a
+		// slim FOOTER below the textarea (right-aligned icon-only cluster after
+		// a spacer). Every button carries a stable `pi-btn-<id>` id for smoke.
 		const sendBtn = this.iconBtn(PI_ROW_ICONS.send, "Send to pi (Mod+Enter)", () => this.submitNow(), "send");
 		const clearBtn = this.iconBtn(PI_ROW_ICONS.clear, "Clear the composer", () => this.clearNow(), "clear");
 		const noteBtn = this.iconBtn(PI_ROW_ICONS.note, "Insert the active note as context", () => void this.insertActiveNote(), "note");
@@ -200,7 +197,11 @@ export class PromptComposer {
 			this.hideBtn,
 		);
 
-		this.rootEl.append(this.resizerEl, this.toolbarEl, this.textarea);
+		// WAVE 5a DOM order: resizer → TEXTAREA (the panel body — full panel
+		// width, grows to fill the panel's height) → slim footer toolbar. The
+		// text element never shares a row with the buttons, so nothing can
+		// squeeze it.
+		this.rootEl.append(this.resizerEl, this.textarea, this.toolbarEl);
 		parent.append(this.rootEl);
 
 		// NOTE: the composer's own input/keydown listeners are registered BEFORE
@@ -501,13 +502,6 @@ export class PromptComposer {
 	/** Flexible gap: pushes everything after it into the right-aligned cluster. */
 	private spacer(): HTMLElement {
 		return el("span", { cls: "arthur-pi-composer-spacer" });
-	}
-
-	/** One directly-visible pi command button (left cluster, FIX C). */
-	private piBtn(action: PiRowAction): HTMLButtonElement {
-		const btn = this.iconBtn(action.icon, action.label, () => action.run(btn), action.id);
-		btn.addClass("arthur-pi-cmd-btn");
-		return btn;
 	}
 
 	/** Teardown (view close): timers, drag listeners, suggester. Idempotent. */

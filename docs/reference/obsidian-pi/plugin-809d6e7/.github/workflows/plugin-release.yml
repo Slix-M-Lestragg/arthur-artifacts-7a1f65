@@ -1,0 +1,86 @@
+# .github/workflows/plugin-release.yml
+#
+# Purpose: On every push to the `plugin` branch (or manual workflow_dispatch),
+# build the plugin and update the `plugin-release` distribution branch.
+#
+# Files handled:
+#   - Regenerated from `plugin` via `npm run build`:
+#       main.js, styles.css
+#   - Copied verbatim from `plugin` (source-of-truth lives on `plugin`):
+#       manifest.json, package.json, versions.json,
+#       bridge/auth-bridge.mjs, extensions/obsidian-bridge.ts
+#   - Explicitly left alone (release-only vendored native binaries with no
+#     cross-platform source-of-truth on the `plugin` branch):
+#       node_modules/node-pty/*
+#     These prebuilds are currently produced and committed manually for the
+#     target platform (darwin-arm64); a generic ubuntu CI runner cannot safely
+#     regenerate identical native binaries across platforms, so this workflow
+#     preserves whatever is already on `plugin-release` under that path.
+
+name: plugin-release
+
+on:
+  push:
+    branches:
+      - plugin
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: plugin-release
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout plugin branch
+        uses: actions/checkout@v4
+        with:
+          ref: plugin
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build plugin
+        run: npm run build
+
+      - name: Checkout plugin-release branch
+        uses: actions/checkout@v4
+        with:
+          ref: plugin-release
+          path: release
+
+      - name: Copy built files and source-of-truth files to plugin-release
+        run: |
+          cp main.js release/
+          cp styles.css release/
+          cp manifest.json release/
+          cp package.json release/
+          cp versions.json release/
+          mkdir -p release/bridge
+          cp bridge/auth-bridge.mjs release/bridge/
+          mkdir -p release/extensions
+          cp extensions/obsidian-bridge.ts release/extensions/
+
+      - name: Commit and push to plugin-release
+        working-directory: release
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add main.js styles.css manifest.json package.json versions.json bridge/auth-bridge.mjs extensions/obsidian-bridge.ts
+          if git diff --cached --quiet; then
+            echo "No changes to commit; plugin-release is already up to date."
+          else
+            git commit -m "Automated release: built from plugin@${{ github.sha }}"
+            git push origin HEAD:plugin-release
+          fi

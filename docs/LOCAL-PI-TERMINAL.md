@@ -312,3 +312,59 @@ style + data attr, new-only), auto-grow clamping to the max-height % with
 grow-only semantics, and the `styles.css` metrics/width guards. All existing
 sections remain green (gate: `npm run typecheck && npm run build && npm run
 smoke`).
+
+
+## Wave 5a — composer full-size + top toolbar + 'ready' label
+
+Three user-facing changes (the textarea STILL not taking full width/height,
+sessions-management buttons belonging at the TOP, a fresh session showing
+'running' instead of 'ready'):
+
+- **Composer full-size restructure** (`src/ui/prompt-composer.ts`,
+  `styles.css`). Diagnosis of the sizing failure: the textarea was a
+  flex CHILD of the panel sharing the panel's fixed height with the button
+  row — with `flex-wrap: wrap` on a 12-button toolbar, the wrapped rows ate
+  the panel height and the textarea (`flex: 1 1 auto` + `min-height: 0`)
+  collapsed into the leftover sliver. Cure — the panel is now
+  resizer → **textarea BODY** → slim **footer strip**: the text element is
+  `display: block; flex: 1 1 auto; min-height: 0; width: 100%;
+  max-width: none; box-sizing: border-box` (it never shares a row with the
+  buttons, so nothing can shrink/cap it), the footer strip is fixed chrome
+  (`flex: 0 0 auto`) that can wrap freely without touching the body. The
+  panel keeps `flex: 0 0 auto` + the drag/auto-grow clamp
+  (`piTerminalComposerMaxHeight` %, hard 60% cap) so the xterm surface
+  always keeps the remaining leaf space. `promptFontSize` still applies at
+  construct time (inline style + `data-prompt-font-size`).
+- **Top toolbar** (`src/ui/terminal-view.ts`). New / Resume… / Compact /
+  Thinking moved OUT of the composer row onto the state-line row at the very
+  TOP of the view: state dot+label at the left, the four pi command buttons
+  (same Wave-4 lucide icons `file-plus`/`layers`/`weight`/`gauge`, same
+  payloads — `/new\r`, `--session` respawn via the Resume popover,
+  `/compact\r`, `\x1b[Z`) + the `⌨` composer toggle at the right. The Resume
+  session-list popover is now anchored to the `position: relative` state
+  line (`top: 100%`, inline left under its button) and drops over the
+  terminal surface. The composer footer keeps send / clear / insert-note /
+  insert-selection / slash-command picker / insert-link / stats / hide.
+- **'ready' state label** (shared contract, shipped by the parallel Wave-5
+  worker in `terminal-state.ts`): the pre-run state `idle` is renamed
+  `ready` — a new/loaded session that hasn't run anything shows **ready**,
+  NOT running (user input is the run boundary). The view resolves the
+  pre-run name at RUNTIME off `ALL_TERMINAL_STATES` (`PRE_RUN_STATE`), maps
+  BOTH generations to the badge label `ready`, and clears both
+  `arthur-pi-state-idle` / `arthur-pi-state-ready` classes on badge swap —
+  it compiles and behaves on either side of the rename.
+
+Smoke coverage: **section 33** drives the contract vocabulary
+(`PRE_RUN_STATE_NAME` / `FRESH_ALIVE_STATE_NAME` resolve the rename at
+runtime — post-rename the fresh badge is asserted strict `ready`);
+**section 34** splits its row-order/icon/payload assertions between the top
+toolbar (the four command buttons, correct ids + reference icons + exact pty
+bytes) and the composer footer (the eight remaining controls), and asserts
+the Resume popover opens below the state line; **section 43** asserts the
+composer DOM structure (resizer → textarea body → footer strip), the
+construct-time promptFontSize on the textarea, the styles.css structure
+guards (flex column panel, block-level flex textarea body with
+width:100%/min-height:0, fixed footer chrome, surface keeps the remaining
+space, state-line popover anchor, the is-ready class), and the 'ready'
+label for a pre-run session (strict post-rename; the tolerant branch covers
+the pre-rename vocabulary and the integrator removes it after integration).

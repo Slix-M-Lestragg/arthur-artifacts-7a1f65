@@ -336,8 +336,9 @@ export class PiFarmView extends ItemView {
 			attrs: { "data-farm-cwd": row.cwd },
 		});
 
-		// state dot — open rows use the live state color; dormant rows a muted dot.
-		const dotCls = row.open && row.state ? terminalStateClass(row.state) : "arthur-pi-state-idle";
+		// state dot — open rows use the live state color; dormant rows the muted
+		// pre-run ('ready') tint (Wave 5 renamed it from 'idle').
+		const dotCls = row.open && row.state ? terminalStateClass(row.state) : "arthur-pi-state-ready";
 		const dot = el("span", { cls: `arthur-farm-dot ${dotCls}`, text: "•" });
 		tr.append(el("td", { children: [dot] }));
 

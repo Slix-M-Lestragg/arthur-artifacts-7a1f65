@@ -8,15 +8,17 @@
  *
  * WAVE 1 additions (RPC-free, see terminal-state.ts):
  *   - INSTANCE STATES + tab/icon badges: a pragmatic data-activity heuristic
- *     (idle | running | done-unseen | seen | awaiting-input | error) drives a
+ *     (ready | running | done-unseen | seen | awaiting-input | error — Wave 5
+ *     renamed 'idle' → 'ready') drives a
  *     CSS class on the leaf's tab-header icon + a state-line badge. `done-unseen`
  *     / `awaiting-input` only show while the leaf is UNFOCUSED and clear on
  *     focus (xterm onFocus/onBlur).
- *   - SLASH TOOLBAR: Wave 4 (FIX C) moved New (`/new`), Resume… (session
+ *   - SLASH TOOLBAR: Wave 5a moved New (`/new`), Resume… (session
  *     files for this cwd → respawn `--session`), Compact (`/compact`) and
- *     Thinking (Shift+Tab `\x1b[Z`) OUT of the old "≡" dropdown onto the
- *     composer's toolbar row as directly-visible icon buttons (reference
- *     lucide glyphs); only Resume…'s file LIST stays a popover.
+ *     Thinking (Shift+Tab `\x1b[Z`) OUT of the composer's row onto a slim
+ *     TOP toolbar merged with the state line (state dot+label at the left,
+ *     command buttons + the composer ⌨ toggle at the right); only Resume…'s
+ *     file LIST stays a popover (anchored below the state line).
  *   - SESSION RESUME: the leaf's view state carries an optional `sessionFile`;
  *     when set the pty spawns `pi --session <file>` instead of `-c`.
  *   - THEME-FOLLOW xterm styling: the xterm theme is derived from Obsidian CSS
@@ -37,6 +39,16 @@
  *   - IMAGE PASTE passthrough: an image-only clipboard paste inside the xterm
  *     surface writes `\x16` (Ctrl+V) so pi reads the OS clipboard itself.
  *
+ * WAVE 5a additions:
+ *   - TOP TOOLBAR: the four pi command buttons (New/Resume…/Compact/Thinking)
+ *     live on the state-line row at the very TOP of the view (see SLASH
+ *     TOOLBAR above); the composer keeps only its own controls (send/clear/
+ *     inserts/stats/hide) on a slim footer strip under a full-size textarea.
+ *   - 'ready' STATE: the shared contract renamed the pre-run state 'idle' →
+ *     'ready' (a new/loaded session that hasn't run anything shows ready,
+ *     NOT running). The rename has landed in the shared terminal-state
+ *     module; this view speaks the new vocabulary directly.
+ *
  * Lifecycle (kept from the prior architecture, new backend):
  *   - LAZY everything: onOpen only builds the container + state line + toolbar;
  *     the xterm Terminal/FitAddon are constructed (and opened) on the FIRST
@@ -48,7 +60,7 @@
  *   - The state line reuses the ahp-view state classes (arthur-ahp-state /
  *     arthur-note) for a consistent vocabulary PLUS the new pi state badge.
  */
-import { getIcon, ItemView, TFile, WorkspaceLeaf } from "obsidian";
+import { getIcon, setIcon, ItemView, TFile, WorkspaceLeaf } from "obsidian";
 import { Terminal, type IDisposable } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 
@@ -95,6 +107,12 @@ interface TerminalViewState {
 	fresh?: unknown;
 	sessionFile?: unknown;
 }
+
+/** The contract's pre-run activity state — 'ready' (Wave 5 renamed it from
+ *  'idle': a new/loaded session that hasn't run anything shows ready, NOT
+ *  running). The rename has landed; the runtime dual-name resolution was
+ *  stripped at integration. */
+const PRE_RUN_STATE: TerminalState = "ready";
 
 export class TerminalView extends ItemView {
 	private stateEl: HTMLElement | null = null;
@@ -159,7 +177,7 @@ export class TerminalView extends ItemView {
 	/** Whether the xterm currently has focus. */
 	private focused = false;
 	/** Current visual state (drives the badge CSS class). */
-	private visualState: TerminalState = "idle";
+	private visualState: TerminalState = PRE_RUN_STATE;
 
 	constructor(leaf: WorkspaceLeaf, private readonly plugin: ArthurPlugin) {
 		super(leaf);
@@ -244,13 +262,11 @@ export class TerminalView extends ItemView {
 		this.contentEl.empty();
 		const wrap = this.contentEl.createEl("div", { cls: "arthur-pi-terminal" });
 		this.stateEl = wrap.createEl("div", { cls: "arthur-ahp-state-line arthur-pi-state-line" });
-		this.badgeEl = this.stateEl.createEl("span", { cls: "arthur-pi-badge arthur-pi-state-idle" });
+		this.badgeEl = this.stateEl.createEl("span", { cls: `arthur-pi-badge ${terminalStateClass(PRE_RUN_STATE)}` });
 		this.surfaceEl = wrap.createEl("div", { cls: "arthur-pi-terminal-surface" });
-		// Wave 2: the prompt composer docked BELOW the surface (wrap is a flex
-		// column — appending last pins it to the bottom of the leaf).
-		this.composer = new PromptComposer(wrap, this.makeComposerHost(), this.plugin, {
-			piActions: this.makePiActions(),
-		});
+		// Wave 5a: the four pi command buttons live on the state-line TOP toolbar
+		// (buildToolbar/makePiActions); the composer keeps only its own controls.
+		this.composer = new PromptComposer(wrap, this.makeComposerHost(), this.plugin);
 		// Leaf focus (xterm OR composer) restores this instance's draft.
 		this.contentFocusHandler = () => this.composer?.restoreDraft();
 		this.contentEl.addEventListener("focusin", this.contentFocusHandler);
@@ -343,9 +359,10 @@ export class TerminalView extends ItemView {
 			return;
 		}
 		this.pty = pty;
-		// A freshly spawned pty is running (the agent is booting) until the
-		// activity heuristic updates the state as data flows / stops.
-		this.visualState = "running";
+		// A freshly spawned pty is PRE-RUN (the contract's 'ready' — nothing has
+		// happened yet) until the activity heuristic updates the state as data
+		// flows / stops.
+		this.visualState = PRE_RUN_STATE;
 		// pty output → xterm + activity-state heuristic.
 		this.ptyDataSub = pty.onData((data: string) => {
 			if (this.terminal) this.terminal.write(data);
@@ -495,7 +512,7 @@ export class TerminalView extends ItemView {
 		this.lastInputAt = null;
 		this.lastQuestionAt = null;
 		this.activityMemory = initialActivityMemory();
-		this.visualState = "idle";
+		this.visualState = PRE_RUN_STATE;
 	}
 
 	// ------------------------------------------------------------- state badge
@@ -554,8 +571,8 @@ export class TerminalView extends ItemView {
 	 *  the meaning; this is the screen-reader/quick-scan label). */
 	private badgeText(): string {
 		switch (this.visualState) {
-			case "running":
-				return "running";
+			case "ready":
+				return "ready";
 			case "done-unseen":
 				return "done";
 			case "seen":
@@ -565,7 +582,7 @@ export class TerminalView extends ItemView {
 			case "error":
 				return "error";
 			default:
-				return "idle";
+				return "running";
 		}
 	}
 
@@ -574,15 +591,16 @@ export class TerminalView extends ItemView {
 		if (this.terminal) this.terminal.options.theme = buildXtermTheme(readObsidianThemeVars());
 	}
 
-	// ------------------------------------------------ pi toolbar (composer row)
+	// ------------------------------------------------- top toolbar (state line)
 
-	/** Build the state-line row: badge + live + cwd + the composer visibility
-	 *  toggle. The pi commands themselves (New / Resume… / Compact / Thinking)
-	 *  are DIRECTLY VISIBLE on the composer's toolbar row (Wave 4/FIX C) — the
-	 *  Wave-1 "≡" dropdown is gone. The ⌨ toggle stays here so the composer
-	 *  (its default-visible element) can always be brought back after a hide. */
+	/** Build the TOP toolbar row (Wave 5a): the four pi command buttons
+	 *  (New / Resume… / Compact / Thinking — moved OUT of the composer row)
+	 *  followed by the composer-visibility ⌨ toggle at the far right. The
+	 *  state dot+label sits at the LEFT of the same row (renderState appends
+	 *  this toolbar last with CSS margin-left:auto). */
 	private buildToolbar(): HTMLElement {
 		const toolbar = el("div", { cls: "arthur-pi-toolbar" });
+		for (const action of this.makePiActions()) toolbar.append(this.cmdBtn(action));
 		const composerBtn = el("button", {
 			cls: "arthur-pi-toolbar-btn",
 			attrs: { "aria-label": "toggle prompt composer", title: "toggle prompt composer" },
@@ -597,9 +615,31 @@ export class TerminalView extends ItemView {
 		return toolbar;
 	}
 
-	/** The directly-visible pi command actions handed to the composer row
-	 *  (FIX C). Icons are the reference's lucide set (PI_ROW_ICONS); all slash
-	 *  commands are `pty.write(cmd + '\r')`, Thinking is a bare escape. */
+	/** One top-toolbar pi command button (icon-only, stable `pi-btn-<id>` id —
+	 *  smoke asserts order/icons/payloads). */
+	private cmdBtn(action: PiRowAction): HTMLButtonElement {
+		const btn = el("button", {
+			cls: "arthur-pi-toolbar-btn arthur-pi-cmd-btn",
+			attrs: {
+				id: `pi-btn-${action.id}`,
+				"aria-label": action.label,
+				title: action.label,
+			},
+		}) as HTMLButtonElement;
+		if (getIcon(action.icon)) setIcon(btn, action.icon);
+		else btn.setText(action.label);
+		btn.addEventListener("click", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			action.run(btn);
+		});
+		return btn;
+	}
+
+	/** The four pi command actions rendered on the TOP toolbar (Wave 5a moved
+	 *  them off the composer row). Icons are the reference's lucide set
+	 *  (PI_ROW_ICONS); all slash commands are `pty.write(cmd + '\r')`, Thinking
+	 *  is a bare escape. */
 	private makePiActions(): PiRowAction[] {
 		return [
 			{ id: "new", icon: PI_ROW_ICONS.new, label: "New session (/new)", run: () => this.sendSlash("/new") },
@@ -616,7 +656,9 @@ export class TerminalView extends ItemView {
 
 	/** The one remaining popover: the cwd's session files (newest first) under
 	 *  the Resume… button — a file LIST has no inline form. Selecting a row
-	 *  respawns `pi --session <file>` in this leaf. */
+	 *  respawns `pi --session <file>` in this leaf. Wave 5a: the button lives on
+	 *  the TOP toolbar now, so the popover is anchored to the STATE LINE
+	 * (position:relative) and drops over the terminal surface. */
 	private toggleResumePopover(anchor: HTMLButtonElement): void {
 		if (this.resumePopover) {
 			this.closeResumePopover();
@@ -637,13 +679,17 @@ export class TerminalView extends ItemView {
 				pop.append(item);
 			}
 		}
-		// Anchor directly below the Resume… button inside the composer root
-		// (the composer is position:relative); fall back to the state line.
-		const root = this.composer?.rootEl;
-		const rr = root?.getBoundingClientRect?.();
+		// Anchor to the state line: CSS `top: 100%` drops the list right below
+		// the toolbar row; the inline left aligns it under the Resume… button
+		// (skipped when layout metrics are unavailable — smoke's zero-sized
+		// stubs — so the CSS defaults hold).
+		const host = this.stateEl;
+		const hr = host?.getBoundingClientRect?.();
 		const ar = anchor.getBoundingClientRect?.();
-		if (root && rr && ar) pop.style.top = `${Math.max(0, ar.top - rr.top + ar.height + 2)}px`;
-		(root ?? this.stateEl)?.append(pop);
+		if (host && hr && ar && (ar.left || hr.left)) {
+			pop.style.left = `${Math.max(0, ar.left - hr.left)}px`;
+		}
+		host?.append(pop);
 		this.resumePopover = pop;
 		// Clicking outside the popover closes it.
 		const onOutside = (evt: MouseEvent): void => {
@@ -821,6 +867,9 @@ export class TerminalView extends ItemView {
 	private renderState(): void {
 		const stateEl = this.stateEl;
 		if (!stateEl) return;
+		// The state line is rebuilt below — drop any open Resume… popover first
+		// so its ref never points at a detached element.
+		this.closeResumePopover();
 		// Keep the badge element identity stable across re-renders so applyBadge
 		// can keep fanning the state class onto it.
 		stateEl.empty();

@@ -587,6 +587,14 @@ try {
 	const ArthurPlugin = bundle.default;
 	assert(typeof ArthurPlugin === "function", "bundle exports the plugin class");
 
+	// WAVE 5 STATE CONTRACT — the pre-run activity state is 'ready' (renamed
+	// from 'idle' in the shared terminal-state module). The rename has LANDED;
+	// the runtime dual-name resolution was stripped at integration.
+	const PRE_RUN_STATE_NAME = "ready";
+	// Contract: a NEW/LOADED session that hasn't run anything shows ready, NOT
+	// running.
+	const FRESH_ALIVE_STATE_NAME = "ready";
+
 	// ---- 1. onload() with EMPTY settings ---------------------------------
 	console.log("== 1. onload with empty settings ==");
 	plugin = new ArthurPlugin(app, { id: "arthur", name: "Arthur", version: "0.4.1" });
@@ -6511,25 +6519,30 @@ try {
 		assert(bundle.detectAwaitingInput("\x1b[1;32mDone\x1b[0m") === false, "(b) ANSI-only chunk does not trip");
 
 		// (c) computeActivityState transitions (pure, controlled `now`) —
-		//     Wave 4/FIX B hysteresis: input gate, 5s silence, byte/input re-arm.
+		//     Wave 4/FIX B hysteresis + the Wave-5b RUN BOUNDARY: user input
+		//     (a prompt) starts a run — pty output alone (banner bursts, spinner
+		//     ticks) never leaves the pre-run 'ready'.
 		const T0 = 10_000_000;
 		const B = { focused: false, exited: false, lastQuestionAt: null };
 		assert(bundle.DONE_SILENCE_MS === 5000, "(c) FIX B silence window = 5000ms");
 		assert(bundle.IDLE_MS === 1500, "(c) awaiting-input window unchanged (1500ms)");
 		assert(bundle.DONE_REARM_BYTES === 2048, "(c) FIX B re-arm bar = 2048 bytes");
-		assert(bundle.computeActivityState({ ...B, lastDataAt: null, lastInputAt: null, now: T0 }) === "idle", "(c) nothing happened → idle");
-		assert(bundle.computeActivityState({ ...B, alive: true, lastDataAt: null, lastInputAt: null, now: T0 }) === "running", "(c) fresh alive pty, no data → running");
-		assert(bundle.computeActivityState({ ...B, lastDataAt: T0 - 500, lastInputAt: null, now: T0 }) === "running", "(c) recent data → running");
+		assert(bundle.computeActivityState({ ...B, lastDataAt: null, lastInputAt: null, now: T0 }) === PRE_RUN_STATE_NAME, `(c) nothing happened → the pre-run state (${PRE_RUN_STATE_NAME})`);
+		assert(bundle.computeActivityState({ ...B, alive: true, lastDataAt: null, lastInputAt: null, now: T0 }) === FRESH_ALIVE_STATE_NAME, `(c) fresh alive pty, no data → ${FRESH_ALIVE_STATE_NAME} (contract: a new session is pre-run, never 'running')`);
+		assert(bundle.computeActivityState({ ...B, lastDataAt: T0 - 500, lastInputAt: null, now: T0 }) === PRE_RUN_STATE_NAME,
+			"(c) pty output with NO user prompt yet → pre-run (a run starts at user input, not at output)");
 		// awaiting-input detection is UNCHANGED (FIX B keeps it as-is).
 		assert(bundle.computeActivityState({ ...B, lastDataAt: T0 - 100, lastInputAt: null, lastQuestionAt: T0 - 100, now: T0 }) === "awaiting-input", "(c) fresh question + unfocused → awaiting-input");
-		assert(bundle.computeActivityState({ ...B, focused: true, lastDataAt: T0 - 100, lastInputAt: null, lastQuestionAt: T0 - 100, now: T0 }) === "running", "(c) fresh question + focused → running (awaiting clears on focus)");
-		// INPUT GATE: a never-prompted session NEVER reaches done/seen.
+		assert(bundle.computeActivityState({ ...B, focused: true, lastDataAt: T0 - 100, lastInputAt: null, lastQuestionAt: T0 - 100, now: T0 }) === PRE_RUN_STATE_NAME,
+			"(c) fresh question + focused → pre-run (awaiting clears on focus; no prompt sent yet)");
+		// INPUT GATE: a never-prompted session NEVER reaches done/seen — and
+		// (Wave 5b) it never leaves the pre-run state either.
 		for (const gap of [2000, 6000, 60_000, 3_600_000]) {
-			assert(bundle.computeActivityState({ ...B, lastDataAt: T0 - gap, lastInputAt: null, now: T0 }) === "running",
-				`(c) never-prompted + ${gap}ms silence stays running (never done-unseen)`);
+			assert(bundle.computeActivityState({ ...B, lastDataAt: T0 - gap, lastInputAt: null, now: T0 }) === PRE_RUN_STATE_NAME,
+				`(c) never-prompted + ${gap}ms output silence stays pre-run (never done-unseen)`);
 		}
-		assert(bundle.computeActivityState({ ...B, focused: true, lastDataAt: T0 - 60_000, lastInputAt: null, now: T0 }) === "running",
-			"(c) never-prompted + focused quiet → running (never seen)");
+		assert(bundle.computeActivityState({ ...B, focused: true, lastDataAt: T0 - 60_000, lastInputAt: null, now: T0 }) === PRE_RUN_STATE_NAME,
+			"(c) never-prompted + focused quiet → pre-run (never seen)");
 		// SILENCE WINDOW: prompted + >5s true silence → done-unseen (focused → seen).
 		assert(bundle.computeActivityState({ ...B, lastDataAt: T0 - 6000, lastInputAt: T0 - 6000, now: T0 }) === "done-unseen",
 			"(c) prompted + 6s silence, unfocused → done-unseen");
@@ -6620,9 +6633,9 @@ try {
 		const sd = makeFakePtyFactory(); plugin.terminalManager.ptyFactory = sd.factory;
 		await plugin.activatePiTerminal({ cwd: "/tmp/st" });
 		const viewD = app.workspace.getLeavesOfType(T)[0].view;
-		assert(viewD.getVisualState() === "running", "(d) freshly spawned pty → running");
+		assert(viewD.getVisualState() === FRESH_ALIVE_STATE_NAME, `(d) freshly spawned pty → ${FRESH_ALIVE_STATE_NAME}`);
 		let badge = findByClass(viewD.contentEl, "arthur-pi-badge")[0];
-		assert(!!badge && badge.className.split(/\s+/).includes("arthur-pi-state-running"), "(d) badge carries arthur-pi-state-running");
+		assert(!!badge && badge.className.split(/\s+/).includes(`arthur-pi-state-${FRESH_ALIVE_STATE_NAME}`), `(d) badge carries arthur-pi-state-${FRESH_ALIVE_STATE_NAME}`);
 		viewD.setVisualState("awaiting-input");
 		assert(viewD.getVisualState() === "awaiting-input", "(d) setVisualState updates getVisualState");
 		badge = findByClass(viewD.contentEl, "arthur-pi-badge")[0];
@@ -6636,7 +6649,7 @@ try {
 		assert(viewD.getVisualState() === "awaiting-input", "(e) question chunk while unfocused → awaiting-input");
 		surfE.handlers.get("focusin")[0]?.();
 		await sleep(20);
-		assert(viewD.getVisualState() === "running", "(e) focusin clears awaiting-input → running");
+		assert(viewD.getVisualState() === PRE_RUN_STATE_NAME, "(e) focusin clears awaiting-input → back to the pre-run state (no prompt sent yet)");
 
 		// (f) non-zero exit → error state + badge class.
 		sd.ptys[0].exit(2);
@@ -6657,34 +6670,49 @@ try {
 		const comp = view.composer;
 		assert(!!comp && comp.isVisible === true, "(a) the composer row host is attached and default-visible");
 
-		// (b) ROW ORDER: pi commands first, composer controls after the spacer —
-		//     ALL directly visible (no '≡' dropdown anymore).
-		const rowIds = comp.toolbarEl.children
+		// (b) WAVE 5a SPLIT: the four pi commands (New/Resume…/Compact/Thinking)
+		//     live on the TOP toolbar (the state-line row); the composer's slim
+		//     FOOTER strip keeps only its own controls (no '≡' dropdown anywhere).
+		const topBar = findByClass(view.stateEl, "arthur-pi-toolbar")[0];
+		assert(!!topBar, "(b) the state-line row carries the top toolbar");
+		const idsOf = (root) => root.children
 			.map((c) => (c.attributes?.get?.("id") ?? ""))
 			.filter((id) => id.startsWith("pi-btn-"));
-		assert(JSON.stringify(rowIds) === JSON.stringify([
+		const topIds = idsOf(topBar);
+		assert(JSON.stringify(topIds) === JSON.stringify([
 			"pi-btn-new", "pi-btn-resume", "pi-btn-compact", "pi-btn-thinking",
+		]), `(b) top toolbar order = New / Resume… / Compact / Thinking (got: ${topIds.join(",")})`);
+		const rowIds = idsOf(comp.toolbarEl);
+		assert(JSON.stringify(rowIds) === JSON.stringify([
 			"pi-btn-send", "pi-btn-clear", "pi-btn-note", "pi-btn-selection",
 			"pi-btn-command", "pi-btn-link", "pi-btn-stats", "pi-btn-hide",
-		]), `(b) row order = pi commands → spacer → composer controls (got: ${rowIds.join(",")})`);
+		]), `(b) composer footer order = send → clear → inserts → stats → hide (got: ${rowIds.join(",")})`);
+		assert(["pi-btn-new", "pi-btn-resume", "pi-btn-compact", "pi-btn-thinking"]
+			.every((id) => findById(comp.toolbarEl, id) == null),
+			"(b) the composer footer no longer carries the moved command buttons");
 		assert(findButton(view.contentEl, "≡") == null, "(b) the Wave-1 '≡' dropdown button is gone");
 
 		// (c) PORTED REFERENCE ICONS (the lucide id recorded by the setIcon stub).
-		const iconOf = (id) => findById(comp.toolbarEl, id)?.attributes?.get?.("data-icon") ?? null;
-		const expectedIcons = {
+		const iconOf = (root, id) => findById(root, id)?.attributes?.get?.("data-icon") ?? null;
+		const expectedTopIcons = {
 			"pi-btn-new": "file-plus", "pi-btn-resume": "layers", "pi-btn-compact": "weight", "pi-btn-thinking": "gauge",
+		};
+		const expectedRowIcons = {
 			"pi-btn-send": "send", "pi-btn-clear": "eraser", "pi-btn-note": "file-text",
 			"pi-btn-selection": "text-cursor-input", "pi-btn-command": "square-slash",
 			"pi-btn-link": "link", "pi-btn-stats": "bar-chart-3",
 		};
-		for (const [id, icon] of Object.entries(expectedIcons)) {
-			assert(iconOf(id) === icon, `(c) ${id} renders the reference lucide icon '${icon}'`);
+		for (const [id, icon] of Object.entries(expectedTopIcons)) {
+			assert(iconOf(topBar, id) === icon, `(c) ${id} renders the reference lucide icon '${icon}' on the TOP toolbar`);
+		}
+		for (const [id, icon] of Object.entries(expectedRowIcons)) {
+			assert(iconOf(comp.toolbarEl, id) === icon, `(c) ${id} renders the reference lucide icon '${icon}' on the composer footer`);
 		}
 		assert(typeof bundle.PI_ROW_ICONS === "object" && bundle.PI_ROW_ICONS.compact === "weight",
 			"(c) bundle exports the PI_ROW_ICONS port registry");
 
 		// (d) DIRECT button actions → pty payloads (no popover round-trip).
-		const clickBtn = (id) => findById(comp.toolbarEl, id)?.handlers?.get("click")?.[0]?.({ preventDefault() {}, stopPropagation() {} });
+		const clickBtn = (id) => (findById(topBar, id) ?? findById(comp.toolbarEl, id))?.handlers?.get("click")?.[0]?.({ preventDefault() {}, stopPropagation() {} });
 		let w = pty.writes.length;
 		clickBtn("pi-btn-new");
 		assert(pty.writes.slice(w).includes("/new\r"), "(d) New writes '/new\\r' to the pty");
@@ -6696,12 +6724,13 @@ try {
 		assert(pty.writes.slice(w).includes("\x1b[Z") && !pty.writes.slice(w).includes("\x1b[Z\r"),
 			"(d) Thinking writes the bare Shift+Tab escape (no \\r)");
 
-		// (e) Resume… → the session-file LIST popover (the only popup left).
+		// (e) Resume… → the session-file LIST popover (the only popup left), now
+		//     anchored to the STATE LINE (the button lives on the top toolbar).
 		clickBtn("pi-btn-resume");
-		assert(findByClass(comp.rootEl, "arthur-pi-resume-popover").length === 1,
-			"(e) Resume… opens the session-file list popover inline");
+		assert(findByClass(view.stateEl, "arthur-pi-resume-popover").length === 1,
+			"(e) Resume… opens the session-file list popover below the state line");
 		clickBtn("pi-btn-resume"); // toggle closed again
-		assert(findByClass(comp.rootEl, "arthur-pi-resume-popover").length === 0,
+		assert(findByClass(view.stateEl, "arthur-pi-resume-popover").length === 0,
 			"(e) a second Resume… click closes the popover");
 
 		// (f) SLASH PICKER — LOCAL source of truth (fake ~/.pi tree injected).
@@ -7519,6 +7548,82 @@ try {
 	})();
 
 
+	// ---- 43. Wave 5a — composer full-size (textarea body + slim footer) ----
+//      + top-toolbar command buttons + the contract's 'ready' label --------
+	console.log("== 43. Wave 5a — composer full-size structure, top toolbar, 'ready' label ==");
+	await (async () => {
+		const T = "arthur-pi-terminal";
+		await app.workspace.detachLeavesOfType(T);
+		await plugin.onunload(); await plugin.onload();
+		const s43 = makeFakePtyFactory(); plugin.terminalManager.ptyFactory = s43.factory;
+		await plugin.activatePiTerminal({ cwd: "/tmp/w5a" });
+		const view43 = app.workspace.getLeavesOfType(T)[0].view;
+		const comp43 = view43.composer;
+
+		// (a) COMPOSER STRUCTURE: resizer → TEXTAREA (the panel body, BEFORE the
+		//     footer strip) → toolbar — the text element never shares a row with
+		//     the buttons, so it spans the panel's full width and fills its height.
+		const kids43 = comp43.rootEl.children;
+		assert(kids43[0] === comp43.resizerEl, "(a) resizer first (drag handle on the panel's top edge)");
+		assert(kids43[1] === comp43.textarea,
+			"(a) the textarea is the panel BODY (second child, above the footer strip)");
+		assert(kids43[2] === comp43.toolbarEl,
+			"(a) the button cluster is a slim footer strip BELOW the textarea");
+		assert(comp43.textarea.classList.contains("arthur-pi-composer-input") === true,
+			"(a) the textarea carries the composer input class");
+		assert(comp43.textarea.style.fontSize === "16px"
+			&& comp43.textarea.attributes.get("data-prompt-font-size") === "16",
+			"(a) promptFontSize is applied to the full-size textarea (style + data attr)");
+		// The terminal surface keeps the remaining leaf space — the composer is
+		// not greedy beyond its own panel (it is the LAST flex child).
+		const wrap43 = view43.contentEl.children[0];
+		assert(wrap43.children[wrap43.children.length - 1] === comp43.rootEl,
+			"(a) the composer panel stays bottom-docked (last flex child of the view)");
+		assert(wrap43.children[1] === findByClass(view43.contentEl, "arthur-pi-terminal-surface")[0]
+			&& wrap43.children[0] === view43.stateEl,
+			"(a) view order = state line (top toolbar) → terminal surface → composer");
+
+		// (b) styles.css structure guards (text-level — smoke has no CSS engine):
+		//     the panel is a flex column, the textarea is a block-level flex body
+		//     with width:100%/min-height:0, the footer strip is fixed chrome, the
+		//     state line anchors the Resume… popover.
+		const css43 = fs.readFileSync(path.join(root, "styles.css"), "utf8");
+		assert(/\.arthur-pi-composer\s*\{[^}]*display:\s*flex[^}]*flex-direction:\s*column/s.test(css43),
+			"(b) the composer panel is a flex column");
+		assert(/\.arthur-pi-composer\s*\{[^}]*flex:\s*0 0 auto/s.test(css43),
+			"(b) the composer never grows beyond its panel height (flex: 0 0 auto)");
+		assert(/\.arthur-pi-composer-input\s*\{[^}]*display:\s*block[^}]*flex:\s*1 1 auto[^}]*min-height:\s*0[^}]*width:\s*100%/s.test(css43),
+			"(b) the textarea: display:block + flex:1 1 auto + min-height:0 + width:100% (panel body)");
+		assert(/\.arthur-pi-composer-input\s*\{[^}]*max-width:\s*none/s.test(css43),
+			"(b) no max-width can cap the textarea");
+		assert(/\.arthur-pi-composer-toolbar\s*\{[^}]*flex:\s*0 0 auto/s.test(css43),
+			"(b) the footer strip is fixed chrome (flex: 0 0 auto — cannot squeeze the body)");
+		assert(/\.arthur-pi-terminal-surface\s*\{[^}]*flex:\s*1 1 auto[^}]*min-height:\s*0/s.test(css43),
+			"(b) the terminal surface keeps the remaining flex space");
+		assert(/\.arthur-pi-state-line\s*\{[^}]*position:\s*relative/s.test(css43),
+			"(b) the state line anchors the Resume… popover (position:relative)");
+		assert(/\.arthur-pi-state-ready\s*\{[^}]*color:/s.test(css43),
+			"(b) the contract's is-ready state class is styled");
+
+		// (c) THE CONTRACT'S 'ready' LABEL for a pre-run session. The idle → ready
+		//     rename has landed; a fresh badge must read 'ready'.
+		const badge43 = findByClass(view43.contentEl, "arthur-pi-badge")[0];
+		assert(view43.getVisualState() === "ready" && badge43.textContent === "ready",
+			"(c) a fresh session shows the contract's 'ready' label");
+		assert(badge43.className.split(/\s+/).includes("arthur-pi-state-ready"),
+			"(c) the badge carries the arthur-pi-state-ready class");
+		// The pre-run state renders the 'ready' label + its state CSS class.
+		view43.setVisualState(PRE_RUN_STATE_NAME);
+		const badge43b = findByClass(view43.contentEl, "arthur-pi-badge")[0];
+		assert(badge43b.textContent === "ready",
+			"(c) the pre-run state renders the 'ready' label");
+		assert(badge43b.className.split(/\s+/).includes(`arthur-pi-state-${PRE_RUN_STATE_NAME}`),
+			"(c) the pre-run badge carries its state CSS class");
+
+		await app.workspace.detachLeavesOfType(T);
+	})();
+
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();
@@ -7537,4 +7642,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / local-pty-terminal-spawn-args+pty→xterm+xterm→pty+resize+exit-state / local-pty-resolver-absolute-path-require+no-native-load / local-terminal-view-lazy-no-cwd+attach+close-kill+reopen / local-terminal-manager-per-cwd-routing+3-leaves+isolation+reuse+full-unload-kill-all / local-terminal-picker-fake-sessions-dir+select→open+vault-root+cwd-input+mobile-hide / ahp-client-load-retry-resilience-819e2bb-regression / pi-instance-states+badge-CSS-classes+focus-clears-awaiting / slash-toolbar-payload-bytes-new+compact+thinking / session-resume-spawn-args+listSessionFilesForCwd+respawn / send-active-note+selection-payload+wikilink-rewrite+no-terminal-notice / terminal-settings-plumbing-fontSize+scrollback+new-only / theme-follow-xterm-styling-var→ITheme+fallbacks+applyTheme / instance-picker+ribbon-command-routing+open-instances / pi-prompt-composer-drafts+bracketed-paste-submit+wikilink-context+@-files+image-paste+resizer-clamp / pi-farm-view-open+dormant-merge+resume/focus-actions+refresh-interval-lifecycle+empty-state+picker-browse-affordance / wave4-state-hysteresis-input-gate+5s-silence+re-arm-tick-loops-no-flap / inline-pi-toolbar-row-order+reference-lucide-icons+resume-popover+local-slash-picker-fake-fs / xterm-metrics-letterSpacing-0+lineHeight-1+font-monospace-chain / promptFontSize-default-clamp-apply+full-width-autogrow+css-guards all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / local-pty-terminal-spawn-args+pty→xterm+xterm→pty+resize+exit-state / local-pty-resolver-absolute-path-require+no-native-load / local-terminal-view-lazy-no-cwd+attach+close-kill+reopen / local-terminal-manager-per-cwd-routing+3-leaves+isolation+reuse+full-unload-kill-all / local-terminal-picker-fake-sessions-dir+select→open+vault-root+cwd-input+mobile-hide / ahp-client-load-retry-resilience-819e2bb-regression / pi-instance-states+badge-CSS-classes+focus-clears-awaiting / slash-toolbar-payload-bytes-new+compact+thinking / session-resume-spawn-args+listSessionFilesForCwd+respawn / send-active-note+selection-payload+wikilink-rewrite+no-terminal-notice / terminal-settings-plumbing-fontSize+scrollback+new-only / theme-follow-xterm-styling-var→ITheme+fallbacks+applyTheme / instance-picker+ribbon-command-routing+open-instances / pi-prompt-composer-drafts+bracketed-paste-submit+wikilink-context+@-files+image-paste+resizer-clamp / pi-farm-view-open+dormant-merge+resume/focus-actions+refresh-interval-lifecycle+empty-state+picker-browse-affordance / wave4-state-hysteresis-input-gate+5s-silence+re-arm-tick-loops-no-flap / inline-pi-toolbar-row-order+reference-lucide-icons+resume-popover+local-slash-picker-fake-fs / xterm-metrics-letterSpacing-0+lineHeight-1+font-monospace-chain / promptFontSize-default-clamp-apply+full-width-autogrow+css-guards / wave5a-composer-full-size+top-toolbar+ready-label all clean");
