@@ -21,8 +21,9 @@
  * height, the view's ResizeObserver → scheduleFit chain calls refit() so
  * the height re-clamps to the current leaf, and the flex column keeps the
  * textarea filling whatever space the panel has (min-height:0 discipline
- * throughout). An `@`-file suggester (at-suggester.ts) rides the textarea,
- * and the `square-slash` button opens the LOCAL command picker
+ * throughout). `@`-file and `[[wikilink]]` suggesters ride the textarea through
+ * the shared hover-overlay controller (at-suggester.ts /
+ * wikilink-suggester.ts), and the `square-slash` button opens the LOCAL command picker
  * (pi-commands.ts). A transient "sent" flash sits on the strip.
  *
  * Submit semantics — BRACKETED PASTE (reference PtyClient
@@ -49,6 +50,7 @@ import { el } from "../util";
 import type { LinkResolver } from "./link-rewrite";
 import { rewriteContextLinks } from "./link-rewrite";
 import { FileAtSuggester, insertCompletion, type FsDeps } from "./at-suggester";
+import { WikilinkSuggester } from "./wikilink-suggester";
 import { listPiCommands, PiCommandPickerModal, type PiCommand } from "./pi-commands";
 import { mergePulledPrompt } from "./prompt-transfer";
 
@@ -159,6 +161,8 @@ export class PromptComposer {
 	readonly hideBtn: HTMLButtonElement;
 	/** The @-file suggester riding the textarea. */
 	readonly suggester: FileAtSuggester;
+	/** The vault-backed `[[wikilink]]` suggester (same shared hover overlay). */
+	readonly wikilinkSuggester: WikilinkSuggester;
 
 	private visible = true;
 	private statsOn = false;
@@ -230,8 +234,8 @@ export class PromptComposer {
 		parent.append(this.rootEl);
 
 		// NOTE: the composer's own input/keydown listeners are registered BEFORE
-		// the suggester so they run FIRST — the keydown handler must be able to
-		// see `suggester.isActive` and yield every key to it (reference order).
+		// the suggesters so they run FIRST — the keydown handler must be able to
+		// see either active suggester and yield every key to it (reference order).
 		// Capture at the textarea so Mod+Enter is handled before Obsidian's
 		// bubbling keymap scope. The composer still runs before the suggester's
 		// bubble listener: plain Enter/Escape remain available to an active popup.
@@ -242,6 +246,11 @@ export class PromptComposer {
 		this.suggester = new FileAtSuggester(this.textarea, {
 			baseDir: () => this.host.cwd(),
 			fs: this.opts.fs,
+			onInsert: () => this.afterInput(),
+		});
+		this.wikilinkSuggester = new WikilinkSuggester(this.textarea, {
+			vault: this.plugin.app.vault,
+			metadataCache: this.plugin.app.metadataCache,
 			onInsert: () => this.afterInput(),
 		});
 
@@ -266,7 +275,10 @@ export class PromptComposer {
 		this.rootEl.style.display = visible ? "" : "none";
 		this.resizerEl.style.display = visible ? "" : "none";
 		if (visible) this.host.scheduleFit();
-		else this.suggester.hide();
+		else {
+			this.suggester.hide();
+			this.wikilinkSuggester.hide();
+		}
 	}
 
 	toggle(): void {
@@ -319,10 +331,10 @@ export class PromptComposer {
 		this.autoGrow();
 	}
 
-	/** Cmd+Enter (macOS) and Ctrl+Enter submit, including while the @ popup is
-	 *  open. Capture + immediate propagation stop prevent Obsidian commands from
-	 *  double-firing. Shift+Enter and plain Enter remain native newlines. When
-	 *  the @-suggester owns the keyboard every other key goes to it untouched. */
+	/** Cmd+Enter (macOS) and Ctrl+Enter submit, including while a completion popup
+	 *  is open. Capture + immediate propagation stop prevent Obsidian commands from
+	 *  double-firing. Shift+Enter and plain Enter remain native newlines. When a
+	 *  suggester owns the keyboard every other key goes to it untouched. */
 	private onKeydown = (e: KeyboardEvent): void => {
 		if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
 			e.preventDefault();
@@ -331,7 +343,7 @@ export class PromptComposer {
 			this.submitNow();
 			return;
 		}
-		if (this.suggester.isActive) return;
+		if (this.suggester.isActive || this.wikilinkSuggester.isActive) return;
 		// plain/Shift+Enter → default textarea newline (NEVER submits)
 	};
 
@@ -348,6 +360,7 @@ export class PromptComposer {
 			return false;
 		}
 		this.suggester.hide();
+		this.wikilinkSuggester.hide();
 		if (this.plugin.settings.piTerminalClearPromptOnSubmit) {
 			this.textarea.value = "";
 			this.host.setDraft("");
@@ -527,6 +540,7 @@ export class PromptComposer {
 		const h = clampComposerHeight(this.currentHeight(), this.host.viewHeight(), this.maxHeightPct());
 		if (Number.isFinite(h) && h > 0) this.rootEl.style.height = `${h}px`;
 		this.suggester.reposition();
+		this.wikilinkSuggester.reposition();
 	}
 
 	/** Current height in px: inline style → measured box → CSS default. */
@@ -583,6 +597,7 @@ export class PromptComposer {
 		}
 		this.stopDrag();
 		this.suggester.destroy();
+		this.wikilinkSuggester.destroy();
 		this.textarea.removeEventListener("input", this.onInput);
 		this.textarea.removeEventListener("keydown", this.onKeydown, true);
 	}

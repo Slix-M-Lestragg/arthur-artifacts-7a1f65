@@ -8450,6 +8450,188 @@ try {
 	})();
 
 
+	// ---- 49. Wave D — [[ note / #heading / #^block hover completion
+	console.log("== 49. composer [[ wikilink hover suggester ==");
+	await (async () => {
+		let checks49 = 0;
+		const failuresBefore49 = failures;
+		const assert49 = (cond, label) => { checks49++; assert(cond, label); };
+		const T = "arthur-pi-terminal";
+
+		// (a) Pure trigger boundaries: the LAST unclosed [[ owns the caret.
+		assert49(typeof bundle.extractWikilinkPrefix === "function"
+			&& typeof bundle.listWikilinkSuggestions === "function",
+			"(a) bundle exports the wikilink-suggester surface");
+		assert49(bundle.extractWikilinkPrefix("[[") === "[[", "(a) bare [[ triggers");
+		assert49(bundle.extractWikilinkPrefix("read [[No") === "[[No", "(a) mid-text [[ triggers");
+		assert49(bundle.extractWikilinkPrefix("[[Note#Head") === "[[Note#Head", "(a) heading form remains open");
+		assert49(bundle.extractWikilinkPrefix("[[Note]]") === null, "(a) ]] closes the token");
+		assert49(bundle.extractWikilinkPrefix("[[Note\n") === null
+			&& bundle.extractWikilinkPrefix("[[Note\r") === null, "(a) newline closes the token");
+		assert49(bundle.extractWikilinkPrefix("[[Old]] then [[New") === "[[New",
+			"(a) the latest unclosed [[ wins after an earlier closed link");
+		assert49(bundle.extractWikilinkPrefix("ordinary [text") === null, "(a) a single bracket never triggers");
+
+		const note49 = new obsidianStub.TFile("notes/Note.md");
+		const files49 = [
+			note49,
+			new obsidianStub.TFile("Alpha.md"),
+			new obsidianStub.TFile("a/Dup.md"),
+			new obsidianStub.TFile("b/Dup.md"),
+			new obsidianStub.TFile("Fuzzy Note.md"),
+		];
+		const cache49 = {
+			headings: [{ heading: "Heading", level: 2 }, { heading: "Other", level: 1 }],
+			blocks: { one: { id: "blockid" }, two: { id: "otherblock" } },
+		};
+
+		// (b) Vault-backed note rows, fuzzy matching, and collision-safe accept text.
+		const allNotes49 = bundle.listWikilinkNoteSuggestions(files49, "");
+		assert49(allNotes49.length === files49.length && allNotes49.every((row) => row.label),
+			"(b) every markdown file becomes a displayed note row");
+		const fuzzy49 = bundle.listWikilinkNoteSuggestions(files49, "Nte");
+		assert49(fuzzy49.some((row) => row.value === "[[Note]]")
+			&& !fuzzy49.some((row) => row.value === "[[Alpha]]"),
+			"(b) case-insensitive subsequence filtering keeps matching notes only");
+		assert49(bundle.listWikilinkNoteSuggestions(files49, "notes/not").some((row) => row.value === "[[Note]]"),
+			"(b) vault-relative path is also a fuzzy haystack");
+		const duplicates49 = bundle.listWikilinkNoteSuggestions(files49, "Dup").map((row) => row.value);
+		assert49(duplicates49.includes("[[a/Dup]]") && duplicates49.includes("[[b/Dup]]")
+			&& !duplicates49.includes("[[Dup]]"),
+			"(b) basename collisions insert explicit vault-relative paths");
+		const plainNote49 = allNotes49.find((row) => row.value === "[[Note]]");
+		assert49(plainNote49.caretOffset === -2 && plainNote49.consumeSuffix === "]]"
+			&& plainNote49.description === "notes",
+			"(b) note accept leaves the caret before ]] and shows its folder");
+
+		// (c) Metadata sub-completion and its non-breaking note-list fallback.
+		const headings49 = bundle.listWikilinkSuggestions(files49, "Note#", () => cache49);
+		assert49(headings49.length === 2 && headings49.some((row) => row.value === "[[Note#Heading]]"),
+			"(c) Note# lists metadataCache headings");
+		const headingFilter49 = bundle.listWikilinkSuggestions(files49, "Note#Head", () => cache49);
+		assert49(headingFilter49.length === 1 && headingFilter49[0].value === "[[Note#Heading]]",
+			"(c) heading query filters the metadata rows");
+		const blocks49 = bundle.listWikilinkSuggestions(files49, "Note#^", () => cache49);
+		assert49(blocks49.length === 2 && blocks49.some((row) => row.value === "[[Note#^blockid]]"),
+			"(c) Note#^ lists cache.blocks ids");
+		const blockFilter49 = bundle.listWikilinkSuggestions(files49, "Note#^blocki", () => cache49);
+		assert49(blockFilter49.length === 1 && blockFilter49[0].value === "[[Note#^blockid]]",
+			"(c) block query filters ids and accepts the full literal wikilink");
+		assert49(bundle.listWikilinkSuggestions(files49, "Note#NoMatch", () => cache49).length === 0,
+			"(c) available metadata with no match offers no stale rows");
+		const emptyCache49 = bundle.listWikilinkSuggestions(files49, "Note#", () => ({}));
+		assert49(emptyCache49.some((row) => row.value === "[[Note]]")
+			&& emptyCache49.every((row) => !row.value.includes("#")),
+			"(c) empty metadata falls back to the matching note list");
+		const unresolved49 = bundle.listWikilinkSuggestions(files49, "Missing#", () => cache49);
+		assert49(unresolved49.length === files49.length && unresolved49.every((row) => !row.label.includes("#")),
+			"(c) unresolved target# keeps the vault note list available");
+
+		// (d) Real composer + pty: shared overlay, two-step note → heading, send rewrite.
+		app.vault.getMarkdownFiles = () => files49;
+		app.metadataCache.getFileCache = (file) => file === note49 ? cache49 : null;
+		app.metadataCache.getFirstLinkpathDest = (target) => target === "Note" ? note49 : null;
+		const s49 = makeFakePtyFactory(); plugin.terminalManager.ptyFactory = s49.factory;
+		await plugin.activatePiTerminal({ cwd: "/tmp/wave-d49" });
+		const view49 = app.workspace.getLeavesOfType(T)[0].view;
+		const comp49 = view49.composer;
+		comp49.textarea.setSelectionRange = (start, end) => {
+			comp49.textarea.selectionStart = start; comp49.textarea.selectionEnd = end;
+		};
+		const pty49 = s49.ptys[0];
+		plugin.settings.piTerminalClearPromptOnSubmit = true;
+		comp49.textarea.getBoundingClientRect = () => ({
+			top: 500, left: 40, right: 520, bottom: 620,
+			width: 480, height: 120, x: 40, y: 500,
+		});
+		window.innerHeight = 800; window.innerWidth = 1000;
+		const fireKey49 = (init) => {
+			const ev = {
+				key: "Enter", metaKey: false, ctrlKey: false, shiftKey: false, altKey: false,
+				defaultPrevented: false, stopped: false, immediateStopped: false, ...init,
+				preventDefault() { this.defaultPrevented = true; },
+				stopPropagation() { this.stopped = true; },
+				stopImmediatePropagation() { this.immediateStopped = true; this.stopped = true; },
+			};
+			for (const h of comp49.textarea.handlers.get("keydown") ?? []) h(ev);
+			return ev;
+		};
+		const input49 = async () => {
+			for (const h of comp49.textarea.handlers.get("input") ?? []) h({});
+			await sleep(190);
+		};
+		const openWiki49 = async (text, caret = text.length) => {
+			comp49.suggester.hide(); comp49.wikilinkSuggester.hide();
+			comp49.textarea.value = text;
+			comp49.textarea.selectionStart = caret; comp49.textarea.selectionEnd = caret;
+			await input49();
+			return comp49.wikilinkSuggester;
+		};
+		const wiki49 = await openWiki49("[[");
+		assert49(wiki49.isActive && !!comp49.wikilinkSuggester,
+			"(d) typing [[ opens the vault-backed suggester in the pi composer");
+		assert49(wiki49.popup._parent === document.body
+			&& wiki49.popup.classList.contains("arthur-pi-file-suggest--hover")
+			&& wiki49.popup.style.width === "480px" && wiki49.popup.style.maxHeight === "240px",
+			"(d) wikilinks reuse the same body-portaled full-width hover overlay");
+		const noteIndex49 = wiki49.items.findIndex((row) => row.value === "[[Note]]");
+		wiki49.itemEls[noteIndex49].handlers.get("click")[0]({ preventDefault() {} });
+		assert49(comp49.textarea.value === "[[Note]]"
+			&& comp49.textarea.selectionStart === comp49.textarea.value.length - 2 && !wiki49.isActive,
+			"(d) picking a note inserts [[Note]] with the caret ready for #");
+		const hashCaret49 = comp49.textarea.selectionStart;
+		comp49.textarea.value = comp49.textarea.value.slice(0, hashCaret49) + "#" + comp49.textarea.value.slice(hashCaret49);
+		comp49.textarea.selectionStart = comp49.textarea.selectionEnd = hashCaret49 + 1;
+		await input49();
+		assert49(wiki49.isActive && wiki49.items.some((row) => row.value === "[[Note#Heading]]"),
+			"(d) adding # before ]] reopens the popup with that note's headings");
+		const headingIndex49 = wiki49.items.findIndex((row) => row.value === "[[Note#Heading]]");
+		wiki49.selectedIndex = headingIndex49;
+		fireKey49({ key: "Enter" });
+		assert49(comp49.textarea.value === "[[Note#Heading]]" && !wiki49.isActive,
+			"(d) picking a heading completes the two-step [[Note#Heading]] flow");
+		const writes49 = pty49.writes.length;
+		assert49(comp49.submitNow() === true && pty49.writes.length === writes49 + 1
+			&& pty49.writes.at(-1) === "\x1b[200~/tmp/arthur-vault-root/notes/Note.md#Heading\x1b[201~\r",
+			"(d) simulated send performs the single Wave-C path rewrite in the pty write");
+
+		// (e) Existing [[…]] closer is consumed, block flow works, and all dismissal paths.
+		const bracket49 = await openWiki49("[[]]", 2);
+		const bracketNote49 = bracket49.items.findIndex((row) => row.value === "[[Note]]");
+		bracket49.itemEls[bracketNote49].handlers.get("click")[0]({ preventDefault() {} });
+		assert49(comp49.textarea.value === "[[Note]]",
+			"(e) accepting inside the link button's [[]] consumes its existing closer");
+		const blockUi49 = await openWiki49("[[Note#^bloc");
+		fireKey49({ key: "Enter" });
+		assert49(comp49.textarea.value === "[[Note#^blockid]]" && !blockUi49.isActive,
+			"(e) block sub-completion inserts [[Note#^blockid]]");
+		const esc49 = await openWiki49("[[A");
+		const escEvent49 = fireKey49({ key: "Escape" });
+		assert49(escEvent49.defaultPrevented && escEvent49.stopped && !esc49.isActive,
+			"(e) Escape dismisses the wikilink overlay");
+		const blur49 = await openWiki49("[[A");
+		for (const h of comp49.textarea.handlers.get("blur") ?? []) h({});
+		await sleep(180);
+		assert49(!blur49.isActive, "(e) textarea blur dismisses the wikilink overlay");
+		const send49 = await openWiki49("[[A");
+		const beforeSend49 = pty49.writes.length;
+		assert49(comp49.submitNow() && pty49.writes.length === beforeSend49 + 1 && !send49.isActive,
+			"(e) send dismisses an active wikilink overlay");
+		await openWiki49("[[Note]]");
+		assert49(!wiki49.isActive, "(e) a closed ]] token does not reopen on input");
+		await openWiki49("[[Note\n");
+		assert49(!wiki49.isActive, "(e) a newline-closed token does not reopen on input");
+		app.metadataCache.getFileCache = () => null;
+		const fallbackUi49 = await openWiki49("[[Note#");
+		assert49(fallbackUi49.isActive && fallbackUi49.items.some((row) => row.value === "[[Note]]"),
+			"(e) unavailable metadata keeps note completion live in the real composer");
+
+		await app.workspace.detachLeavesOfType(T);
+		assert49(failuresBefore49 === failures, "§49 all wikilink-suggester assertions passed");
+		if (failuresBefore49 === failures) console.log(`§49 PASS: ${checks49} assertions`);
+	})();
+
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();

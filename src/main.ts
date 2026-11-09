@@ -101,6 +101,7 @@ export { listPiCommands, BUILTIN_PI_COMMANDS, defaultPiAgentDir, PiCommandPicker
 export type { PiCommand } from "./ui/pi-commands";
 export { extractAtPrefix, parseAtQuery, listAtSuggestions, insertCompletion, fuzzyScore, walkFilesystem, MAX_WALK_DEPTH, MAX_WALK_ENTRIES, MAX_SUGGESTIONS } from "./ui/at-suggester";
 export type { FsDeps, FileSuggestion, DirentLike, WalkEntry } from "./ui/at-suggester";
+export { extractWikilinkPrefix, listWikilinkNoteSuggestions, listWikilinkSubSuggestions, listWikilinkSuggestions } from "./ui/wikilink-suggester";
 // instance picker (open-instances + new) — asserted against the export surface.
 export { InstancePickerModal, NewTerminalTargetModal } from "./ui/instance-picker";
 export type { InstanceRow, InstancePickerOpts } from "./ui/instance-picker";

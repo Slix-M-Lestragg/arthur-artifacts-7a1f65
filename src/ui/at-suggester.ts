@@ -20,14 +20,11 @@
  * The fs surface is INJECTED (`FsDeps`) so smoke can drive the walker over a
  * fake tree with no real fs access; production defaults to `fs.readdirSync`.
  */
-import { el } from "../util";
+import { TokenSuggester, type TokenSuggestion, type TokenSuggesterOptions } from "./token-suggester";
+export { insertCompletion } from "./token-suggester";
 
 /** One completion item: `value` includes the leading `@` (+ trailing `/` for dirs). */
-export interface FileSuggestion {
-	value: string;
-	label: string;
-	description?: string;
-}
+export interface FileSuggestion extends TokenSuggestion {}
 
 /** Dirent-shaped entry — the only fs read the walker needs (injectable). */
 export interface DirentLike {
@@ -258,288 +255,30 @@ export function listAtSuggestions(
 	return out;
 }
 
-// ----------------------------------------------------------------- insert
-
-/**
- * Splice a completion into `text`: replace `[start, end)` with `value` and
- * report the new cursor offset (right after the insert). Pure — the class and
- * smoke share this exact path.
- */
-export function insertCompletion(
-	text: string,
-	start: number,
-	end: number,
-	value: string,
-): { value: string; cursor: number } {
-	const s = Math.max(0, Math.min(start, text.length));
-	const e = Math.max(s, Math.min(end, text.length));
-	return { value: text.slice(0, s) + value + text.slice(e), cursor: s + value.length };
-}
-
 // -------------------------------------------------------------------- class
 
-const DEBOUNCE_MS = 150;
-const MAX_VISIBLE_ITEMS = 12;
-
-export interface FileAtSuggesterOptions {
+export interface FileAtSuggesterOptions extends TokenSuggesterOptions {
 	/** The terminal cwd — `@` paths are relative to this (live: re-read on
 	 *  every query so a cwd change re-targets the suggester). */
 	baseDir: () => string | null;
 	/** Injected fs (tests); production defaults to `fs.readdirSync`. */
 	fs?: FsDeps;
-	maxVisibleItems?: number;
-	/** Called after a row insert (no native 'input' event fires on a
-	 *  programmatic value write) — the composer syncs its draft store here.
-	 *  Deliberately NOT a synthetic input dispatch: that would re-query and
-	 *  immediately re-open the popup the select just closed. */
-	onInsert?: () => void;
 }
 
-/**
- * The popup controller: watches the composer textarea and shows a document-level
- * hover list ABOVE the composer's top edge (a bottom-docked textarea has no
- * usable space below it). Handles Esc / arrows / Enter+Tab selection and mouse
- * hover/click. Popup rows are kept in an array (no querySelectorAll — the smoke
- * DOM shim lacks it).
- */
-export class FileAtSuggester {
-	private popup: HTMLElement | null = null;
-	private itemEls: HTMLElement[] = [];
-	private items: FileSuggestion[] = [];
-	private selectedIndex = 0;
-	private active = false;
-	private currentPrefix: string | null = null;
-	private debounceTimer: number | null = null;
-	private readonly maxVisible: number;
-
-	private readonly onInput = (): void => this.scheduleCheck();
-	private readonly onKeydown = (e: KeyboardEvent): void => this.handleKeydown(e);
-	private readonly onBlur = (): void => {
-		// Delay so a row mousedown (preventDefault → no blur) still registers.
-		window.setTimeout(() => this.hide(), 150);
-	};
-	private readonly onReposition = (): void => this.reposition();
-
-	constructor(
-		private readonly textarea: HTMLTextAreaElement,
-		private readonly opts: FileAtSuggesterOptions,
-	) {
-		this.maxVisible = opts.maxVisibleItems ?? MAX_VISIBLE_ITEMS;
-		textarea.addEventListener("input", this.onInput);
-		textarea.addEventListener("keydown", this.onKeydown);
-		textarea.addEventListener("blur", this.onBlur);
-		const doc = textarea.ownerDocument ?? document;
-		(doc.defaultView ?? window).addEventListener("resize", this.onReposition);
-		doc.addEventListener("scroll", this.onReposition, true);
+/** Thin `@` driver over the shared token-suggester overlay. */
+export class FileAtSuggester extends TokenSuggester<FileAtSuggesterOptions> {
+	constructor(textarea: HTMLTextAreaElement, opts: FileAtSuggesterOptions) {
+		super(textarea, { ...opts, ariaLabel: "File completions" });
 	}
 
-	get isActive(): boolean {
-		return this.active;
-	}
-
-	// -- detection ------------------------------------------------------------
-
-	/** The `@` prefix at the cursor (null → nothing to suggest). */
-	private getPrefix(): string | null {
+	protected getPrefix(): string | null {
 		const value = this.textarea.value ?? "";
 		const cursor = this.textarea.selectionStart ?? value.length;
 		return extractAtPrefix(value.slice(0, cursor));
 	}
 
-	private scheduleCheck(): void {
-		if (this.debounceTimer != null) window.clearTimeout(this.debounceTimer);
-		this.debounceTimer = window.setTimeout(() => {
-			this.debounceTimer = null;
-			this.checkAndShow();
-		}, DEBOUNCE_MS);
-	}
-
-	private checkAndShow(): void {
-		const prefix = this.getPrefix();
-		if (!prefix) {
-			this.hide();
-			return;
-		}
+	protected getSuggestions(prefix: string): FileSuggestion[] {
 		const baseDir = this.opts.baseDir();
-		if (!baseDir) {
-			this.hide();
-			return;
-		}
-		const items = listAtSuggestions(baseDir, parseAtQuery(prefix), this.opts.fs);
-		if (items.length === 0) {
-			this.hide();
-			return;
-		}
-		this.currentPrefix = prefix;
-		this.items = items.slice(0, this.maxVisible);
-		this.selectedIndex = 0;
-		this.active = true;
-		this.render();
-	}
-
-	// -- rendering ------------------------------------------------------------
-
-	private render(): void {
-		if (!this.active || this.items.length === 0) {
-			this.hide();
-			return;
-		}
-		const doc = this.textarea.ownerDocument ?? document;
-		if (!this.popup) {
-			this.popup = el("div", {
-				cls: "arthur-pi-file-suggest arthur-pi-file-suggest--hover",
-				attrs: { role: "listbox", "aria-label": "File completions" },
-			});
-			// Portal to body: neither composer overflow nor xterm stacking can clip it.
-			doc.body.appendChild(this.popup);
-		}
-		const popup = this.popup;
-		popup.empty();
-		this.itemEls = [];
-		this.items.forEach((item, i) => {
-			const row = el("div", {
-				cls: "arthur-pi-file-item" + (i === this.selectedIndex ? " is-selected" : ""),
-				attrs: { role: "option", "aria-selected": String(i === this.selectedIndex) },
-			});
-			row.append(el("span", { cls: "arthur-pi-file-item-name", text: item.label }));
-			if (item.description) {
-				row.append(el("span", { cls: "arthur-pi-file-item-path", text: ` — ${item.description}` }));
-			}
-			row.addEventListener("mouseenter", () => {
-				this.selectedIndex = i;
-				this.updateSelection();
-			});
-			row.addEventListener("mousedown", (e) => e.preventDefault()); // keep textarea focus
-			row.addEventListener("click", (e) => {
-				e.preventDefault();
-				this.select(i);
-			});
-			popup.append(row);
-			this.itemEls.push(row);
-		});
-		popup.style.display = "block";
-		this.reposition();
-	}
-
-	/** Re-anchor the body-portaled overlay to the textarea's TOP edge. Called by
-	 *  render, window/document scroll+resize, and PromptComposer.refit() (the
-	 *  terminal view's existing ResizeObserver path). */
-	reposition(): void {
-		const popup = this.popup;
-		if (!this.active || !popup) return;
-		const rect = this.textarea.getBoundingClientRect();
-		const doc = this.textarea.ownerDocument ?? document;
-		const win = doc.defaultView ?? window;
-		const viewportH = Number(win.innerHeight) || 0;
-		const viewportW = Number(win.innerWidth) || 0;
-		const gap = 6;
-		const margin = 8;
-		const available = Math.max(0, rect.top - gap - margin);
-		const maxHeight = rect.top > 0 ? Math.max(48, Math.min(240, available)) : 240;
-		const width = Math.max(0, rect.width);
-		const left = viewportW > 0 && width > 0
-			? Math.max(margin, Math.min(rect.left, viewportW - width - margin))
-			: rect.left;
-		popup.style.position = "fixed";
-		popup.style.left = `${left}px`;
-		popup.style.width = `${width}px`;
-		popup.style.minWidth = "0";
-		popup.style.maxWidth = "none";
-		popup.style.maxHeight = `${maxHeight}px`;
-		const measured = Number(popup.offsetHeight) || Math.min(maxHeight, this.items.length * 28 + 4);
-		const height = Math.min(maxHeight, measured);
-		let top = Math.max(margin, rect.top - height - gap);
-		if (viewportH > 0) top = Math.min(top, Math.max(margin, viewportH - height - margin));
-		popup.style.top = `${top}px`;
-		popup.style.bottom = "auto";
-		popup.style.display = "block";
-	}
-
-	private updateSelection(): void {
-		this.itemEls.forEach((elm, i) => {
-			elm.classList.toggle("is-selected", i === this.selectedIndex);
-			elm.setAttribute("aria-selected", String(i === this.selectedIndex));
-		});
-		this.itemEls[this.selectedIndex]?.scrollIntoView?.({ block: "nearest" });
-	}
-
-	// -- keyboard -------------------------------------------------------------
-
-	private handleKeydown(e: KeyboardEvent): void {
-		if (!this.active) return;
-		// Modifier chords (Mod+Enter submit etc.) are never selection keys —
-		// leave them entirely to the composer's handler.
-		if (e.metaKey || e.ctrlKey || e.altKey) return;
-		if (e.key === "ArrowDown") {
-			e.preventDefault();
-			this.selectedIndex = (this.selectedIndex + 1) % this.items.length;
-			this.updateSelection();
-		} else if (e.key === "ArrowUp") {
-			e.preventDefault();
-			this.selectedIndex = (this.selectedIndex - 1 + this.items.length) % this.items.length;
-			this.updateSelection();
-		} else if (e.key === "Enter" || e.key === "Tab") {
-			// Only consume Enter while the prefix the list was built for is
-			// still at the cursor — otherwise it's a normal newline.
-			if (this.currentPrefix !== null && this.getPrefix() === this.currentPrefix) {
-				e.preventDefault();
-				e.stopPropagation();
-				this.select(this.selectedIndex);
-			}
-		} else if (e.key === "Escape") {
-			e.preventDefault();
-			e.stopPropagation();
-			this.hide();
-		}
-	}
-
-	// -- insertion ------------------------------------------------------------
-
-	private select(index: number): void {
-		const item = this.items[index];
-		const prefix = this.currentPrefix;
-		if (!item || !prefix) return;
-		const value = this.textarea.value ?? "";
-		const cursor = this.textarea.selectionStart ?? value.length;
-		const start = cursor - prefix.length;
-		const res = insertCompletion(value, start, cursor, item.value);
-		this.textarea.value = res.value;
-		if (typeof this.textarea.setSelectionRange === "function") {
-			this.textarea.setSelectionRange(res.cursor, res.cursor);
-		}
-		this.textarea.focus();
-		this.hide();
-		this.opts.onInsert?.();
-	}
-
-	// -- lifecycle ------------------------------------------------------------
-
-	hide(): void {
-		if (this.debounceTimer != null) {
-			window.clearTimeout(this.debounceTimer);
-			this.debounceTimer = null;
-		}
-		this.active = false;
-		this.currentPrefix = null;
-		this.items = [];
-		this.itemEls = [];
-		this.selectedIndex = 0;
-		if (this.popup) this.popup.style.display = "none";
-	}
-
-	destroy(): void {
-		if (this.debounceTimer != null) {
-			window.clearTimeout(this.debounceTimer);
-			this.debounceTimer = null;
-		}
-		this.textarea.removeEventListener("input", this.onInput);
-		this.textarea.removeEventListener("keydown", this.onKeydown);
-		this.textarea.removeEventListener("blur", this.onBlur);
-		const doc = this.textarea.ownerDocument ?? document;
-		(doc.defaultView ?? window).removeEventListener("resize", this.onReposition);
-		doc.removeEventListener("scroll", this.onReposition, true);
-		this.popup?.remove();
-		this.popup = null;
-		this.active = false;
+		return baseDir ? listAtSuggestions(baseDir, parseAtQuery(prefix), this.opts.fs) : [];
 	}
 }
