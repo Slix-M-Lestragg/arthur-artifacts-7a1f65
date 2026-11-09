@@ -18,6 +18,7 @@ import { DETAIL_INTERVAL_MS } from "./util";
 import { ArthurDashboardView, VIEW_TYPE_ARTHUR_DASHBOARD } from "./ui/dashboard-view";
 import { AhpView, VIEW_TYPE_AHP } from "./ui/ahp-view";
 import { TerminalView, VIEW_TYPE_PI_TERMINAL } from "./ui/terminal-view";
+import { PiFarmView, VIEW_TYPE_PI_FARM } from "./ui/pi-farm-view";
 import { TerminalManager } from "./ui/terminal-manager";
 import { TerminalPickerModal, listLocalPiSessions, defaultPiSessionsDir } from "./ui/terminal-picker";
 import { InstancePickerModal } from "./ui/instance-picker";
@@ -50,6 +51,10 @@ export { AhpClient, ahpWsUrl, AHP_PROTOCOL_VERSION } from "./api/ahp";
 // pi terminal view (local pty backend): registration + lifecycle asserted
 // against the compiled main.js export surface.
 export { VIEW_TYPE_PI_TERMINAL, TerminalView } from "./ui/terminal-view";
+// pi farm view (Wave 3) — local sessions overview (open + dormant, merged):
+// registration + the pure merge helper asserted against the export surface.
+export { VIEW_TYPE_PI_FARM, PiFarmView, mergeFarmRows } from "./ui/pi-farm-view";
+export type { FarmRow } from "./ui/pi-farm-view";
 // pi terminal manager: per-cwd leaf routing + pty lifecycle asserted against
 // the compiled main.js export surface.
 export { TerminalManager } from "./ui/terminal-manager";
@@ -649,6 +654,17 @@ export default class ArthurPlugin extends Plugin {
 		// routes through the manager into a bound leaf. Desktop-only — hidden on
 		// mobile (the local pty + Node fs scan cannot run there).
 		this.registerView(VIEW_TYPE_PI_TERMINAL, (leaf) => new TerminalView(leaf, this));
+		// pi farm view (Wave 3): a READ-ONLY local sessions overview that merges
+		// open terminal instances with a scan of ~/.pi/agent/sessions/. Opens in
+		// the right leaf (same pattern as the AHP view); desktop-only command.
+		this.registerView(VIEW_TYPE_PI_FARM, (leaf) => new PiFarmView(leaf, this));
+		this.addCommand({
+			id: "open-pi-farm",
+			name: "Open pi farm",
+			callback: () => {
+				void this.activatePiFarmView();
+			},
+		});
 		this.addCommand({
 			id: "open-pi-terminal",
 			name: "Open pi terminal",
@@ -986,6 +1002,9 @@ export default class ArthurPlugin extends Plugin {
 		this.terminalManager?.closeAll();
 		this.terminalManager = null;
 
+		// Pi farm view leaves → PiFarmView.onClose clears its refresh interval.
+		this.app.workspace.detachLeavesOfType(VIEW_TYPE_PI_FARM);
+
 		// Stop poller timers (registerInterval above is the backstop).
 		this.clients?.lightPoller.stop();
 		this.clients?.detailPoller.stop();
@@ -1098,6 +1117,24 @@ export default class ArthurPlugin extends Plugin {
 	}
 
 	/**
+	 * Open (or reveal) the pi farm view — the right-leaf registerView pattern
+	 * (reuse an existing leaf, else the right leaf / getLeaf(true) fallback).
+	 * Desktop-only in spirit (the local sessions scan is desktop-only); the
+	 * command is registered unconditionally but the scan no-ops on mobile.
+	 */
+	async activatePiFarmView(): Promise<void> {
+		const { workspace } = this.app;
+		const leaves = workspace.getLeavesOfType(VIEW_TYPE_PI_FARM);
+		let leaf = leaves.length ? leaves[0] : workspace.getRightLeaf(false);
+		if (!leaf) leaf = workspace.getLeaf(true);
+		await leaf.setViewState({
+			type: VIEW_TYPE_PI_FARM,
+			active: true,
+		});
+		workspace.revealLeaf(leaf);
+	}
+
+	/**
 	 * Open (or reveal) the pi terminal leaf for a working directory. Routed
 	 * through the TerminalManager (local pty backend): a leaf already bound to
 	 * the given cwd is focused, else a new main-area leaf is created and the
@@ -1137,6 +1174,9 @@ export default class ArthurPlugin extends Plugin {
 				Promise.resolve(listLocalPiSessions(defaultPiSessionsDir())),
 			onPick: (cwd, title, sessionFile) => {
 				void this.activatePiTerminal({ cwd, ...(title ? { title } : {}), ...(sessionFile ? { sessionFile } : {}) });
+			},
+			onBrowseAll: () => {
+				void this.activatePiFarmView();
 			},
 		});
 		modal.open();

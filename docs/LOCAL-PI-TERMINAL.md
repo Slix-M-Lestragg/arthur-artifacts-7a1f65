@@ -160,3 +160,57 @@ boundaries + fuzzy filtering + dir drilling + depth/entry caps over an injected
 fake fs, image-paste gating (`\x16` vs untouched text paste), resizer clamp
 math, and the hide/state-line toggle round-trip. All existing sections remain
 green.
+
+## Wave 3 — pi farm view (local sessions overview)
+
+A READ-ONLY "pi farm" view merges the two local session realities into one
+plain-DOM table, refreshed on a 5 s interval while open + on demand (Refresh
+button):
+
+- **Open instances** — from `TerminalManager.openInstances()`: every cwd-bound
+  terminal leaf currently open, with its live Wave 1 activity state
+  (`idle | running | done-unseen | seen | awaiting-input | error`) as the state
+  dot and an `open` badge. Row action: **focus** the leaf.
+- **Dormant sessions** — a scan of `~/.pi/agent/sessions/` reusing the
+  terminal picker's `listLocalPiSessions` (no duplication — the same module),
+  one entry per cwd (authoritative cwd read from the most-recent jsonl first
+  line), newest `.jsonl` mtime + size. Row action: **resume** via the Wave 1
+  path `pi --session <abs file>` (or `open` → `-c` newest when the subdir had
+  no jsonl).
+
+- **`src/ui/pi-farm-view.ts`** — `PiFarmView extends ItemView`, view type
+  `arthur-pi-farm`, icon `tractor`, display "pi farm"; command "Open pi farm"
+  (no ribbon). Lazy build on open, full teardown on close, `register`
+  backstop for the refresh interval. `mergeFarmRows(open, dormant, now)` is a
+  pure exported helper (keyed by trimmed cwd; a cwd that is BOTH open and
+  dormant collapses to one open row carrying the dormant file/size; open rows
+  bump mtime to `now` so live rows sort to the top; sorted modified-desc;
+  capped at 200 rows). A compact/comfortable density toggle replaces the
+  reference's 11-column/settings machinery.
+- **`main.ts`** — `registerView` + the "Open pi farm" command +
+  `activatePiFarmView` (right-leaf pattern); `onunload` detaches farm leaves;
+  the terminal picker's new optional `onBrowseAll` opt is wired to open the
+  farm, so the picker's empty state shows a "browse all sessions →" affordance.
+- **Merge / dedup guarantee**: a dormant session whose cwd matches an
+  already-open terminal renders as a single **open** row (focus action), never
+  a duplicate spawn — consistent with the manager's leaf-reuse-by-cwd
+  (`openTerminal(cwd)` focuses an existing leaf). Even a stale dormant row
+  clicked after a leaf opened since the last refresh is safe: `openTerminal`
+  focuses rather than spawns.
+- **Read-only**: the scan stats session files but never writes — no
+  delete/cull/rename this wave.
+
+The `LocalPiSession` shape gained an optional `size` (bytes of the most-recent
+jsonl), populated by `listLocalPiSessions` and ignored by the picker; the farm
+view renders it in the size column.
+
+Smoke coverage (section 41, ~30 assertions): exports + command registration,
+pure merge semantics (shared-cwd collapse with file/size carried, distinct-cwd
+two rows, open-only row, empty), 200-row cap keeping the most recent, view
+lifecycle + table render against a fake sessions dir (cwd-slug decode
+end-to-end), open-badge + focus vs resume action split, refresh interval
+started-on-open / cleared-on-close, resume action spawning `pi --session <abs>`
+through the fake pty factory, focus action reusing the existing leaf (no new
+pty / no duplicate), empty-state note, the 200-row view cap, and the picker
+empty-state "browse all sessions →" affordance firing `onBrowseAll` + closing
+the picker. All existing sections remain green.

@@ -31,6 +31,10 @@ export interface LocalPiSession {
 	/** Absolute path to the most-recent `.jsonl` session file for this cwd
 	 *  (undefined when the subdir held no jsonl — a decoded-name-only entry). */
 	file?: string;
+	/** Size in bytes of the most-recent `.jsonl` session file (undefined when
+	 *  the subdir held no jsonl). Populated by `listLocalPiSessions`; the
+	 *  picker ignores it, the pi-farm view renders it in its size column. */
+	size?: number;
 }
 
 /** One `.jsonl` session file in a cwd's sessions subdir (newest first). */
@@ -91,7 +95,7 @@ export function listLocalPiSessions(dir: string): LocalPiSession[] {
 		} catch {
 			files = [];
 		}
-		let best: { file: string; mtime: number } | null = null;
+		let best: { file: string; mtime: number; size: number } | null = null;
 		for (const f of files) {
 			if (!f.endsWith(".jsonl")) continue;
 			const fp = path.join(full, f);
@@ -101,7 +105,8 @@ export function listLocalPiSessions(dir: string): LocalPiSession[] {
 			} catch {
 				continue;
 			}
-			if (!best || fst.mtimeMs > best.mtime) best = { file: fp, mtime: fst.mtimeMs };
+			if (!best || fst.mtimeMs > best.mtime)
+				best = { file: fp, mtime: fst.mtimeMs, size: fst.size };
 		}
 		let cwd = decodeSessionDirName(name);
 		const mtimeMs = best?.mtime ?? st.mtimeMs;
@@ -122,7 +127,11 @@ export function listLocalPiSessions(dir: string): LocalPiSession[] {
 				// keep the decoded name
 			}
 		}
-		out.push({ cwd, mtimeMs, ...(best ? { file: best.file } : {}) });
+		out.push({
+			cwd,
+			mtimeMs,
+			...(best ? { file: best.file, size: best.size } : {}),
+		});
 	}
 	out.sort((a, b) => b.mtimeMs - a.mtimeMs);
 	return out;
@@ -226,6 +235,9 @@ export interface TerminalPickerOpts {
 	 *  `sessionFile` is the most-recent `.jsonl` for that cwd when a row was
 	 *  picked (so the terminal resumes that exact session via `pi --session`). */
 	onPick(cwd: string, title?: string, sessionFile?: string): void;
+	/** Optional 'browse all sessions' affordance rendered in the empty state —
+	 *  wired by main.ts to open the pi farm view. */
+	onBrowseAll?(): void;
 }
 
 /**
@@ -422,6 +434,22 @@ export class TerminalPickerModal extends Modal {
 							: "no sessions match the filter",
 					),
 				);
+				// 'browse all sessions →' affordance → opens the pi farm view (Wave 3).
+				if (this.rows.length === 0 && typeof this.opts.onBrowseAll === "function") {
+					const browse = el("div", {
+						cls: "arthur-terminal-browse-all",
+						attrs: {
+							role: "button",
+							title: "Open the pi farm view (all local sessions, open + dormant)",
+						},
+						text: "browse all sessions →",
+					});
+					browse.addEventListener("click", () => {
+						this.opts.onBrowseAll?.();
+						this.close();
+					});
+					list.append(browse);
+				}
 			}
 			return;
 		}

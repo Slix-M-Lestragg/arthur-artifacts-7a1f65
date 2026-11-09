@@ -2888,3 +2888,50 @@
 .arthur-ribbon-hub-label { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .arthur-ribbon-hub-dir { color: var(--text-muted); font-size: var(--font-ui-smaller); margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .arthur-ribbon-hub-empty { color: var(--text-muted); font-size: var(--font-ui-smaller); padding: 0.3em 0.4em; }
+
+/* ---- Wave 3: pi farm view — local sessions overview (open + dormant) ----
+   A plain-DOM table merging open terminal instances (live state dot + open
+   badge + focus action) with a scan of ~/.pi/agent/sessions/ (dormant rows,
+   resume action). compact density tightens row padding. */
+.arthur-farm { display: flex; flex-direction: column; gap: 0.5em; padding: 0.3em 0.2em; }
+.arthur-farm-state-line { flex-wrap: wrap; gap: 0.6em; }
+.arthur-farm-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: var(--font-ui-small);
+}
+.arthur-farm-table thead th {
+	text-align: left;
+	font-weight: var(--font-medium);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	padding: 0.25em 0.4em;
+	border-bottom: 1px solid var(--background-modifier-border);
+	text-transform: lowercase;
+}
+.arthur-farm-row td {
+	padding: 0.45em 0.5em;
+	border-bottom: 1px solid var(--background-modifier-border);
+	vertical-align: middle;
+}
+.arthur-farm--compact .arthur-farm-row td { padding: 0.25em 0.4em; }
+.arthur-farm-row:hover { background: var(--background-modifier-hover); }
+.arthur-farm-row--open { background: var(--background-modifier-active-hover, transparent); }
+.arthur-farm-dot { font-weight: 700; min-width: 1em; text-align: center; display: inline-block; }
+.arthur-farm-row--dormant .arthur-farm-dot { color: var(--text-muted); }
+.arthur-farm-cwd { color: var(--text-normal); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 26em; }
+.arthur-farm-title { color: var(--text-normal); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 22em; }
+.arthur-farm-modified, .arthur-farm-size { color: var(--text-muted); font-size: var(--font-ui-smaller); white-space: nowrap; }
+.arthur-farm-actions { white-space: nowrap; text-align: right; }
+.arthur-farm-open-badge { margin-right: 0.4em; }
+.arthur-farm-cap { padding: 0.2em 0.4em; }
+
+/* 'browse all sessions →' affordance in the terminal picker empty state. */
+.arthur-terminal-browse-all {
+	color: var(--interactive-accent);
+	font-size: var(--font-ui-smaller);
+	padding: 0.3em 0.45em;
+	cursor: pointer;
+	text-decoration: underline;
+}
+.arthur-terminal-browse-all:hover { background: var(--background-modifier-hover); border-radius: var(--radius-s); }

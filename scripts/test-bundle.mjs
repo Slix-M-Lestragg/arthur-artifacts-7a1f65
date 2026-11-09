@@ -7020,6 +7020,201 @@ try {
 	})();
 
 
+	// ---- 41. pi farm view (local sessions overview: open + dormant merge /
+	//      resume+focus actions / refresh interval lifecycle / empty state) -
+	console.log("== 41. pi farm view (open+dormant merge / resume+focus / refresh interval / empty state) ==");
+	await (async () => {
+		const F = "arthur-pi-farm";
+		const T = "arthur-pi-terminal";
+
+		// (a) exports + registration + command.
+		assert(typeof bundle.PiFarmView === "function" && bundle.VIEW_TYPE_PI_FARM === F, "(a) bundle exports PiFarmView + VIEW_TYPE_PI_FARM");
+		assert(typeof bundle.mergeFarmRows === "function", "(a) bundle exports the pure mergeFarmRows helper");
+		assert(app.viewFactories.has(F), "(a) registerView registered the pi farm view factory at onload");
+		const farmCmd = plugin.commands.get("open-pi-farm");
+		assert(typeof farmCmd?.callback === "function" && farmCmd.name === "Open pi farm", "(a) command 'Open pi farm' is registered");
+		assert(typeof plugin.activatePiFarmView === "function", "(a) plugin.activatePiFarmView exists");
+
+		// (b) pure mergeFarmRows: open + dormant SAME cwd → ONE row (open badge,
+		//     live state, dormant file/size carried); DIFFERENT cwd → two rows;
+		//     sorted modified-desc; empty → [].
+		const nowB = 2_000_000_000;
+		const mergedB = bundle.mergeFarmRows(
+			[{ cwd: "/tmp/alpha", title: "alpha", state: "running" }],
+			[
+				{ cwd: "/tmp/alpha", mtimeMs: 1_000_000_000, file: "/sess/alpha.jsonl", size: 500 },
+				{ cwd: "/home/slix", mtimeMs: 900_000_000, file: "/sess/slix.jsonl", size: 200 },
+			],
+			nowB,
+		);
+		assert(mergedB.length === 2, "(b) open + dormant (one shared cwd + one distinct) → 2 rows");
+		assert(mergedB[0].cwd === "/tmp/alpha" && mergedB[0].open === true && mergedB[0].state === "running",
+			"(b) the shared cwd collapses to one OPEN row with the live state");
+		assert(mergedB[0].file === "/sess/alpha.jsonl" && mergedB[0].size === 500,
+			"(b) the merged open row still carries the dormant session's file + size");
+		assert(mergedB[0].mtimeMs === nowB, "(b) an open row's mtime bumps to `now` (sorts to the top)");
+		assert(mergedB[1].cwd === "/home/slix" && mergedB[1].open === false && mergedB[1].state === null,
+			"(b) the dormant-only row is open:false with no live state");
+		assert(mergedB[1].title === "slix", "(b) a dormant row's title is the jsonl filename (sans .jsonl ext)");
+		// open-only row (no dormant session for that cwd).
+		const mergedOpenOnly = bundle.mergeFarmRows(
+			[{ cwd: "/tmp/only-open", title: "only", state: "idle" }],
+			[],
+			nowB,
+		);
+		assert(mergedOpenOnly.length === 1 && mergedOpenOnly[0].open === true && mergedOpenOnly[0].file === undefined && mergedOpenOnly[0].size === undefined,
+			"(b) an open-only row has no file/size");
+		assert(bundle.mergeFarmRows([], [], nowB).length === 0, "(b) empty sources → empty merge");
+
+		// (c) cap enforcement: 250 dormant sessions → 200 rows (most-recent first).
+		const capDormant = Array.from({ length: 250 }, (_, i) => ({ cwd: `/c/${i}`, mtimeMs: i }));
+		const mergedC = bundle.mergeFarmRows([], capDormant, nowB);
+		assert(mergedC.length === 200, "(c) mergeFarmRows caps at 200 rows");
+		assert(mergedC[0].cwd === "/c/249" && mergedC[199].cwd === "/c/50", "(c) the cap keeps the most-recent 200 (sorted modified-desc)");
+
+		// (d) view lifecycle + table render: open the farm view, inject a fake
+		//     dormant scan, refresh, and assert the merged table (open badge +
+		//     focus button for the open row; resume button for the dormant row).
+		//     Uses a FAKE sessions dir so the cwd-slug decode is exercised end to
+		//     end through listLocalPiSessions (the same scan the picker uses).
+		await app.workspace.detachLeavesOfType(F);
+		await app.workspace.detachLeavesOfType(T);
+		await plugin.onunload(); await plugin.onload();
+		const sf = makeFakePtyFactory(); plugin.terminalManager.ptyFactory = sf.factory;
+
+		const farmDir = fs.mkdtempSync(path.join(os.tmpdir(), "arthur-farm-sessions-"));
+		const dupDir = path.join(farmDir, "--tmp-dup--");
+		fs.mkdirSync(dupDir);
+		const dupFile = path.join(dupDir, "2026-11-08T20-00-00-000Z_dup.jsonl");
+		fs.writeFileSync(dupFile, JSON.stringify({ type: "session", cwd: "/tmp/dup" }) + "\n");
+		fs.utimesSync(dupFile, 1_500_000_000, 1_500_000_000);
+		const otherDir = path.join(farmDir, "--tmp-other--");
+		fs.mkdirSync(otherDir);
+		const otherFile = path.join(otherDir, "2026-11-08T10-00-00-000Z_other.jsonl");
+		fs.writeFileSync(otherFile, JSON.stringify({ type: "session", cwd: "/tmp/other" }) + "\n");
+		fs.utimesSync(otherFile, 1_000_000_000, 1_000_000_000);
+
+		// Open a terminal at /tmp/dup so the merge dedups it against the dormant
+		// session of the SAME cwd → a single OPEN row (focus, not resume).
+		await plugin.activatePiTerminal({ cwd: "/tmp/dup", title: "dup-live" });
+		assert(sf.ptys.length === 1, "(d) the /tmp/dup terminal spawned one pty");
+
+		await plugin.activatePiFarmView();
+		const farmLeaves = app.workspace.getLeavesOfType(F);
+		assert(farmLeaves.length === 1, "(d) one pi farm leaf opened");
+		const view = farmLeaves[0].view;
+		assert(view.getViewType() === F && view.getDisplayText() === "pi farm", "(d) view reports type 'arthur-pi-farm' + display 'pi farm'");
+		// Inject the fake dormant scan, then drive a deterministic refresh.
+		view.farmLoadDormant = () => bundle.listLocalPiSessions(farmDir);
+		view.refresh();
+		const rowsD = findByClass(view.contentEl, "arthur-farm-row");
+		assert(rowsD.length === 2, `(d) 2 merged rows (open /tmp/dup + dormant /tmp/other) (got ${rowsD.length})`);
+		// The open row (/tmp/dup) sorts first (mtime bumped to now).
+		const openRow = rowsD.find((r) => r.getAttribute("data-farm-cwd") === "/tmp/dup");
+		const dormRow = rowsD.find((r) => r.getAttribute("data-farm-cwd") === "/tmp/other");
+		assert(!!openRow && !!dormRow, "(d) the two distinct cwds each render a row");
+		assert(rowsD[0].getAttribute("data-farm-cwd") === "/tmp/dup", "(d) the open row sorts first (modified-desc, bumped to now)");
+		assert(findByClass(openRow, "arthur-farm-open-badge").length === 1, "(d) the open row carries the 'open' badge");
+		assert(!!findButton(openRow, "focus") && !findButton(openRow, "resume"), "(d) the open row's action is 'focus' (not resume)");
+		assert(!findButton(dormRow, "focus") && !!findButton(dormRow, "resume"), "(d) the dormant row's action is 'resume' (not focus)");
+		// cwd-slug decode: the dormant row's cwd cell shows the decoded /tmp/other.
+		assert(findByClass(dormRow, "arthur-farm-cwd")[0]?.textContent === "/tmp/other", "(d) the dormant row's cwd is the decoded value (slug → /tmp/other)");
+
+		// (e) refresh interval lifecycle: started on open, cleared on close.
+		assert(typeof view.refreshTimer === "number" && view.refreshTimer !== null && timerMap.has(view.refreshTimer),
+			"(e) the 5s refresh interval is started on view open");
+		const timerIdE = view.refreshTimer;
+		await view.onClose();
+		assert(view.refreshTimer === null && !timerMap.has(timerIdE), "(e) the refresh interval is cleared on close");
+		await app.workspace.detachLeavesOfType(F);
+
+		// (f) resume action → spawns `pi --session <abs>` (Wave 1 resume path).
+		//     A dormant-only row (no open leaf for its cwd) clicked → a new
+		//     terminal leaf respawns the exact session file.
+		await app.workspace.detachLeavesOfType(T);
+		await plugin.onunload(); await plugin.onload();
+		const sfF = makeFakePtyFactory(); plugin.terminalManager.ptyFactory = sfF.factory;
+		await plugin.activatePiFarmView();
+		const viewF = app.workspace.getLeavesOfType(F)[0].view;
+		viewF.farmLoadDormant = () => [
+			{ cwd: "/tmp/resume-me", mtimeMs: 1_700_000_000, file: "/abs/resume-me.jsonl", size: 999 },
+		];
+		viewF.refresh();
+		const dormRowF = findByClass(viewF.contentEl, "arthur-farm-row")[0];
+		assert(dormRowF?.getAttribute("data-farm-cwd") === "/tmp/resume-me", "(f) the dormant resume row renders");
+		findButton(dormRowF, "resume")?.handlers.get("click")[0]?.();
+		await sleep(30);
+		assert(sfF.ptys.length === 1, "(f) clicking resume spawned one pty");
+		assert(sfF.ptys[0].args.length === 2 && sfF.ptys[0].args[0] === "--session" && sfF.ptys[0].args[1] === "/abs/resume-me.jsonl",
+			"(f) resume spawned `pi --session <abs file>` (Wave 1 resume path)");
+		assert(sfF.ptys[0].opts.cwd === "/tmp/resume-me", "(f) the resumed pty spawned in the row's cwd");
+		await app.workspace.detachLeavesOfType(F);
+		await app.workspace.detachLeavesOfType(T);
+
+		// (g) focus action for an OPEN row → focuses the existing leaf, no new pty.
+		await plugin.onunload(); await plugin.onload();
+		const sfG = makeFakePtyFactory(); plugin.terminalManager.ptyFactory = sfG.factory;
+		await plugin.activatePiTerminal({ cwd: "/tmp/focus-me", title: "focus-live" });
+		assert(sfG.ptys.length === 1, "(g) one terminal open for /tmp/focus-me");
+		await plugin.activatePiFarmView();
+		const viewG = app.workspace.getLeavesOfType(F)[0].view;
+		viewG.farmLoadDormant = () => [];
+		viewG.refresh();
+		const openRowG = findByClass(viewG.contentEl, "arthur-farm-row")[0];
+		assert(openRowG?.getAttribute("data-farm-cwd") === "/tmp/focus-me" && findByClass(openRowG, "arthur-farm-open-badge").length === 1,
+			"(g) the open terminal renders as an open row");
+		const ptysBefore = sfG.ptys.length;
+		const leavesBefore = app.workspace.getLeavesOfType(T).length;
+		findButton(openRowG, "focus")?.handlers.get("click")[0]?.();
+		await sleep(30);
+		assert(sfG.ptys.length === ptysBefore && app.workspace.getLeavesOfType(T).length === leavesBefore,
+			"(g) focus reuses the existing leaf (no new pty, no duplicate leaf)");
+		await app.workspace.detachLeavesOfType(F);
+		await app.workspace.detachLeavesOfType(T);
+
+		// (h) empty state: no open terminals + no dormant sessions.
+		await plugin.onunload(); await plugin.onload();
+		await plugin.activatePiFarmView();
+		const viewH = app.workspace.getLeavesOfType(F)[0].view;
+		viewH.farmLoadDormant = () => [];
+		viewH.refresh();
+		assert(findByClass(viewH.contentEl, "arthur-farm-row").length === 0, "(h) no rows when both sources are empty");
+		assert(allText(viewH.contentEl).includes("no local pi sessions"), "(h) the empty-state note renders");
+		await app.workspace.detachLeavesOfType(F);
+
+		// (i) view cap: mergeFarmRows caps at 200, so 201 injected dormant rows →
+		//     exactly 200 rendered (most-recent first), no overflow note.
+		await plugin.activatePiFarmView();
+		const viewI = app.workspace.getLeavesOfType(F)[0].view;
+		viewI.farmLoadDormant = () => Array.from({ length: 201 }, (_, i) => ({ cwd: `/cap/${i}`, mtimeMs: i, file: `/f/${i}.jsonl`, size: 1 }));
+		viewI.refresh();
+		assert(findByClass(viewI.contentEl, "arthur-farm-row").length === 200, "(i) the view renders at most 200 rows (merge cap)");
+		assert(allText(viewI.contentEl).includes("more sessions not rendered") === false, "(i) no overflow note (the merge cap is the single cap)");
+		await app.workspace.detachLeavesOfType(F);
+
+		// (j) picker empty-state 'browse all sessions →' affordance opens the farm.
+		let browseJ = false;
+		const modalJ = new bundle.TerminalPickerModal(app, {
+			vaultRootCwd: "/tmp/vault-root",
+			loadSessions: async () => [],
+			onPick: () => {},
+			onBrowseAll: () => { browseJ = true; },
+		});
+		modalJ.open();
+		await sleep(40);
+		const browseLink = findByClass(modalJ.contentEl, "arthur-terminal-browse-all")[0];
+		assert(!!browseLink && browseLink.textContent === "browse all sessions →", "(j) the picker empty state renders the 'browse all sessions →' affordance");
+		browseLink?.handlers.get("click")[0]?.();
+		await sleep(20);
+		assert(browseJ === true, "(j) clicking the affordance fires onBrowseAll");
+		assert(modalJ._closed === true, "(j) the affordance closes the picker");
+
+		fs.rmSync(farmDir, { recursive: true, force: true });
+		await app.workspace.detachLeavesOfType(F);
+		await app.workspace.detachLeavesOfType(T);
+	})();
+
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();
@@ -7038,4 +7233,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / local-pty-terminal-spawn-args+pty→xterm+xterm→pty+resize+exit-state / local-pty-resolver-absolute-path-require+no-native-load / local-terminal-view-lazy-no-cwd+attach+close-kill+reopen / local-terminal-manager-per-cwd-routing+3-leaves+isolation+reuse+full-unload-kill-all / local-terminal-picker-fake-sessions-dir+select→open+vault-root+cwd-input+mobile-hide / ahp-client-load-retry-resilience-819e2bb-regression / pi-instance-states+badge-CSS-classes+focus-clears-awaiting / slash-toolbar-payload-bytes-new+compact+thinking / session-resume-spawn-args+listSessionFilesForCwd+respawn / send-active-note+selection-payload+wikilink-rewrite+no-terminal-notice / terminal-settings-plumbing-fontSize+scrollback+new-only / theme-follow-xterm-styling-var→ITheme+fallbacks+applyTheme / instance-picker+ribbon-command-routing+open-instances / pi-prompt-composer-drafts+bracketed-paste-submit+wikilink-context+@-files+image-paste+resizer-clamp all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / local-pty-terminal-spawn-args+pty→xterm+xterm→pty+resize+exit-state / local-pty-resolver-absolute-path-require+no-native-load / local-terminal-view-lazy-no-cwd+attach+close-kill+reopen / local-terminal-manager-per-cwd-routing+3-leaves+isolation+reuse+full-unload-kill-all / local-terminal-picker-fake-sessions-dir+select→open+vault-root+cwd-input+mobile-hide / ahp-client-load-retry-resilience-819e2bb-regression / pi-instance-states+badge-CSS-classes+focus-clears-awaiting / slash-toolbar-payload-bytes-new+compact+thinking / session-resume-spawn-args+listSessionFilesForCwd+respawn / send-active-note+selection-payload+wikilink-rewrite+no-terminal-notice / terminal-settings-plumbing-fontSize+scrollback+new-only / theme-follow-xterm-styling-var→ITheme+fallbacks+applyTheme / instance-picker+ribbon-command-routing+open-instances / pi-prompt-composer-drafts+bracketed-paste-submit+wikilink-context+@-files+image-paste+resizer-clamp / pi-farm-view-open+dormant-merge+resume/focus-actions+refresh-interval-lifecycle+empty-state+picker-browse-affordance all clean");
