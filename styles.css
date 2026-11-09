@@ -2675,3 +2675,102 @@
 .xterm .xterm-scrollable-element > .shadow.top.left {
 	box-shadow: var(--vscode-scrollbar-shadow, #000) 6px 0 6px -6px inset;
 }
+
+/* ---------------------------------------------------------------------- *
+ * pi terminal WAVE 1 — instance states, slash toolbar, ribbon hub,
+ * instance picker. Appended after the verbatim xterm.css so it overrides
+ * nothing in the xterm core. State colors are driven by
+ * .arthur-pi-state-<state> on the badge + tab-header icon (.arthur-pi-live).
+ * ---------------------------------------------------------------------- */
+.arthur-pi-state-line {
+	display: flex;
+	align-items: center;
+	gap: 0.5em;
+	padding: 0.25em 0.5em;
+	border-bottom: 1px solid var(--background-modifier-border);
+	font-size: var(--font-ui-smaller);
+	flex: 0 0 auto;
+}
+.arthur-pi-badge {
+	font-weight: 600;
+	padding: 0 0.35em;
+	border-radius: var(--radius-s);
+	min-width: 1.2em;
+	text-align: center;
+}
+.arthur-pi-state-cwd {
+	opacity: 0.7;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.arthur-pi-state-idle { color: var(--text-muted); }
+.arthur-pi-state-running { color: var(--interactive-accent); }
+.arthur-pi-state-seen { color: var(--color-green, #3fb950); }
+.arthur-pi-state-error { color: var(--text-error); }
+.arthur-pi-state-awaiting-input {
+	color: var(--text-error);
+	background: var(--background-modifier-error);
+}
+.arthur-pi-state-done-unseen {
+	color: var(--interactive-accent);
+	animation: arthur-pi-breathe 1.6s ease-in-out infinite;
+}
+@keyframes arthur-pi-breathe {
+	0%, 100% { opacity: 0.55; }
+	50% { opacity: 1; }
+}
+.workspace-tab-header-inner-icon.arthur-pi-live.arthur-pi-state-running { color: var(--interactive-accent); }
+.workspace-tab-header-inner-icon.arthur-pi-live.arthur-pi-state-awaiting-input { color: var(--text-error); }
+.workspace-tab-header-inner-icon.arthur-pi-live.arthur-pi-state-done-unseen { color: var(--interactive-accent); animation: arthur-pi-breathe 1.6s ease-in-out infinite; }
+.workspace-tab-header-inner-icon.arthur-pi-live.arthur-pi-state-error { color: var(--text-error); }
+.workspace-tab-header-inner-icon.arthur-pi-live.arthur-pi-state-seen { color: var(--color-green, #3fb950); }
+.arthur-pi-toolbar { display: flex; align-items: center; margin-left: auto; }
+.arthur-pi-toolbar-btn {
+	background: transparent; border: none; cursor: pointer;
+	padding: 0 0.4em; color: var(--text-muted); border-radius: var(--radius-s);
+}
+.arthur-pi-toolbar-btn:hover { color: var(--text-normal); background: var(--background-modifier-hover); }
+.arthur-pi-toolbar-popover {
+	position: absolute; z-index: 50; margin-top: 1.6em;
+	background: var(--background-secondary); border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m); padding: 0.25em; box-shadow: var(--shadow-s);
+	display: flex; flex-direction: column; min-width: 10em;
+}
+.arthur-pi-toolbar-item {
+	text-align: left; background: transparent; border: none; cursor: pointer;
+	padding: 0.3em 0.5em; border-radius: var(--radius-s); color: var(--text-normal);
+}
+.arthur-pi-toolbar-item:hover { background: var(--background-modifier-hover); }
+.arthur-pi-toolbar-submenu { display: flex; flex-direction: column; }
+.arthur-pi-toolbar-sublist { display: none; flex-direction: column; padding-left: 0.8em; }
+.arthur-pi-toolbar-sublist.is-open { display: flex; }
+.arthur-pi-toolbar-subitem { font-size: var(--font-ui-smaller); color: var(--text-muted); }
+.arthur-pi-toolbar-empty { padding: 0.3em 0.5em; color: var(--text-muted); font-size: var(--font-ui-smaller); }
+.arthur-instance-picker .arthur-instance-list { display: flex; flex-direction: column; gap: 0.2em; min-width: 32em; }
+.arthur-instance-row {
+	display: flex; align-items: center; gap: 0.5em;
+	padding: 0.4em 0.5em; border-radius: var(--radius-s); cursor: pointer;
+}
+.arthur-instance-row:hover { background: var(--background-modifier-hover); }
+.arthur-instance-dot { font-weight: 700; min-width: 1em; text-align: center; }
+.arthur-instance-dot.arthur-pi-state-new { color: var(--interactive-accent); }
+.arthur-instance-title { font-weight: 600; }
+.arthur-instance-dir { color: var(--text-muted); font-size: var(--font-ui-smaller); margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 18em; }
+.arthur-instance-row--new .arthur-instance-title { color: var(--interactive-accent); }
+.arthur-ribbon-hub {
+	position: fixed; z-index: 100; transform: translateY(-50%);
+	background: var(--background-secondary); border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m); padding: 0.3em; box-shadow: var(--shadow-s);
+	display: none; flex-direction: column; gap: 0.15em; min-width: 14em; max-width: 24em;
+}
+.arthur-ribbon-hub.is-visible { display: flex; }
+.arthur-ribbon-hub-row {
+	display: flex; align-items: center; gap: 0.4em;
+	padding: 0.3em 0.4em; border-radius: var(--radius-s); cursor: pointer;
+}
+.arthur-ribbon-hub-row:hover { background: var(--background-modifier-hover); }
+.arthur-ribbon-hub-dot { font-weight: 700; }
+.arthur-ribbon-hub-label { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.arthur-ribbon-hub-dir { color: var(--text-muted); font-size: var(--font-ui-smaller); margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.arthur-ribbon-hub-empty { color: var(--text-muted); font-size: var(--font-ui-smaller); padding: 0.3em 0.4em; }

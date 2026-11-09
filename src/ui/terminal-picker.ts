@@ -23,10 +23,24 @@ import * as os from "os";
 
 import { el, truncate } from "../util";
 
-/** One local pi session row: a cwd + its most-recent session mtime. */
+/** One local pi session row: a cwd + its most-recent session mtime + the
+ *  most-recent `.jsonl` file path (for `pi --session <file>` resume). */
 export interface LocalPiSession {
 	cwd: string;
 	mtimeMs: number;
+	/** Absolute path to the most-recent `.jsonl` session file for this cwd
+	 *  (undefined when the subdir held no jsonl — a decoded-name-only entry). */
+	file?: string;
+}
+
+/** One `.jsonl` session file in a cwd's sessions subdir (newest first). */
+export interface SessionFileInfo {
+	/** Absolute path to the `.jsonl` file. */
+	path: string;
+	/** Filename without the `.jsonl` extension. */
+	name: string;
+	/** mtime (epoch ms). */
+	mtime: number;
 }
 
 /** The production sessions directory: `~/.pi/agent/sessions/`. */
@@ -108,9 +122,97 @@ export function listLocalPiSessions(dir: string): LocalPiSession[] {
 				// keep the decoded name
 			}
 		}
-		out.push({ cwd, mtimeMs });
+		out.push({ cwd, mtimeMs, ...(best ? { file: best.file } : {}) });
 	}
 	out.sort((a, b) => b.mtimeMs - a.mtimeMs);
+	return out;
+}
+
+/** Find the sessions subdir for a cwd by scanning the sessions root and
+ *  matching the authoritative cwd read from each subdir's most-recent jsonl
+ *  first line (the slug-based dir name is ambiguous with literal dashes, so
+ *  we read the real cwd). Returns null when no subdir matches. */
+function findCwdSessionDir(dir: string, cwd: string): string | null {
+	let entries: string[];
+	try {
+		entries = fs.readdirSync(dir);
+	} catch {
+		return null;
+	}
+	for (const name of entries) {
+		const full = path.join(dir, name);
+		let st: fs.Stats;
+		try {
+			st = fs.statSync(full);
+		} catch {
+			continue;
+		}
+		if (!st.isDirectory()) continue;
+		let files: string[];
+		try {
+			files = fs.readdirSync(full);
+		} catch {
+			continue;
+		}
+		let best: { file: string; mtime: number } | null = null;
+		for (const f of files) {
+			if (!f.endsWith(".jsonl")) continue;
+			const fp = path.join(full, f);
+			let fst: fs.Stats;
+			try {
+				fst = fs.statSync(fp);
+			} catch {
+				continue;
+			}
+			if (!best || fst.mtimeMs > best.mtime) best = { file: fp, mtime: fst.mtimeMs };
+		}
+		if (!best) continue;
+		let dirCwd = decodeSessionDirName(name);
+		try {
+			const fd = fs.openSync(best.file, "r");
+			try {
+				const buf = Buffer.alloc(8192);
+				const n = fs.readSync(fd, buf, 0, 8192, 0);
+				const firstLine = buf.subarray(0, n).toString("utf8").split("\n")[0];
+				const parsed = JSON.parse(firstLine) as { cwd?: unknown };
+				if (typeof parsed?.cwd === "string" && parsed.cwd.trim()) dirCwd = parsed.cwd;
+			} finally {
+				fs.closeSync(fd);
+			}
+		} catch {
+			/* keep decoded */
+		}
+		if (dirCwd === cwd) return full;
+	}
+	return null;
+}
+
+/** List the `.jsonl` session files for a cwd, newest first. Used by the
+ *  slash toolbar's "Resume…" action to respawn `pi --session <file>`. Returns
+ *  [] when the cwd has no sessions subdir (or it's unreadable). */
+export function listSessionFilesForCwd(sessionsDir: string, cwd: string): SessionFileInfo[] {
+	const sub = findCwdSessionDir(sessionsDir, cwd);
+	if (!sub) return [];
+	let files: string[];
+	try {
+		files = fs.readdirSync(sub);
+	} catch {
+		return [];
+	}
+	const out: SessionFileInfo[] = [];
+	for (const f of files) {
+		if (!f.endsWith(".jsonl")) continue;
+		const fp = path.join(sub, f);
+		let st: fs.Stats;
+		try {
+			st = fs.statSync(fp);
+		} catch {
+			continue;
+		}
+		if (!st.isFile()) continue;
+		out.push({ path: fp, name: f.replace(/\.jsonl$/, ""), mtime: st.mtimeMs });
+	}
+	out.sort((a, b) => b.mtime - a.mtime);
 	return out;
 }
 
@@ -120,8 +222,10 @@ export interface TerminalPickerOpts {
 	loadSessions(): Promise<LocalPiSession[]>;
 	/** The vault's filesystem root — the 'New terminal in vault root' target. */
 	vaultRootCwd: string;
-	/** A cwd was chosen (row click, vault-root button, or cwd-input Enter). */
-	onPick(cwd: string, title?: string): void;
+	/** A cwd was chosen (row click, vault-root button, or cwd-input Enter).
+	 *  `sessionFile` is the most-recent `.jsonl` for that cwd when a row was
+	 *  picked (so the terminal resumes that exact session via `pi --session`). */
+	onPick(cwd: string, title?: string, sessionFile?: string): void;
 }
 
 /**
@@ -231,11 +335,16 @@ export class TerminalPickerModal extends Modal {
 		if (first) this.pick(first);
 	}
 
-	/** Select a cwd: route into the manager, close. */
+	/** Select a cwd: route into the manager, close. Resumes the row's exact
+	 *  session file when present (picker rows carry the most-recent jsonl). */
 	private pick(session: LocalPiSession): void {
 		const cwd = session.cwd.trim();
 		if (!cwd) return;
-		this.opts.onPick(cwd, cwd.split("/").filter(Boolean).pop() || cwd);
+		this.opts.onPick(
+			cwd,
+			cwd.split("/").filter(Boolean).pop() || cwd,
+			session.file,
+		);
 		this.close();
 	}
 

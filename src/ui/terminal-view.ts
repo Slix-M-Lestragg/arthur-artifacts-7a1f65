@@ -6,21 +6,35 @@
  * When the pty exits the state line shows `process exited (code N)` and no
  * further input is accepted; teardown kills the pty and disposes xterm.
  *
- * Lifecycle (kept from the prior T2 architecture, new backend):
- *   - LAZY everything: onOpen only builds the container + state line; the
- *     xterm Terminal/FitAddon are constructed (and opened) on the FIRST
+ * WAVE 1 additions (RPC-free, see terminal-state.ts):
+ *   - INSTANCE STATES + tab/icon badges: a pragmatic data-activity heuristic
+ *     (idle | running | done-unseen | seen | awaiting-input | error) drives a
+ *     CSS class on the leaf's tab-header icon + a state-line badge. `done-unseen`
+ *     / `awaiting-input` only show while the leaf is UNFOCUSED and clear on
+ *     focus (xterm onFocus/onBlur).
+ *   - SLASH TOOLBAR in the state-line row: a compact icon-dropdown with New
+ *     (`/new`), Resume… (session files for this cwd → respawn `--session`),
+ *     Compact (`/compact`), Thinking (sends the Shift+Tab `\x1b[Z` cycle). All
+ *     slash commands are `pty.write(cmd + '\r')`; Thinking is a bare escape.
+ *   - SESSION RESUME: the leaf's view state carries an optional `sessionFile`;
+ *     when set the pty spawns `pi --session <file>` instead of `-c`.
+ *   - THEME-FOLLOW xterm styling: the xterm theme is derived from Obsidian CSS
+ *     vars at construct and re-applied on `css-change` (main.ts fans that out to
+ *     every open view via `applyTheme()`).
+ *   - SETTINGS: fontFamily / fontSize / scrollback are read from settings and
+ *     applied to NEW terminals (existing ones keep theirs — documented in the
+ *     settings tab).
+ *
+ * Lifecycle (kept from the prior architecture, new backend):
+ *   - LAZY everything: onOpen only builds the container + state line + toolbar;
+ *     the xterm Terminal/FitAddon are constructed (and opened) on the FIRST
  *     attach, and the pty only spawns when a cwd arrives via the leaf's view
  *     state — an open with no cwd constructs no xterm and spawns no pty.
  *   - onClose = full teardown: kill the pty, dispose xterm, disconnect the
- *     ResizeObserver, clear the fit timer, null every ref. Belt-and-braces via
- *     `this.register(…)` in onOpen, idempotent so both paths can run.
+ *     ResizeObserver, clear the fit + state timers, null every ref. Belt-and-
+ *     braces via `this.register(…)` in onOpen, idempotent so both paths can run.
  *   - The state line reuses the ahp-view state classes (arthur-ahp-state /
- *     arthur-note) for a consistent vocabulary: 'no working directory' without
- *     a cwd, 'live' while the pty runs, 'process exited (code N)' on exit, or
- *     the spawn-error text.
- *
- * xterm CSS: as before, the xterm stylesheet is copied into styles.css
- * (esbuild cannot inline CSS into the JS bundle). No CSS import from here.
+ *     arthur-note) for a consistent vocabulary PLUS the new pi state badge.
  */
 import { getIcon, ItemView, WorkspaceLeaf } from "obsidian";
 import { Terminal, type IDisposable } from "@xterm/xterm";
@@ -30,25 +44,44 @@ import type ArthurPlugin from "../main";
 import type { LocalPty } from "../api/local-pty";
 import { spawnPi, resolvePtyModulePath } from "../api/local-pty";
 import { el } from "../util";
+import {
+	ALL_TERMINAL_STATES,
+	PI_TERMINAL_LIVE_CLASS,
+	computeActivityState,
+	detectAwaitingInput,
+	questionStillLive,
+	terminalStateClass,
+	type TerminalState,
+} from "./terminal-state";
+import { buildXtermTheme, readObsidianThemeVars } from "./terminal-theme";
+import { listSessionFilesForCwd, defaultPiSessionsDir } from "./terminal-picker";
 
 export const VIEW_TYPE_PI_TERMINAL = "arthur-pi-terminal";
 
 /** Debounce for the ResizeObserver → fit() → pty.resize chain. */
 const FIT_DEBOUNCE_MS = 120;
+/** Cadence for the activity-state recompute timer (covers done-unseen transitions). */
+const STATE_TICK_MS = 500;
 
-/** The leaf's view state: the target working directory. `cwd` arrives through
- *  leaf.setViewState({state}) (the picker / openTerminal fill it); without one
- *  the view renders 'no working directory'. */
+/** The leaf's view state: the target working directory + optional session file.
+ *  `cwd` arrives through leaf.setViewState({state}); without one the view
+ *  renders 'no working directory'. `sessionFile` (from the picker's resume rows
+ *  or restored from workspace state) makes the pty spawn `pi --session <file>`. */
 interface TerminalViewState {
 	cwd?: unknown;
 	title?: unknown;
 	fresh?: unknown;
+	sessionFile?: unknown;
 }
 
 export class TerminalView extends ItemView {
 	private stateEl: HTMLElement | null = null;
+	/** The state-line badge span carrying the live-state CSS class. */
+	private badgeEl: HTMLElement | null = null;
 	/** The container xterm opens into (fills the leaf; observed for fit). */
 	private surfaceEl: HTMLElement | null = null;
+	/** The slash-toolbar root (state-line row). */
+	private toolbarEl: HTMLElement | null = null;
 
 	/** The local pty for this leaf (one per terminal); null until a cwd
 	 *  arrives / after teardown. */
@@ -57,24 +90,45 @@ export class TerminalView extends ItemView {
 	private terminal: Terminal | null = null;
 	private fitAddon: FitAddon | null = null;
 	private dataSub: IDisposable | null = null;
+	private focusSub: IDisposable | null = null;
+	private blurSub: IDisposable | null = null;
+	/** Bound focusin/focusout handlers (removed in teardown). */
+	private focusHandler: (() => void) | null = null;
+	private blurHandler: (() => void) | null = null;
 	private ptyDataSub: IDisposable | null = null;
 	private ptyExitSub: IDisposable | null = null;
 
 	private resizeObserver: ResizeObserver | null = null;
 	private fitTimer: number | null = null;
+	private stateTimer: number | null = null;
 	/** The in-flight attach (setState/onOpen callers serialize through it). */
 	private attachPromise: Promise<void> | null = null;
+
+	/** The currently-open slash toolbar popover (null when closed). */
+	private toolbarPopover: HTMLElement | null = null;
 
 	private opened = false;
 	private cwd: string | null = null;
 	private titleText = "";
 	private fresh = false;
+	/** Optional session file to resume (`pi --session <file>`); from picker or
+	 *  restored workspace state. */
+	private sessionFile: string | null = null;
 	/** True once the pty has exited (further input is refused). */
 	private exited = false;
 	/** The exit code/signo surfaced in the state line (null until exit). */
 	private exitCode: number | null = null;
 	/** Spawn failure surfaced in the state line (error class). */
 	private attachError: string | null = null;
+
+	// --- activity-state heuristic timestamps (epoch ms; null = never) ---
+	private lastDataAt: number | null = null;
+	private lastInputAt: number | null = null;
+	private lastQuestionAt: number | null = null;
+	/** Whether the xterm currently has focus. */
+	private focused = false;
+	/** Current visual state (drives the badge CSS class). */
+	private visualState: TerminalState = "idle";
 
 	constructor(leaf: WorkspaceLeaf, private readonly plugin: ArthurPlugin) {
 		super(leaf);
@@ -96,18 +150,30 @@ export class TerminalView extends ItemView {
 		return this.cwd;
 	}
 
+	/** The session file this leaf resumes (null = spawn with `-c`/fresh). */
+	get boundSessionFile(): string | null {
+		return this.sessionFile;
+	}
+
 	/** `terminal-square`, falling back to `console` when the Obsidian icon
 	 *  registry lacks it (lucide renamed the id in newer releases). */
 	getIcon(): string {
 		return getIcon("terminal-square") ? "terminal-square" : "console";
 	}
 
-	/** Leaf state persistence — reopening the workspace re-attaches. */
+	/** Current visual state — read by the ribbon hub + instance picker dots. */
+	getVisualState(): TerminalState {
+		return this.visualState;
+	}
+
+	/** Leaf state persistence — reopening the workspace re-attaches, and the
+	 *  saved `sessionFile` makes the respawned pty resume the same session. */
 	getState(): Record<string, string> {
 		return {
 			...(this.cwd ? { cwd: this.cwd } : {}),
 			...(this.titleText ? { title: this.titleText } : {}),
 			...(this.fresh ? { fresh: "true" } : {}),
+			...(this.sessionFile ? { sessionFile: this.sessionFile } : {}),
 		};
 	}
 
@@ -119,7 +185,9 @@ export class TerminalView extends ItemView {
 		const cwd = typeof raw.cwd === "string" && raw.cwd.trim() ? raw.cwd.trim() : null;
 		const title = typeof raw.title === "string" ? raw.title.trim() : "";
 		const fresh = raw.fresh === true || raw.fresh === "true";
-		if (cwd === this.cwd && fresh === this.fresh) {
+		const sessionFile =
+			typeof raw.sessionFile === "string" && raw.sessionFile.trim() ? raw.sessionFile.trim() : null;
+		if (cwd === this.cwd && fresh === this.fresh && sessionFile === this.sessionFile) {
 			if (title && title !== this.titleText) {
 				this.titleText = title;
 				this.renderState();
@@ -127,12 +195,14 @@ export class TerminalView extends ItemView {
 			await this.maybeAttach();
 			return;
 		}
-		// A DIFFERENT cwd: tear the old pty down first so two ptys never run in
-		// one leaf.
+		// A DIFFERENT cwd or session: tear the old pty down first so two ptys
+		// never run in one leaf.
 		this.detachSession();
 		this.cwd = cwd;
 		this.titleText = title;
 		this.fresh = fresh;
+		this.sessionFile = sessionFile;
+		this.resetActivity();
 		this.renderState();
 		await this.maybeAttach();
 	}
@@ -140,7 +210,8 @@ export class TerminalView extends ItemView {
 	async onOpen(): Promise<void> {
 		this.contentEl.empty();
 		const wrap = this.contentEl.createEl("div", { cls: "arthur-pi-terminal" });
-		this.stateEl = wrap.createEl("div", { cls: "arthur-ahp-state arthur-note" });
+		this.stateEl = wrap.createEl("div", { cls: "arthur-ahp-state-line arthur-pi-state-line" });
+		this.badgeEl = this.stateEl.createEl("span", { cls: "arthur-pi-badge arthur-pi-state-idle" });
 		this.surfaceEl = wrap.createEl("div", { cls: "arthur-pi-terminal-surface" });
 		// Belt-and-braces: if teardown ever skips onClose the cleanup still runs.
 		this.register(() => this.teardown());
@@ -150,6 +221,9 @@ export class TerminalView extends ItemView {
 			observer.observe(this.surfaceEl);
 			this.resizeObserver = observer;
 		}
+		// Activity-state recompute tick (covers done-unseen transitions when no
+		// new data arrives — a quiet agent that finished while unfocused).
+		this.stateTimer = window.setInterval(() => this.recomputeState(), STATE_TICK_MS);
 		this.opened = true;
 		this.renderState();
 		// A setState that arrived before onOpen attaches here.
@@ -187,6 +261,7 @@ export class TerminalView extends ItemView {
 		this.attachError = null;
 		this.exited = false;
 		this.exitCode = null;
+		this.resetActivity();
 		const terminal = this.ensureTerminal();
 		// First real sizing pass before the initial pty.resize (the debounced
 		// RO path covers later container changes; fit() is a no-op on a
@@ -194,7 +269,7 @@ export class TerminalView extends ItemView {
 		this.fitNow();
 		const manager = this.plugin.terminalManager;
 		const factory = manager?.ptyFactory ?? null;
-		// Resolve the native pty module by ABSOLUTE path: Obsidian loads main.js
+		// Resolve the native pty module by ABSOLUTE PATH: Obsidian loads main.js
 		// through Electron's renderer require, which does NOT resolve bare
 		// specifiers against the plugin folder's node_modules. The vault base
 		// path comes from the FileSystemAdapter (`getBasePath()` — structural
@@ -212,6 +287,7 @@ export class TerminalView extends ItemView {
 				cwd,
 				{
 					fresh: this.fresh,
+					sessionFile: this.sessionFile ?? undefined,
 					cols: terminal.cols,
 					rows: terminal.rows,
 					command: this.plugin.settings.piExecutable,
@@ -221,41 +297,88 @@ export class TerminalView extends ItemView {
 			);
 		} catch (err) {
 			this.attachError = err instanceof Error ? err.message : String(err ?? "pi spawn failed");
+			this.setVisualState("error");
 			this.renderState();
 			return;
 		}
 		this.pty = pty;
-		// pty output → xterm.
+		// A freshly spawned pty is running (the agent is booting) until the
+		// activity heuristic updates the state as data flows / stops.
+		this.visualState = "running";
+		// pty output → xterm + activity-state heuristic.
 		this.ptyDataSub = pty.onData((data: string) => {
 			if (this.terminal) this.terminal.write(data);
+			const now = Date.now();
+			this.lastDataAt = now;
+			// A question pattern in this chunk raises the awaiting-input signal;
+			// a non-question chunk after one clears it (the user answered).
+			if (detectAwaitingInput(data)) {
+				this.lastQuestionAt = now;
+			} else if (!questionStillLive(this.lastQuestionAt, this.lastDataAt, now)) {
+				this.lastQuestionAt = null;
+			}
+			this.recomputeState();
 		});
-		// pty exit → state line + stop accepting input.
+		// pty exit → state line + error state + stop accepting input.
 		this.ptyExitSub = pty.onExit((e: { exitCode: number; signal?: number }) => {
 			this.exited = true;
 			this.exitCode = e.exitCode;
 			this.renderState();
+			this.recomputeState();
 		});
 		this.renderState();
+		this.recomputeState();
 	}
 
 	/** LAZY xterm construction: Terminal + FitAddon exist only after the first
-	 *  attach — an open view with no cwd constructs nothing. */
+	 *  attach — an open view with no cwd constructs nothing. Settings
+	 *  (fontFamily/fontSize/scrollback) + theme are read HERE so only NEW
+	 *  terminals pick up a settings change (existing ones keep theirs). */
 	private ensureTerminal(): Terminal {
 		if (this.terminal) return this.terminal;
 		const surface = this.surfaceEl;
 		if (!surface) throw new Error("pi terminal surface is not built");
-		const terminal = new Terminal();
+		const s = this.plugin.settings;
+		const terminal = new Terminal({
+			fontFamily: s.piTerminalFontFamily || undefined,
+			fontSize: s.piTerminalFontSize,
+			scrollback: s.piTerminalScrollback,
+			theme: buildXtermTheme(readObsidianThemeVars()),
+		});
 		const fitAddon = new FitAddon();
 		terminal.loadAddon(fitAddon);
 		terminal.open(surface);
 		this.terminal = terminal;
 		this.fitAddon = fitAddon;
 		// Keystrokes: raw chunks straight to the pty; xterm decodes keys itself.
-		// Refused once the process has exited.
+		// Refused once the process has exited. A keystroke counts as activity
+		// (clears awaiting-input — the user is answering).
 		this.dataSub = terminal.onData((data) => {
 			if (this.exited || !this.pty) return;
 			this.pty.write(data);
+			this.lastInputAt = Date.now();
+			if (this.lastQuestionAt != null) this.lastQuestionAt = null;
+			this.recomputeState();
 		});
+		// Focus/blur drive the done-unseen → seen + awaiting-input → running
+		// transitions and report focus to the manager (most-recently-focused
+		// terminal leaf for the send-note commands). xterm's Terminal v6 d.ts
+		// doesn't expose onFocus/onBlur, so we listen to focusin/focusout on the
+		// surface container (the xterm textarea lives inside it).
+		const surfaceFocus = this.surfaceEl;
+		if (surfaceFocus) {
+			this.focusHandler = () => {
+				this.focused = true;
+				this.plugin.terminalManager?.markFocused(this.leaf);
+				this.recomputeState();
+			};
+			this.blurHandler = () => {
+				this.focused = false;
+				this.recomputeState();
+			};
+			surfaceFocus.addEventListener("focusin", this.focusHandler);
+			surfaceFocus.addEventListener("focusout", this.blurHandler);
+		}
 		return terminal;
 	}
 
@@ -277,6 +400,208 @@ export class TerminalView extends ItemView {
 		this.exited = false;
 		this.exitCode = null;
 		this.attachError = null;
+	}
+
+	/** Reset the activity-state timestamps (on attach / cwd change). */
+	private resetActivity(): void {
+		this.lastDataAt = null;
+		this.lastInputAt = null;
+		this.lastQuestionAt = null;
+		this.visualState = "idle";
+	}
+
+	// ------------------------------------------------------------- state badge
+
+	/** Recompute the visual state from the activity heuristic + focus and apply
+	 *  the badge CSS class to the state-line badge + the tab-header icon. */
+	private recomputeState(): void {
+		const next = computeActivityState({
+			focused: this.focused,
+			exited: this.exited,
+			exitCode: this.exitCode,
+			lastDataAt: this.lastDataAt,
+			lastInputAt: this.lastInputAt,
+			lastQuestionAt: this.lastQuestionAt,
+			alive: !!this.pty && !this.exited,
+			now: Date.now(),
+		});
+		if (next !== this.visualState) this.setVisualState(next);
+	}
+
+	/** Apply a visual state: set the badge CSS class on the state-line badge +
+	 *  the leaf's tab-header icon, and remember it for the ribbon hub / picker. */
+	setVisualState(state: TerminalState): void {
+		this.visualState = state;
+		this.applyBadge();
+	}
+
+	/** Fan the current state's CSS class onto the badge + tab-header icon. */
+	private applyBadge(): void {
+		const cls = terminalStateClass(this.visualState);
+		if (this.badgeEl) {
+			for (const s of ALL_TERMINAL_STATES) this.badgeEl.removeClass(terminalStateClass(s));
+			this.badgeEl.addClass(cls);
+			this.badgeEl.setText(this.badgeText());
+		}
+		// Tab-header icon (best-effort: only when the leaf's header is mounted).
+		const tabHeaderEl = (this.leaf as unknown as { tabHeaderEl?: HTMLElement | null } | null)?.tabHeaderEl ?? null;
+		const innerIcon = tabHeaderEl?.querySelector(
+			".workspace-tab-header-inner-icon",
+		) as HTMLElement | null;
+		if (innerIcon) {
+			innerIcon.classList.add(PI_TERMINAL_LIVE_CLASS);
+			for (const s of ALL_TERMINAL_STATES) innerIcon.classList.remove(terminalStateClass(s));
+			innerIcon.classList.add(cls);
+		}
+	}
+
+	/** Short badge text for the state line (kept tiny — the CSS color carries
+	 *  the meaning; this is the screen-reader/quick-scan label). */
+	private badgeText(): string {
+		switch (this.visualState) {
+			case "running":
+				return "running";
+			case "done-unseen":
+				return "done";
+			case "seen":
+				return "seen";
+			case "awaiting-input":
+				return "?";
+			case "error":
+				return "error";
+			default:
+				return "idle";
+		}
+	}
+
+	/** Re-apply the xterm theme (called by main.ts on Obsidian `css-change`). */
+	applyTheme(): void {
+		if (this.terminal) this.terminal.options.theme = buildXtermTheme(readObsidianThemeVars());
+	}
+
+	// ----------------------------------------------------------- slash toolbar
+
+	/** Build the slash-toolbar button row into the state line. Compact: one
+	 *  "menu" icon button toggles a popover with New / Resume… / Compact /
+	 *  Thinking. Resume… lists the cwd's session files (newest first) and
+	 *  respawns `pi --session <file>`. */
+	private buildToolbar(): HTMLElement {
+		const toolbar = el("div", { cls: "arthur-pi-toolbar" });
+		const menuBtn = el("button", {
+			cls: "arthur-pi-toolbar-btn",
+			attrs: { "aria-label": "pi commands", title: "pi commands" },
+		});
+		menuBtn.setText("≡");
+		menuBtn.addEventListener("click", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			this.toggleToolbarPopover();
+		});
+		toolbar.append(menuBtn);
+		return toolbar;
+	}
+
+	private toggleToolbarPopover(): void {
+		if (this.toolbarPopover) {
+			this.closeToolbarPopover();
+			return;
+		}
+		const pop = el("div", { cls: "arthur-pi-toolbar-popover" });
+		pop.append(this.toolbarItem("New", "Start a fresh session (/new)", () => this.sendSlash("/new")));
+		// Resume… expands inline to the cwd's session files.
+		const resumeRow = el("div", { cls: "arthur-pi-toolbar-submenu" });
+		const resumeHead = el("button", { cls: "arthur-pi-toolbar-item", text: "Resume…" });
+		resumeHead.setAttribute("title", "Resume a saved session for this cwd");
+		const resumeList = el("div", { cls: "arthur-pi-toolbar-sublist" });
+		const files = this.cwd ? listSessionFilesForCwd(defaultPiSessionsDir(), this.cwd) : [];
+		if (files.length === 0) {
+			resumeList.append(el("span", { cls: "arthur-pi-toolbar-empty", text: "no saved sessions" }));
+		} else {
+			for (const f of files) {
+				const item = el("button", { cls: "arthur-pi-toolbar-item arthur-pi-toolbar-subitem", text: f.name });
+				item.setAttribute("title", f.path);
+				item.addEventListener("click", () => {
+					this.closeToolbarPopover();
+					this.respawnWithSession(f.path);
+				});
+				resumeList.append(item);
+			}
+		}
+		resumeHead.addEventListener("click", () => {
+			resumeList.classList.toggle("is-open");
+		});
+		resumeRow.append(resumeHead, resumeList);
+		pop.append(resumeRow);
+		pop.append(
+			this.toolbarItem("Compact", "Compact the context (/compact)", () => this.sendSlash("/compact")),
+		);
+		pop.append(
+			this.toolbarItem("Thinking", "Cycle thinking level (Shift+Tab)", () => this.sendRaw("\x1b[Z")),
+		);
+		// Mount into the state-line container so it anchors under the toolbar.
+		this.stateEl?.append(pop);
+		this.toolbarPopover = pop;
+		// Clicking outside the popover closes it.
+		const onOutside = (evt: MouseEvent): void => {
+			if (!pop.contains(evt.target as Node) && !this.toolbarEl?.contains(evt.target as Node)) {
+				this.closeToolbarPopover();
+				document.removeEventListener("click", onOutside, true);
+			}
+		};
+		window.setTimeout(() => document.addEventListener("click", onOutside, true), 0);
+	}
+
+	private closeToolbarPopover(): void {
+		this.toolbarPopover?.remove();
+		this.toolbarPopover = null;
+	}
+
+	/** One plain toolbar item button → action. */
+	private toolbarItem(label: string, title: string, action: () => void): HTMLElement {
+		const item = el("button", { cls: "arthur-pi-toolbar-item", text: label });
+		item.setAttribute("title", title);
+		item.addEventListener("click", () => {
+			this.closeToolbarPopover();
+			action();
+		});
+		return item;
+	}
+
+	/** Write a pi slash command + Enter into the pty (refused after exit). */
+	private sendSlash(command: string): void {
+		if (!this.pty || this.exited) return;
+		this.pty.write(command + "\r");
+		this.terminal?.focus();
+	}
+
+	/** Write raw bytes into the pty (e.g. the Shift+Tab escape) — no Enter. */
+	private sendRaw(bytes: string): void {
+		if (!this.pty || this.exited) return;
+		this.pty.write(bytes);
+		this.terminal?.focus();
+	}
+
+	/** Public pty write (used by the send-note commands). Refused after exit. */
+	writeToPty(data: string): void {
+		if (!this.pty || this.exited) return;
+		this.pty.write(data);
+	}
+
+	/** Respawn the pty with `pi --session <file>` for this leaf's cwd. Kills the
+	 *  current pty and re-attaches so the same leaf/xterm carries the resumed
+	 *  session. */
+	respawnWithSession(sessionFile: string): void {
+		if (!this.cwd) return;
+		this.sessionFile = sessionFile;
+		this.detachSession();
+		this.resetActivity();
+		this.renderState();
+		void this.maybeAttach();
+	}
+
+	/** Public wrapper so the manager / send-note commands can focus this leaf. */
+	focusTerminal(): void {
+		this.terminal?.focus();
 	}
 
 	// ------------------------------------------------------------------ fit
@@ -311,37 +636,51 @@ export class TerminalView extends ItemView {
 
 	// -------------------------------------------------------------- rendering
 
-	/** The state line: 'no working directory' without a cwd, else 'live' while
-	 *  the pty runs, 'process exited (code N)' on exit, or the spawn error. */
+	/** The state line: 'no working directory' without a cwd, else the live
+	 *  state badge + the slash toolbar, 'process exited (code N)' on exit, or
+	 *  the spawn error. */
 	private renderState(): void {
 		const stateEl = this.stateEl;
 		if (!stateEl) return;
+		// Keep the badge element identity stable across re-renders so applyBadge
+		// can keep fanning the state class onto it.
 		stateEl.empty();
-		const line = el("div", { cls: "arthur-ahp-state-line" });
 		if (!this.cwd) {
-			line.append(el("span", { cls: "arthur-ahp-state", text: "no working directory" }));
-			stateEl.append(line);
+			stateEl.append(el("span", { cls: "arthur-ahp-state arthur-note", text: "no working directory" }));
+			this.badgeEl = null;
+			this.toolbarEl = null;
 			return;
 		}
 		if (this.attachError) {
-			line.append(el("span", { cls: "arthur-ahp-state arthur-ahp-state--error", text: "error" }));
-			line.append(el("span", { cls: "arthur-ahp-error", text: this.attachError }));
-			stateEl.append(line);
+			stateEl.append(
+				el("span", { cls: "arthur-ahp-state arthur-ahp-state--error", text: "error" }),
+				el("span", { cls: "arthur-ahp-error", text: this.attachError }),
+			);
+			this.badgeEl = null;
+			this.toolbarEl = null;
 			return;
 		}
 		if (this.exited) {
 			const code = this.exitCode ?? 0;
-			line.append(
+			stateEl.append(
 				el("span", {
-					cls: "arthur-ahp-state arthur-ahp-state--closed",
+					cls: `arthur-ahp-state arthur-ahp-state--${code === 0 ? "closed" : "error"}`,
 					text: `process exited (code ${code})`,
 				}),
 			);
-			stateEl.append(line);
+			this.badgeEl = null;
+			this.toolbarEl = null;
 			return;
 		}
-		line.append(el("span", { cls: "arthur-ahp-state arthur-ahp-state--ready", text: "live" }));
-		stateEl.append(line);
+		// Live: badge (state CSS class) + a 'live' status word (kept for parity
+		// with the ahp-view state vocabulary) + cwd hint + slash toolbar.
+		this.badgeEl = stateEl.createEl("span", { cls: `arthur-pi-badge ${terminalStateClass(this.visualState)}` });
+		this.badgeEl.setText(this.badgeText());
+		stateEl.append(el("span", { cls: "arthur-ahp-state arthur-ahp-state--ready", text: "live" }));
+		stateEl.append(el("span", { cls: "arthur-pi-state-cwd", text: this.cwd }));
+		this.toolbarEl = this.buildToolbar();
+		stateEl.append(this.toolbarEl);
+		this.applyBadge();
 	}
 
 	// --------------------------------------------------------------- teardown
@@ -353,20 +692,35 @@ export class TerminalView extends ItemView {
 			window.clearTimeout(this.fitTimer);
 			this.fitTimer = null;
 		}
+		if (this.stateTimer !== null) {
+			window.clearInterval(this.stateTimer);
+			this.stateTimer = null;
+		}
+		this.closeToolbarPopover();
 		this.resizeObserver?.disconnect();
 		this.resizeObserver = null;
 		this.detachSession();
+		if (this.surfaceEl && this.focusHandler) this.surfaceEl.removeEventListener("focusin", this.focusHandler);
+		if (this.surfaceEl && this.blurHandler) this.surfaceEl.removeEventListener("focusout", this.blurHandler);
+		this.focusHandler = null;
+		this.blurHandler = null;
+		this.focusSub?.dispose();
+		this.focusSub = null;
+		this.blurSub?.dispose();
+		this.blurSub = null;
 		this.dataSub?.dispose();
 		this.dataSub = null;
 		this.terminal?.dispose();
 		this.terminal = null;
 		this.fitAddon = null;
 		this.opened = false;
-		// cwd/titleText are KEPT: getState() must still describe the bound cwd
-		// after close so a reopened leaf re-attaches. Everything pty/renderer-
-		// related is torn down above.
+		// cwd/titleText/sessionFile are KEPT: getState() must still describe the
+		// bound session after close so a reopened leaf re-attaches. Everything
+		// pty/renderer-related is torn down above.
 		this.attachError = null;
 		this.stateEl = null;
+		this.badgeEl = null;
+		this.toolbarEl = null;
 		this.surfaceEl = null;
 		this.contentEl.empty();
 		// Stay consistent with the manager's routing map regardless of how the

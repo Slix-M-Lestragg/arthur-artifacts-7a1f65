@@ -272,6 +272,8 @@ class StubPlugin {
 	registerInterval() {}
 	register() {}
 	addCommand(cmd) { this.commands.set(cmd.id, cmd); return cmd; }
+	addRibbonIcon() { return new StubEl("div"); }
+	registerEvent() {}
 }
 
 class StubItemView {
@@ -325,6 +327,19 @@ const obsidianStub = {
 	ItemView: StubItemView,
 	Modal: StubModal,
 	Notice: StubNotice,
+	// TFile / MarkdownView: minimal runtime stand-ins so the send-note
+	// commands' `instanceof TFile` checks + editorCallback ctx shape work.
+	TFile: class TFile {
+		constructor(p) {
+			this.path = String(p);
+			const base = this.path.split("/").pop();
+			this.name = base;
+			this.basename = base.replace(/\.md$/, "");
+		}
+	},
+	MarkdownView: class MarkdownView { constructor(file) { this.file = file ?? null; } },
+	// Editor: minimal stand-in shape for editorCallback tests.
+	Editor: class Editor { constructor(opts) { Object.assign(this, opts); } },
 	// Obsidian icon helper (used by the service bar): records the icon name.
 	setIcon: (el, name) => {
 		el.setAttribute("data-icon", name);
@@ -431,6 +446,7 @@ function makeApp() {
 		// vault adapter: the local terminal picker reads the vault fs root for the
 		// 'New terminal in vault root' action (desktop only).
 		vault: { adapter: { getBasePath: () => "/tmp/arthur-vault-root" } },
+		metadataCache: { getFirstLinkpathDest: () => null },
 		workspace: {
 			getLeavesOfType: (type) => leaves.filter((l) => l.view?.getViewType?.() === type),
 			getRightLeaf: () => null, // force the canonical getLeaf(true) fallback
@@ -440,6 +456,10 @@ function makeApp() {
 				return leaf;
 			},
 			revealLeaf() {},
+			on() { return {}; },
+			off() {},
+			getActiveFile: () => null,
+			onLayoutReady(cb) { /* deferred — smoke drives restore directly */ this._layoutReadyCb = cb; },
 			detachLeavesOfType(type) {
 				for (let i = leaves.length - 1; i >= 0; i--) {
 					const leaf = leaves[i];
@@ -6465,6 +6485,327 @@ try {
 		globalThis.WebSocket = MockAhpBroker;
 	})();
 
+	// ---- 33. pi terminal instance states + badge CSS classes (focus/blur) -----
+	//      Pure heuristic transitions (computeActivityState / detectAwaitingInput)
+	//      + the view badge class application + focus clears awaiting-input.
+	console.log("== 33. pi terminal instance states + badge CSS classes (focus/blur) ==");
+	await (async () => {
+		assert(typeof bundle.computeActivityState === "function", "(a) bundle exports computeActivityState");
+		assert(typeof bundle.detectAwaitingInput === "function", "(a) bundle exports detectAwaitingInput");
+		assert(typeof bundle.terminalStateClass === "function", "(a) bundle exports terminalStateClass");
+		assert(bundle.terminalStateClass("awaiting-input") === "arthur-pi-state-awaiting-input", "(a) state class name shape");
+
+		// (b) detectAwaitingInput: trailing '?' + yes/no hints trip; plain prose doesn't.
+		assert(bundle.detectAwaitingInput("Run tests now? ") === true, "(b) trailing '?' trips awaiting-input");
+		assert(bundle.detectAwaitingInput("Continue? [y/n] ") === true, "(b) '?' + [y/n] trips");
+		assert(bundle.detectAwaitingInput("[yes/no]") === true, "(b) bare [yes/no] trips");
+		assert(bundle.detectAwaitingInput("Here is the result.\n") === false, "(b) plain prose does not trip");
+		assert(bundle.detectAwaitingInput("\x1b[1;32mDone\x1b[0m") === false, "(b) ANSI-only chunk does not trip");
+
+		// (c) computeActivityState transitions (pure, controlled `now`).
+		const T0 = 10_000_000;
+		assert(bundle.computeActivityState({ focused: false, exited: false, lastDataAt: null, lastInputAt: null, lastQuestionAt: null, now: T0 }) === "idle", "(c) nothing happened → idle");
+		assert(bundle.computeActivityState({ focused: false, exited: false, lastDataAt: T0 - 500, lastInputAt: null, lastQuestionAt: null, now: T0 }) === "running", "(c) data within ACTIVE_MS → running");
+		assert(bundle.computeActivityState({ focused: false, exited: false, lastDataAt: T0 - 2000, lastInputAt: null, lastQuestionAt: null, now: T0 }) === "done-unseen", "(c) data stopped > IDLE_MS, unfocused → done-unseen");
+		assert(bundle.computeActivityState({ focused: true, exited: false, lastDataAt: T0 - 2000, lastInputAt: null, lastQuestionAt: null, now: T0 }) === "seen", "(c) data stopped, focused → seen");
+		assert(bundle.computeActivityState({ focused: false, exited: false, lastDataAt: T0 - 100, lastInputAt: null, lastQuestionAt: T0 - 100, now: T0 }) === "awaiting-input", "(c) fresh question + unfocused → awaiting-input");
+		assert(bundle.computeActivityState({ focused: true, exited: false, lastDataAt: T0 - 100, lastInputAt: null, lastQuestionAt: T0 - 100, now: T0 }) === "running", "(c) fresh question + focused → running (awaiting clears on focus)");
+		assert(bundle.computeActivityState({ focused: false, exited: true, exitCode: 1, lastDataAt: T0 - 100, lastInputAt: null, lastQuestionAt: null, now: T0 }) === "error", "(c) non-zero exit → error");
+		assert(bundle.computeActivityState({ focused: true, exited: true, exitCode: 0, lastDataAt: T0 - 100, lastInputAt: null, lastQuestionAt: null, now: T0 }) === "seen", "(c) clean exit + focused → seen");
+		assert(bundle.computeActivityState({ focused: false, exited: true, exitCode: 0, lastDataAt: T0 - 100, lastInputAt: null, lastQuestionAt: null, now: T0 }) === "done-unseen", "(c) clean exit + unfocused → done-unseen");
+
+		// (d) view badge class application + setVisualState/getVisualState round-trip.
+		const T = "arthur-pi-terminal";
+		await app.workspace.detachLeavesOfType(T);
+		await plugin.onunload(); await plugin.onload();
+		const sd = makeFakePtyFactory(); plugin.terminalManager.ptyFactory = sd.factory;
+		await plugin.activatePiTerminal({ cwd: "/tmp/st" });
+		const viewD = app.workspace.getLeavesOfType(T)[0].view;
+		assert(viewD.getVisualState() === "running", "(d) freshly spawned pty → running");
+		let badge = findByClass(viewD.contentEl, "arthur-pi-badge")[0];
+		assert(!!badge && badge.className.split(/\s+/).includes("arthur-pi-state-running"), "(d) badge carries arthur-pi-state-running");
+		viewD.setVisualState("awaiting-input");
+		assert(viewD.getVisualState() === "awaiting-input", "(d) setVisualState updates getVisualState");
+		badge = findByClass(viewD.contentEl, "arthur-pi-badge")[0];
+		assert(badge.className.split(/\s+/).includes("arthur-pi-state-awaiting-input"), "(d) badge swaps to arthur-pi-state-awaiting-input");
+
+		// (e) focus clears awaiting-input: emit a question chunk while unfocused,
+		//     then dispatch focusin on the surface → state leaves awaiting.
+		const surfE = findByClass(viewD.contentEl, "arthur-pi-terminal-surface")[0];
+		sd.ptys[0].emit("Approve? [y/n] ");
+		await sleep(20);
+		assert(viewD.getVisualState() === "awaiting-input", "(e) question chunk while unfocused → awaiting-input");
+		surfE.handlers.get("focusin")[0]?.();
+		await sleep(20);
+		assert(viewD.getVisualState() === "running", "(e) focusin clears awaiting-input → running");
+
+		// (f) non-zero exit → error state + badge class.
+		sd.ptys[0].exit(2);
+		await sleep(20);
+		assert(viewD.getVisualState() === "error", "(f) non-zero exit → error visual state");
+	})();
+
+	// ---- 34. slash toolbar payload bytes written to the pty ------------------
+	console.log("== 34. slash toolbar payload bytes (New / Compact / Thinking) ==");
+	await (async () => {
+		const T = "arthur-pi-terminal";
+		await app.workspace.detachLeavesOfType(T);
+		await plugin.onunload(); await plugin.onload();
+		const s34 = makeFakePtyFactory(); plugin.terminalManager.ptyFactory = s34.factory;
+		await plugin.activatePiTerminal({ cwd: "/tmp/tb" });
+		const view = app.workspace.getLeavesOfType(T)[0].view;
+		const pty = s34.ptys[0];
+
+		// Open the toolbar popover (the '≡' button) and click each action.
+		const openPopover = () => {
+			const menuBtn = findButton(view.contentEl, "≡");
+			assert(!!menuBtn, "(a) the slash toolbar menu button renders");
+			menuBtn.handlers.get("click")[0]?.({ preventDefault() {}, stopPropagation() {} });
+		};
+
+		openPopover();
+		const writesBeforeNew = pty.writes.length;
+		findButton(view.contentEl, "New")?.handlers.get("click")[0]?.();
+		assert(pty.writes.slice(writesBeforeNew).some((w) => w === "/new\r"), "(b) New writes '/new\\r' to the pty");
+
+		openPopover();
+		const writesBeforeCompact = pty.writes.length;
+		findButton(view.contentEl, "Compact")?.handlers.get("click")[0]?.();
+		assert(pty.writes.slice(writesBeforeCompact).some((w) => w === "/compact\r"), "(c) Compact writes '/compact\\r' to the pty");
+
+		openPopover();
+		const writesBeforeThink = pty.writes.length;
+		findButton(view.contentEl, "Thinking")?.handlers.get("click")[0]?.();
+		assert(pty.writes.slice(writesBeforeThink).some((w) => w === "\x1b[Z"), "(d) Thinking writes the Shift+Tab escape (no \\r)");
+		assert(!pty.writes.slice(writesBeforeThink).some((w) => w === "\x1b[Z\r"), "(d) Thinking writes NO trailing carriage return");
+	})();
+
+	// ---- 35. session resume spawn args (--session <abs>) + per-cwd lister ----
+	console.log("== 35. session resume spawn args (pi --session <abs>) + listSessionFilesForCwd ==");
+	await (async () => {
+		assert(typeof bundle.listSessionFilesForCwd === "function", "(a) bundle exports listSessionFilesForCwd");
+
+		// (b) spawnPi with sessionFile → args ['--session', <file>] (no -c).
+		const f35 = makeFakePtyFactory();
+		bundle.spawnPi("/tmp/r", { sessionFile: "/abs/sess.jsonl", command: "pi" }, f35.factory);
+		assert(f35.ptys[0].args.length === 2 && f35.ptys[0].args[0] === "--session" && f35.ptys[0].args[1] === "/abs/sess.jsonl",
+			"(b) sessionFile → `pi --session <file>` (no -c)");
+		// fresh wins over sessionFile.
+		const f35b = makeFakePtyFactory();
+		bundle.spawnPi("/tmp/r", { sessionFile: "/abs/sess.jsonl", fresh: true }, f35b.factory);
+		assert(f35b.ptys[0].args.length === 0, "(b) fresh + sessionFile → fresh wins (no flags)");
+
+		// (c) listSessionFilesForCwd against a fake sessions dir: the cwd's
+		//     subdir is matched by the authoritative cwd in the jsonl first line;
+		//     files newest first; missing cwd → [].
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "arthur-resume-"));
+		const sub = path.join(dir, "--tmp-resume--");
+		fs.mkdirSync(sub);
+		const fNew = path.join(sub, "2026-11-08T20-00-00-000Z_new.jsonl");
+		fs.writeFileSync(fNew, JSON.stringify({ type: "session", cwd: "/tmp/resume" }) + "\n");
+		fs.utimesSync(fNew, 2_000_000_000, 2_000_000_000);
+		const fOld = path.join(sub, "2026-11-08T10-00-00-000Z_old.jsonl");
+		fs.writeFileSync(fOld, JSON.stringify({ type: "session", cwd: "/tmp/resume" }) + "\n");
+		fs.utimesSync(fOld, 1_000_000_000, 1_000_000_000);
+		const files = bundle.listSessionFilesForCwd(dir, "/tmp/resume");
+		assert(files.length === 2 && files[0].path === fNew && files[1].path === fOld, "(c) listSessionFilesForCwd lists the cwd's sessions newest first");
+		assert(bundle.listSessionFilesForCwd(dir, "/no/such/cwd").length === 0, "(c) unknown cwd → []");
+
+		// (d) view respawnWithSession: kills the old pty, re-spawns with --session.
+		const T = "arthur-pi-terminal";
+		await app.workspace.detachLeavesOfType(T);
+		await plugin.onunload(); await plugin.onload();
+		const s35 = makeFakePtyFactory(); plugin.terminalManager.ptyFactory = s35.factory;
+		await plugin.activatePiTerminal({ cwd: "/tmp/resume2" });
+		const view = app.workspace.getLeavesOfType(T)[0].view;
+		assert(s35.ptys.length === 1 && s35.ptys[0].args[0] === "-c", "(d) initial spawn resumes with -c");
+		view.respawnWithSession(fNew);
+		await sleep(20);
+		assert(s35.ptys.length === 2, "(d) respawn spawned a second pty");
+		assert(s35.ptys[0].killed, "(d) the old pty was killed on respawn");
+		assert(s35.ptys[1].args.length === 2 && s35.ptys[1].args[0] === "--session" && s35.ptys[1].args[1] === fNew,
+			"(d) respawn spawned `pi --session <file>`");
+		assert(view.getState().sessionFile === fNew, "(d) the leaf state persists the resumed sessionFile");
+
+		fs.rmSync(dir, { recursive: true, force: true });
+	})();
+
+	// ---- 36. send active note / selection payload shape ---------------------
+	console.log("== 36. send active note / selection payload (title + abspath + wikilink rewrite + trailing \\r) ==");
+	await (async () => {
+		assert(typeof bundle.buildNotePayloadWith === "function" && typeof bundle.rewriteWikilinks === "function", "(a) bundle exports buildNotePayloadWith + rewriteWikilinks");
+
+		// (b) pure payload: header + fenced content + trailing \r.
+		const payload = bundle.buildNotePayloadWith("My Note", "/vault/notes/my-note.md", "Hello [[Target|alias]] world [[Other#Section]]", (t) =>
+			t === "Target" ? "/vault/target.md" : t === "Other" ? "/vault/other.md" : null);
+		assert(payload.startsWith('Here is the content of my note "My Note" (at /vault/notes/my-note.md):\n\n---\n'), "(b) header: title + absolute path + fence");
+		assert(payload.endsWith('\n---\r'), "(b) payload ends with the closing fence + trailing \\r");
+		assert(payload.includes("/vault/target.md"), "(b) [[Target|alias]] → absolute path (alias dropped)");
+		assert(payload.includes("/vault/other.md#Section"), "(b) [[Other#Section]] → absolute path + section anchor");
+		assert(!payload.includes("[[Target"), "(b) resolved wikilinks are fully replaced");
+
+		// (c) unresolved wikilinks are left verbatim.
+		const payloadUnresolved = bundle.buildNotePayloadWith("n", "/p", "see [[Missing]]", () => null);
+		assert(payloadUnresolved.includes("[[Missing]]"), "(c) unresolved [[Missing]] stays verbatim for the agent");
+
+		// (d) command path: send-active-note writes the payload into the most-
+		//     recently-focused terminal's pty; no terminal → Notice.
+		const T = "arthur-pi-terminal";
+		await app.workspace.detachLeavesOfType(T);
+		await plugin.onunload(); await plugin.onload();
+		const s36 = makeFakePtyFactory(); plugin.terminalManager.ptyFactory = s36.factory;
+		await plugin.activatePiTerminal({ cwd: "/tmp/sn" });
+		const view = app.workspace.getLeavesOfType(T)[0].view;
+		// focus the terminal so it's the most-recently-focused leaf.
+		findByClass(view.contentEl, "arthur-pi-terminal-surface")[0].handlers.get("focusin")[0]?.();
+		assert(plugin.terminalManager.mostRecentlyFocusedView() === view, "(d) the focused terminal is the send-note target");
+		const file = new obsidianStub.TFile("notes/foo.md");
+		const editor = { getValue: () => "Body with [[foo|alias]] link.", getSelection: () => "sel [[foo]] text" };
+		StubNotice.reset();
+		plugin.commands.get("send-active-note").editorCallback(editor, { file });
+		const written = s36.ptys[0].writes.join("");
+		assert(written.includes('content of my note "foo" (at /tmp/arthur-vault-root/notes/foo.md)'), "(d) send-active-note payload carries the note name + absolute vault path");
+		assert(written.endsWith('\r'), "(d) send-active-note payload ends with \\r");
+		// [[foo|alias]] unresolved (stub metadataCache → null) → left verbatim.
+		assert(written.includes("[[foo|alias]]"), "(d) unresolved wikilink left verbatim through the command path");
+
+		// (e) send-selection writes the (rewritten) selection + \r.
+		const writesBeforeSel = s36.ptys[0].writes.length;
+		plugin.commands.get("send-selection").editorCallback(editor, { file });
+		const selWritten = s36.ptys[0].writes.slice(writesBeforeSel).join("");
+		assert(selWritten.includes("sel [[foo]] text"), "(e) send-selection writes the selection text");
+		assert(selWritten.endsWith('\r'), "(e) send-selection payload ends with \\r");
+
+		// (f) no terminal focused → send-active-note shows a Notice, writes nothing.
+		await app.workspace.detachLeavesOfType(T);
+		await plugin.onunload(); await plugin.onload();
+		StubNotice.reset();
+		plugin.commands.get("send-active-note").editorCallback(editor, { file: new obsidianStub.TFile("x.md") });
+		assert(StubNotice.shown.some((m) => m.includes("pi terminal")), "(f) no terminal → Notice telling the user to open one");
+	})();
+
+	// ---- 37. terminal settings plumbing (fontSize → Terminal option on construct) -
+	console.log("== 37. terminal settings plumbing (fontSize/fontFamily/scrollback → xterm options on construct) ==");
+	await (async () => {
+		const T = "arthur-pi-terminal";
+		await app.workspace.detachLeavesOfType(T);
+		await plugin.onunload(); await plugin.onload();
+		// defaults: fontSize 13, scrollback 5000, fontFamily ''.
+		assert(plugin.settings.piTerminalFontSize === 13, "(a) default fontSize = 13");
+		assert(plugin.settings.piTerminalScrollback === 5000, "(a) default scrollback = 5000");
+		assert(plugin.settings.piTerminalFontFamily === "", "(a) default fontFamily = ''");
+		assert(plugin.settings.piTerminalRestoreOnRestart === true, "(a) default restoreOnRestart = true");
+
+		const s37 = makeFakePtyFactory(); plugin.terminalManager.ptyFactory = s37.factory;
+		await plugin.activatePiTerminal({ cwd: "/tmp/df" });
+		const viewDflt = app.workspace.getLeavesOfType(T)[0].view;
+		assert(viewDflt.terminal.options.fontSize === 13, "(b) default fontSize applied to the constructed xterm");
+		assert(viewDflt.terminal.options.scrollback === 5000, "(b) default scrollback applied to the constructed xterm");
+
+		// (c) changing settings applies to NEW terminals only — change + open a
+		//     new cwd: the new terminal picks up the new fontSize; the old keeps 13.
+		plugin.settings.piTerminalFontSize = 20;
+		plugin.settings.piTerminalScrollback = 9000;
+		plugin.settings.piTerminalFontFamily = "Mono, monospace";
+		await plugin.activatePiTerminal({ cwd: "/tmp/new" });
+		const viewNew = app.workspace.getLeavesOfType(T).find((l) => l.view.boundCwd === "/tmp/new").view;
+		assert(viewNew.terminal.options.fontSize === 20, "(c) NEW terminal picks up the changed fontSize");
+		assert(viewNew.terminal.options.scrollback === 9000, "(c) NEW terminal picks up the changed scrollback");
+		assert(viewDflt.terminal.options.fontSize === 13, "(c) existing terminal keeps its original fontSize");
+	})();
+
+	// ---- 38. theme-follow xterm styling (var → ITheme mapping + applied) ------
+	console.log("== 38. theme-follow xterm styling (Obsidian CSS vars → xterm ITheme) ==");
+	await (async () => {
+		assert(typeof bundle.buildXtermTheme === "function" && typeof bundle.readObsidianThemeVars === "function", "(a) bundle exports buildXtermTheme + readObsidianThemeVars");
+
+		// (b) pure mapping: vars → ITheme (background/foreground/cursor/selection).
+		const theme = bundle.buildXtermTheme({
+			backgroundPrimary: "#111111",
+			textNormal: "#abcdef",
+			interactiveAccent: "#ff0000",
+		});
+		assert(theme.background === "#111111", "(b) background ← --background-primary");
+		assert(theme.foreground === "#abcdef" && theme.cursor === "#abcdef", "(b) foreground + cursor ← --text-normal");
+		assert(theme.selectionBackground === "#ff0000", "(b) selection ← --interactive-accent");
+
+		// (c) empty vars fall back to the documented dark defaults.
+		const fb = bundle.buildXtermTheme({ backgroundPrimary: "", textNormal: "", interactiveAccent: "" });
+		assert(fb.background === bundle.FALLBACK_THEME_VARS.backgroundPrimary, "(c) empty background → fallback");
+
+		// (d) readObsidianThemeVars on the stub harness returns "" for each var
+		//     (getComputedStyle stub), so a constructed terminal uses the fallbacks.
+		const vars = bundle.readObsidianThemeVars();
+		assert(vars.backgroundPrimary === "" && vars.textNormal === "" && vars.interactiveAccent === "", "(d) stub getComputedStyle yields empty vars");
+		const T = "arthur-pi-terminal";
+		await app.workspace.detachLeavesOfType(T);
+		await plugin.onunload(); await plugin.onload();
+		const s38 = makeFakePtyFactory(); plugin.terminalManager.ptyFactory = s38.factory;
+		await plugin.activatePiTerminal({ cwd: "/tmp/th" });
+		const view = app.workspace.getLeavesOfType(T)[0].view;
+		assert(view.terminal.options.theme.background === bundle.FALLBACK_THEME_VARS.backgroundPrimary, "(d) constructed terminal theme uses the fallback background");
+
+		// (e) applyTheme() re-applies without error; a theme switch re-derives the
+		//     background via the pure builder (stub vars stay empty here).
+		const reapplied = bundle.buildXtermTheme({ backgroundPrimary: "#222222", textNormal: "#eeeeee", interactiveAccent: "#00ff00" });
+		assert(reapplied.background === "#222222", "(e) a theme switch re-derives the xterm background from the new vars");
+		view.applyTheme();
+		assert(view.terminal.options.theme.background === bundle.FALLBACK_THEME_VARS.backgroundPrimary, "(e) applyTheme re-applied without error (stub vars still empty)");
+	})();
+
+	// ---- 39. instance picker (open-instances + new) + ribbon command routing ---
+	console.log("== 39. instance picker (open-instances + new) + ribbon command routing ==");
+	await (async () => {
+		assert(typeof bundle.InstancePickerModal === "function", "(a) bundle exports InstancePickerModal");
+		const T = "arthur-pi-terminal";
+		await app.workspace.detachLeavesOfType(T);
+		await plugin.onunload(); await plugin.onload();
+		const s39 = makeFakePtyFactory(); plugin.terminalManager.ptyFactory = s39.factory;
+
+		// (b) no terminals open → open-pi-terminal command opens the session/dir picker.
+		StubModal.reset();
+		plugin.commands.get("open-pi-terminal").callback();
+		await sleep(40);
+		assert(StubModal.opened[StubModal.opened.length - 1] instanceof bundle.TerminalPickerModal, "(b) no terminals → session/dir picker");
+		StubModal.opened[StubModal.opened.length - 1].close();
+
+		// (c) one+ terminals open → open-pi-terminal command opens the instance picker.
+		await plugin.activatePiTerminal({ cwd: "/tmp/ip1" });
+		await plugin.activatePiTerminal({ cwd: "/tmp/ip2" });
+		assert(plugin.terminalManager.openInstances().length === 2, "(c) two open instances listed");
+		StubModal.reset();
+		plugin.commands.get("open-pi-terminal").callback();
+		await sleep(40);
+		const ipk = StubModal.opened[StubModal.opened.length - 1];
+		assert(ipk instanceof bundle.InstancePickerModal, "(c) terminals open → instance picker");
+		const rows = findByClass(ipk.contentEl, "arthur-instance-row");
+		assert(rows.length === 3, "(c) instance picker renders 2 instances + the '+ new' row");
+		assert(!!rows.find((r) => r.getAttribute("data-terminal-cwd") === "/tmp/ip1"), "(c) an instance row carries its cwd");
+		// each instance row's dot carries a state CSS class.
+		const dot = findByClass(ipk.contentEl, "arthur-instance-dot")[0];
+		assert(dot.className.split(/\s+/).some((c) => c.startsWith("arthur-pi-state-")), "(c) instance dot carries a state CSS class");
+		ipk.close();
+
+		// (d) instance picker onPick → focus the existing leaf (no new pty).
+		let pickedD = null;
+		const modD = new bundle.InstancePickerModal(app, {
+			instances: plugin.terminalManager.openInstances(),
+			onPick: (cwd) => { pickedD = cwd; },
+			onNew: () => {},
+		});
+		modD.open();
+		await sleep(20);
+		const ptysBefore = s39.ptys.length;
+		findByClass(modD.contentEl, "arthur-instance-row")
+			.find((r) => r.getAttribute("data-terminal-cwd") === "/tmp/ip1")
+			?.handlers.get("click")[0]?.();
+		await sleep(20);
+		assert(pickedD === "/tmp/ip1", "(d) clicking an instance row fires onPick(cwd)");
+		assert(s39.ptys.length === ptysBefore, "(d) picking an existing instance spawns NO new pty");
+		modD.close();
+	})();
+
+
 	// ---- cleanup ----------------------------------------------------------
 	try {
 		await leaf.view.onClose();
@@ -6483,4 +6824,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / local-pty-terminal-spawn-args+pty→xterm+xterm→pty+resize+exit-state / local-pty-resolver-absolute-path-require+no-native-load / local-terminal-view-lazy-no-cwd+attach+close-kill+reopen / local-terminal-manager-per-cwd-routing+3-leaves+isolation+reuse+full-unload-kill-all / local-terminal-picker-fake-sessions-dir+select→open+vault-root+cwd-input+mobile-hide / ahp-client-load-retry-resilience-819e2bb-regression all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / local-pty-terminal-spawn-args+pty→xterm+xterm→pty+resize+exit-state / local-pty-resolver-absolute-path-require+no-native-load / local-terminal-view-lazy-no-cwd+attach+close-kill+reopen / local-terminal-manager-per-cwd-routing+3-leaves+isolation+reuse+full-unload-kill-all / local-terminal-picker-fake-sessions-dir+select→open+vault-root+cwd-input+mobile-hide / ahp-client-load-retry-resilience-819e2bb-regression / pi-instance-states+badge-CSS-classes+focus-clears-awaiting / slash-toolbar-payload-bytes-new+compact+thinking / session-resume-spawn-args+listSessionFilesForCwd+respawn / send-active-note+selection-payload+wikilink-rewrite+no-terminal-notice / terminal-settings-plumbing-fontSize+scrollback+new-only / theme-follow-xterm-styling-var→ITheme+fallbacks+applyTheme / instance-picker+ribbon-command-routing+open-instances all clean");

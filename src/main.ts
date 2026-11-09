@@ -4,6 +4,9 @@ import {
 	PluginSettingTab,
 	Setting,
 	Platform,
+	MarkdownView,
+	TFile,
+	Notice,
 } from "obsidian";
 
 import { ArthurAgentClient } from "./api/agent";
@@ -17,6 +20,9 @@ import { AhpView, VIEW_TYPE_AHP } from "./ui/ahp-view";
 import { TerminalView, VIEW_TYPE_PI_TERMINAL } from "./ui/terminal-view";
 import { TerminalManager } from "./ui/terminal-manager";
 import { TerminalPickerModal, listLocalPiSessions, defaultPiSessionsDir } from "./ui/terminal-picker";
+import { InstancePickerModal } from "./ui/instance-picker";
+import { attachRibbonHub } from "./ui/ribbon-hub";
+import { buildNotePayloadWith, rewriteWikilinks } from "./ui/terminal-note";
 import { StatusBarPill, StatusBarState } from "./ui/status-bar";
 import { fmtBytes, fmtGigCompact, normalizeHost } from "./util";
 
@@ -49,12 +55,26 @@ export { VIEW_TYPE_PI_TERMINAL, TerminalView } from "./ui/terminal-view";
 export { TerminalManager } from "./ui/terminal-manager";
 // local pi terminal picker (session/dir listing) + helpers asserted against
 // the compiled main.js export surface.
-export { TerminalPickerModal, fuzzyMatch, listLocalPiSessions, defaultPiSessionsDir } from "./ui/terminal-picker";
-export type { LocalPiSession } from "./ui/terminal-picker";
+export { TerminalPickerModal, fuzzyMatch, listLocalPiSessions, listSessionFilesForCwd, defaultPiSessionsDir } from "./ui/terminal-picker";
+export type { LocalPiSession, SessionFileInfo } from "./ui/terminal-picker";
 // local pty spawn wrapper (smoke asserts the spawn args/factory contract +
 // the enriched-PATH builder).
 export { spawnPi, resolvePtyModulePath, buildSpawnEnv } from "./api/local-pty";
 export type { LocalPty, PtySpawnFn, SpawnPiOpts, SpawnEnvDeps } from "./api/local-pty";
+// pi terminal visual state + heuristics (smoke asserts transitions + classes).
+export { terminalStateClass, computeActivityState, detectAwaitingInput, questionStillLive, ALL_TERMINAL_STATES } from "./ui/terminal-state";
+export type { TerminalState, ActivityInputs } from "./ui/terminal-state";
+// pi terminal theme-follow builder (smoke asserts the var → ITheme mapping).
+export { buildXtermTheme, readObsidianThemeVars, resolveThemeVars, FALLBACK_THEME_VARS } from "./ui/terminal-theme";
+export type { ObsidianThemeVars } from "./ui/terminal-theme";
+// send-note payload + wikilink rewrite (smoke asserts the byte shape).
+export { buildNotePayload, buildNotePayloadWith, rewriteWikilinks } from "./ui/terminal-note";
+export type { LinkResolver } from "./ui/terminal-note";
+// instance picker (open-instances + new) — asserted against the export surface.
+export { InstancePickerModal } from "./ui/instance-picker";
+export type { InstanceRow, InstancePickerOpts } from "./ui/instance-picker";
+// ribbon hub — attached in onload.
+export { attachRibbonHub } from "./ui/ribbon-hub";
 
 /** One server profile — host + which ports the services live on + tokens. */
 export interface ServerProfile {
@@ -132,6 +152,19 @@ export interface ArthurSettings {
 	 *  Default `pi` — resolved from the machine PATH at runtime. Desktop-only;
 	 *  the native pty module resolves from the plugin dir's node_modules. */
 	piExecutable: string;
+	/** xterm font family for new pi terminals (default '' = xterm's built-in
+	 *  monospace stack). Applies to NEW terminals only. */
+	piTerminalFontFamily: string;
+	/** xterm font size for new pi terminals (default 13). Applies to NEW
+	 *  terminals only. */
+	piTerminalFontSize: number;
+	/** xterm scrollback lines for new pi terminals (default 5000). Applies to
+	 *  NEW terminals only. */
+	piTerminalScrollback: number;
+	/** Restore open terminal leaves' sessions on plugin/Obsidian restart
+	 *  (default true): saved leaves re-attach and respawn with their saved
+	 *  `--session <file>` (or `-c` when none was saved). */
+	piTerminalRestoreOnRestart: boolean;
 }
 
 /** Clients built from the active profile — rebuilt when settings change. */
@@ -178,6 +211,10 @@ const DEFAULT_SETTINGS: ArthurSettings = {
 	ahpToken: "",
 	ahpEnableControl: false,
 	piExecutable: "pi",
+	piTerminalFontFamily: "",
+	piTerminalFontSize: 13,
+	piTerminalScrollback: 5000,
+	piTerminalRestoreOnRestart: true,
 };
 
 /** Parse a bounded positive int; invalid/missing → fallback. */
@@ -425,10 +462,46 @@ class ArthurSettingTab extends PluginSettingTab {
 		containerEl.createEl("h3", { text: "Pi terminal" });
 		new Setting(containerEl)
 			.setName("pi executable")
-			.setDesc("Command used to spawn local pi terminals (the local-pty backend runs this with the chosen working directory; `pi -c` resumes the most recent session in that cwd). Default `pi` — must be on the machine's PATH where the plugin runs (desktop only).")
+			.setDesc("Command used to spawn local pi terminals (the local-pty backend runs this with the chosen working directory; `pi -c` resumes the most recent session in that cwd, `pi --session <file>` resumes a picked session). Default `pi` — must be on the machine's PATH where the plugin runs (desktop only).")
 			.addText((text) =>
 				text.setValue(s.piExecutable).onChange(async (value) => {
 					s.piExecutable = (value ?? "").trim() || "pi";
+					await this.plugin.saveSettings();
+				})
+			);
+		new Setting(containerEl)
+			.setName("Terminal font family")
+			.setDesc("xterm font-family for NEW pi terminals (empty = xterm's built-in monospace stack). Already-open terminals keep their current font.")
+			.addText((text) =>
+				text.setValue(s.piTerminalFontFamily).onChange(async (value) => {
+					s.piTerminalFontFamily = value ?? "";
+					await this.plugin.saveSettings();
+				})
+			);
+		new Setting(containerEl)
+			.setName("Terminal font size")
+			.setDesc("xterm font size for NEW pi terminals (6–72, default 13). Already-open terminals keep their current size.")
+			.addText((text) =>
+				text.setValue(String(s.piTerminalFontSize)).onChange(async (value) => {
+					s.piTerminalFontSize = clampInt(value, 13, 6, 72);
+					await this.plugin.saveSettings();
+				})
+			);
+		new Setting(containerEl)
+			.setName("Terminal scrollback")
+			.setDesc("xterm scrollback lines for NEW pi terminals (0–100000, default 5000). Already-open terminals keep their current scrollback.")
+			.addText((text) =>
+				text.setValue(String(s.piTerminalScrollback)).onChange(async (value) => {
+					s.piTerminalScrollback = clampInt(value, 5000, 0, 100000);
+					await this.plugin.saveSettings();
+				})
+			);
+		new Setting(containerEl)
+			.setName("Restore terminals on restart")
+			.setDesc("Reopen the pi terminal leaves that were open when Obsidian last quit, respawning each with its saved `--session <file>` (or `-c` when none was saved). Default on.")
+			.addToggle((toggle) =>
+				toggle.setValue(s.piTerminalRestoreOnRestart).onChange(async (value) => {
+					s.piTerminalRestoreOnRestart = value;
 					await this.plugin.saveSettings();
 				})
 			);
@@ -523,14 +596,56 @@ export default class ArthurPlugin extends Plugin {
 			id: "open-pi-terminal",
 			name: "Open pi terminal",
 			callback: () => {
-				this.openTerminalPicker();
+				this.openPiTerminalCommand();
 			},
+		});
+
+		// Send the active note (or just its selection) into the most-recently-
+		// focused pi terminal as a prompt. editorCallback fires only in a markdown
+		// editor; a Notice tells the user to open a terminal first when none is.
+		this.addCommand({
+			id: "send-active-note",
+			name: "Send active note to pi terminal",
+			editorCallback: (editor, ctx) => this.sendActiveNoteToTerminal(editor, ctx),
+		});
+		this.addCommand({
+			id: "send-selection",
+			name: "Send selection to pi terminal",
+			editorCallback: (editor) => this.sendSelectionToTerminal(editor),
 		});
 
 		// Ribbon icon opens the dashboard view.
 		this.addRibbonIcon("monitor-cog", "Open Arthur dashboard", () => {
 			void this.activateView();
 		});
+
+		// Ribbon hub: one "pi terminal" icon with a hover popover listing the
+		// open instances (state-colored dot + cwd); click a row to focus its
+		// leaf, "+ new" opens the session/dir picker. Desktop-only.
+		if (!Platform.isMobile) {
+			const piRibbon = this.addRibbonIcon("terminal-square", "pi terminal", () => {
+				this.openPiTerminalCommand();
+			});
+			attachRibbonHub(piRibbon, this);
+		}
+
+		// Theme-follow: re-apply the Obsidian-derived xterm theme to every open
+		// terminal when the user switches vault theme (CSS vars change).
+		this.registerEvent(this.app.workspace.on("css-change", () => {
+			for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_PI_TERMINAL)) {
+				const view = leaf.view;
+				if (view instanceof TerminalView) view.applyTheme();
+			}
+		}));
+
+		// Restore-on-restart: Obsidian reopens saved terminal leaves itself; a
+		// leaf that wasn't layout-ready at registerView time still carries its
+		// view state, so on layout-ready we re-attach any cwd-bound terminal
+		// leaves whose pty never spawned (the lazy attach path no-ops when one
+		// already exists). Skipped entirely when the user opted out.
+		if (this.settings.piTerminalRestoreOnRestart) {
+			this.app.workspace.onLayoutReady(() => this.restoreTerminalLeaves());
+		}
 
 		// Status bar pill — always-on light metrics; click opens the dashboard.
 		this.statusBarItem = this.addStatusBarItem();
@@ -862,6 +977,11 @@ export default class ArthurPlugin extends Plugin {
 				typeof data?.piExecutable === "string" && data.piExecutable.trim()
 					? data.piExecutable.trim()
 					: DEFAULT_SETTINGS.piExecutable,
+			piTerminalFontFamily:
+				typeof data?.piTerminalFontFamily === "string" ? data.piTerminalFontFamily : DEFAULT_SETTINGS.piTerminalFontFamily,
+			piTerminalFontSize: clampInt(data?.piTerminalFontSize, DEFAULT_SETTINGS.piTerminalFontSize, 6, 72),
+			piTerminalScrollback: clampInt(data?.piTerminalScrollback, DEFAULT_SETTINGS.piTerminalScrollback, 0, 100000),
+			piTerminalRestoreOnRestart: data?.piTerminalRestoreOnRestart !== false,
 		};
 	}
 
@@ -926,9 +1046,11 @@ export default class ArthurPlugin extends Plugin {
 		const cwd = typeof state?.cwd === "string" ? state.cwd : undefined;
 		const title = typeof state?.title === "string" ? state.title : undefined;
 		const fresh = state?.fresh != null && String(state.fresh) === "true";
+		const sessionFile = typeof state?.sessionFile === "string" && state.sessionFile.trim() ? state.sessionFile.trim() : undefined;
 		await this.terminalManager.openTerminal(cwd, {
 			...(title ? { title } : {}),
 			...(fresh ? { fresh: true } : {}),
+			...(sessionFile ? { sessionFile } : {}),
 		});
 	}
 
@@ -949,11 +1071,121 @@ export default class ArthurPlugin extends Plugin {
 			vaultRootCwd: vaultRoot,
 			loadSessions: () =>
 				Promise.resolve(listLocalPiSessions(defaultPiSessionsDir())),
-			onPick: (cwd, title) => {
-				void this.activatePiTerminal({ cwd, ...(title ? { title } : {}) });
+			onPick: (cwd, title, sessionFile) => {
+				void this.activatePiTerminal({ cwd, ...(title ? { title } : {}), ...(sessionFile ? { sessionFile } : {}) });
 			},
 		});
 		modal.open();
+	}
+
+	/**
+	 * The `open-pi-terminal` command: when one or more terminals are already
+	 * open, show the instance picker (jump to an existing instance or spawn a
+	 * new one via the session/dir scanner); when none are open, go straight to
+	 * the session/dir scanner. Desktop-only — a no-op on mobile.
+	 */
+	openPiTerminalCommand(): void {
+		if (Platform.isMobile) return;
+		const open = this.terminalManager?.openInstances() ?? [];
+		if (open.length === 0) {
+			this.openTerminalPicker();
+			return;
+		}
+		const modal = new InstancePickerModal(this.app, {
+			instances: open,
+			onPick: (cwd) => {
+				void this.activatePiTerminal({ cwd });
+			},
+			onNew: () => {
+				this.openTerminalPicker();
+			},
+		});
+		modal.open();
+	}
+
+	/**
+	 * `send-active-note`: write the active note's full body into the most-
+	 * recently-focused pi terminal's pty as a prompt — title + absolute vault
+	 * path header, then the content with `[[wikilinks]]` rewritten to absolute
+	 * paths, fenced in `---`, trailing `\r`. A Notice tells the user to open a
+	 * terminal first when none is focused. Desktop-only; editorCallback only
+	 * fires in a markdown editor.
+	 */
+	sendActiveNoteToTerminal(editor: import("obsidian").Editor, ctx: { file?: TFile | null }): void {
+		if (Platform.isMobile) return;
+		const file = ctx.file ?? this.app.workspace.getActiveFile();
+		if (!(file instanceof TFile)) {
+			new Notice("Open a note first.", 3000);
+			return;
+		}
+		const view = this.terminalManager?.mostRecentlyFocusedView();
+		if (!view) {
+			new Notice("Open a pi terminal first (Open pi terminal command).", 4000);
+			return;
+		}
+		const name = file.basename || file.name;
+		const absPath = this.noteAbsolutePath(file);
+		const content = editor.getValue();
+		const payload = buildNotePayloadWith(name, absPath, content, (target) => this.resolveWikilinkTarget(target, file));
+		view.writeToPty(payload);
+		view.focusTerminal();
+	}
+
+	/**
+	 * `send-selection`: write just the current editor selection (wikilinks
+	 * rewritten to absolute paths) + `\r` into the most-recently-focused pi
+	 * terminal. No header — it's a fragment, not a whole note. Same Notice
+	 * guard when no terminal is focused.
+	 */
+	sendSelectionToTerminal(editor: import("obsidian").Editor): void {
+		if (Platform.isMobile) return;
+		const view = this.terminalManager?.mostRecentlyFocusedView();
+		if (!view) {
+			new Notice("Open a pi terminal first (Open pi terminal command).", 4000);
+			return;
+		}
+		const sel = editor.getSelection();
+		if (!sel) {
+			new Notice("Select some text first.", 3000);
+			return;
+		}
+		const file = this.app.workspace.getActiveFile();
+		const payload = rewriteWikilinks(sel, (target) =>
+			file instanceof TFile ? this.resolveWikilinkTarget(target, file) : null,
+		) + "\r";
+		view.writeToPty(payload);
+		view.focusTerminal();
+	}
+
+	/** Absolute filesystem path of a vault note (vault root + file path). */
+	private noteAbsolutePath(file: TFile): string {
+		const base = (this.app.vault?.adapter as { getBasePath?: () => string } | null)?.getBasePath?.() ?? "";
+		return [base.replace(/[\/]+$/, ""), file.path].filter(Boolean).join("/");
+	}
+
+	/** Resolve a wikilink target to its absolute vault path via the metadata
+	 *  cache (handles aliases + case); null when unresolved. */
+	private resolveWikilinkTarget(target: string, source: TFile): string | null {
+		const dest = this.app.metadataCache.getFirstLinkpathDest?.(target, source.path);
+		if (!(dest instanceof TFile)) return null;
+		return this.noteAbsolutePath(dest);
+	}
+
+	/** Restore-on-restart: re-attach any cwd-bound terminal leaves whose pty
+	 *  never spawned (Obsidian reopens the leaves itself; a leaf that wasn't
+	 *  layout-ready at registerView time still carries its saved view state,
+	 *  including the `--session <file>` to resume). Idempotent — the lazy
+	 *  attach path no-ops when a pty already exists. */
+	private restoreTerminalLeaves(): void {
+		const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_PI_TERMINAL);
+		for (const leaf of leaves) {
+			const view = leaf.view;
+			if (view instanceof TerminalView && view.boundCwd) {
+				// Trigger a re-attach by re-applying the leaf's own view state — the
+				// view's setState is idempotent (same cwd/sessionFile → maybeAttach).
+				void leaf.setViewState?.({ type: VIEW_TYPE_PI_TERMINAL, active: true, state: view.getState() });
+			}
+		}
 	}
 
 	/** For docs/debugging: human summary of the last light tick. */

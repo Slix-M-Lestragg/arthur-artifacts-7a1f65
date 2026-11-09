@@ -92,6 +92,10 @@ export interface SpawnPiOpts {
 	/** Spawn a FRESH pi session (drop the `-c` resume flag). Default false —
 	 *  resume the most recent session in `cwd` (mirrors pi-ahp-tty semantics). */
 	fresh?: boolean;
+	/** Resume a SPECIFIC session file by absolute path (`pi --session <file>`).
+	 *  Takes precedence over `-c`; ignored when `fresh` is set. Used by the
+	 *  terminal picker's resume rows and the slash toolbar's Resume… action. */
+	sessionFile?: string;
 	/** Initial viewport cols (default 80). */
 	cols?: number;
 	/** Initial viewport rows (default 24). */
@@ -311,8 +315,13 @@ export function spawnPi(
 ): LocalPty {
 	const o = opts ?? {};
 	const command = (o.command ?? "pi").trim() || "pi";
+	// `--session <file>` resumes a SPECIFIC session (picker/toolbar Resume);
 	// `-c` resumes the most recent session for the cwd; fresh → no flag.
-	const args = o.fresh ? [] : ["-c"];
+	const args = o.fresh
+		? []
+		: typeof o.sessionFile === "string" && o.sessionFile.trim()
+			? ["--session", o.sessionFile.trim()]
+			: ["-c"];
 	const spawn: PtySpawnFn = factory ?? defaultPtySpawn;
 	// Enriched PATH (see buildSpawnEnv): a GUI-spawned pty can inherit a
 	// minimal PATH that lacks the user's nvm/homebrew node — pi's
