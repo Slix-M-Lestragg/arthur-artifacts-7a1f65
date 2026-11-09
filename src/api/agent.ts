@@ -480,24 +480,6 @@ export class ArthurAgentClient {
 			{ device, cwd },
 		);
 	}
-
-	/** POST /api/pi/terminal-sessions {device, cwd} — agent v0.8.2: launch the
-	 *  `pi-ahp-tty` supervisor (the AHP terminal-registering pi session) on a
-	 *  device so the plugin can attach a live terminal. The supervisor creates
-	 *  the session and registers an externally-fed `ahp-terminal:/<id>`
-	 *  channel; the plugin polls the AHP catalogue for the new terminal-bearing
-	 *  session. 201 → the spawn result; any 4xx/5xx rejects with a typed
-	 *  ArthurApiError carrying the server's `error` message verbatim
-	 *  (422 'pi-ahp-tty not available on <device>' / 503 'device offline' /
-	 *  502 launch failed). Nothing is spawned on 422. */
-	piTerminalSpawn(device: string, cwd: string): Promise<AgentPiTerminalSpawnResult> {
-		return this.call<AgentPiTerminalSpawnResult>(
-			"/api/pi/terminal-sessions",
-			"POST",
-			undefined,
-			{ device, cwd },
-		);
-	}
 }
 
 // ------------------------------------------------- pi deploy surface types ----
@@ -546,27 +528,4 @@ export interface AgentPiSpawnResult {
 	spawned: string;
 	window?: string | null;
 	hint?: string | null;
-}
-
-/** POST /api/pi/terminal-sessions — 201 result (agent v0.8.2). `spawned` is
- *  always 'pi-ahp-tty'; `detail.log` is the supervisor's log path (absolute on
- *  `self`, ~/...-relative on remote) surfaced on a poll timeout, and
- *  `detail.pid` the supervisor's PID when captured (else null).
- *
- *  `sessionId` (agent v0.8.3) is the EXACT `ahp-session:/<id>` URI the
- *  supervisor resumed or minted — null when the launch log printed no
- *  session URI inside the agent's extraction window. OPTIONAL: an older
- *  agent omits the field entirely, so callers must tolerate its absence
- *  (the picker falls back to its cwd-prefix heuristic). */
-export interface AgentPiTerminalSpawnDetail {
-	log: string;
-	pid: number | null;
-	sessionId?: string | null;
-}
-
-export interface AgentPiTerminalSpawnResult {
-	device: string;
-	cwd: string;
-	spawned: "pi-ahp-tty";
-	detail: AgentPiTerminalSpawnDetail;
 }

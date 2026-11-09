@@ -3,6 +3,7 @@ import {
 	Plugin,
 	PluginSettingTab,
 	Setting,
+	Platform,
 } from "obsidian";
 
 import { ArthurAgentClient } from "./api/agent";
@@ -15,10 +16,7 @@ import { ArthurDashboardView, VIEW_TYPE_ARTHUR_DASHBOARD } from "./ui/dashboard-
 import { AhpView, VIEW_TYPE_AHP } from "./ui/ahp-view";
 import { TerminalView, VIEW_TYPE_PI_TERMINAL } from "./ui/terminal-view";
 import { TerminalManager } from "./ui/terminal-manager";
-import { TerminalPickerModal, NEW_SESSION_DISABLED_TOOLTIP } from "./ui/terminal-picker";
-import { PiPickerModal, piDeviceRoot } from "./ui/pi-picker";
-import type { AgentPiDeviceEntry, AgentPiTerminalSpawnResult } from "./api/agent";
-import type { AhpSessionSummary } from "./api/ahp";
+import { TerminalPickerModal, listLocalPiSessions, defaultPiSessionsDir } from "./ui/terminal-picker";
 import { StatusBarPill, StatusBarState } from "./ui/status-bar";
 import { fmtBytes, fmtGigCompact, normalizeHost } from "./util";
 
@@ -43,17 +41,19 @@ export type { PiSessionState, PiDeviceSessionGroups } from "./ui/pi-panel";
 // lifecycle against the compiled main.js export surface).
 export { VIEW_TYPE_AHP, AhpView } from "./ui/ahp-view";
 export { AhpClient, ahpWsUrl, AHP_PROTOCOL_VERSION } from "./api/ahp";
-export { AhpTerminalAdapter, AHP_TERMINAL_CHANNEL_PREFIX } from "./api/ahp-terminal";
-export type { AhpTerminalCallbacks, AhpTerminalEnabledGate } from "./api/ahp-terminal";
-// pi terminal view (T2 smoke): registration + lifecycle asserted against the
-// compiled main.js export surface. Not used at runtime beyond registerView.
+// pi terminal view (local pty backend): registration + lifecycle asserted
+// against the compiled main.js export surface.
 export { VIEW_TYPE_PI_TERMINAL, TerminalView } from "./ui/terminal-view";
-// pi terminal manager (T3 smoke): shared-client + multi-leaf routing asserted
-// against the compiled main.js export surface.
+// pi terminal manager: per-cwd leaf routing + pty lifecycle asserted against
+// the compiled main.js export surface.
 export { TerminalManager } from "./ui/terminal-manager";
-// fuzzy terminal picker (T4 smoke): modal + catalogue helpers asserted
-// against the compiled main.js export surface.
-export { TerminalPickerModal, hasTerminalChannel, sessionIdFromResource, fuzzyMatch, NO_TERMINAL_TOOLTIP } from "./ui/terminal-picker";
+// local pi terminal picker (session/dir listing) + helpers asserted against
+// the compiled main.js export surface.
+export { TerminalPickerModal, fuzzyMatch, listLocalPiSessions, defaultPiSessionsDir } from "./ui/terminal-picker";
+export type { LocalPiSession } from "./ui/terminal-picker";
+// local pty spawn wrapper (smoke asserts the spawn args/factory contract).
+export { spawnPi } from "./api/local-pty";
+export type { LocalPty, PtySpawnFn, SpawnPiOpts } from "./api/local-pty";
 
 /** One server profile — host + which ports the services live on + tokens. */
 export interface ServerProfile {
@@ -127,17 +127,10 @@ export interface ArthurSettings {
 	 *  roles[]/anonymous connections. Opting in assumes a token that grants
 	 *  control, which is stored PLAINTEXT in data.json like the read token. */
 	ahpEnableControl: boolean;
-	/** AHP terminal input relay (`terminal/input` + `terminal/resized` over an
-	 *  `ahp-terminal:/<id>` channel — PI-TERMINAL-PORT-PLAN §3/T6). DEFAULT OFF.
-	 *  Independent of `ahpEnableControl`: a user may want chat control but not
-	 *  terminal control, or vice-versa. Even when on, keystrokes/resize only
-	 *  leave when the live connection holds the controller role (AND'd,
-	 *  fail-safe both ways — a viewer connection sends ZERO input frames). The
-	 *  plugin never spawns a pty; it only renders + relays over the existing
-	 *  authenticated WS. WARNING: terminal input sends your keystrokes to the
-	 *  remote pi session and requires a controller-role token (stored PLAINTEXT
-	 *  in this vault's data.json). */
-	ahpEnableTerminal: boolean;
+	/** Pi executable used to spawn local pi terminals (the local-pty backend).
+	 *  Default `pi` — resolved from the machine PATH at runtime. Desktop-only;
+	 *  the native pty module resolves from the plugin dir's node_modules. */
+	piExecutable: string;
 }
 
 /** Clients built from the active profile — rebuilt when settings change. */
@@ -183,7 +176,7 @@ const DEFAULT_SETTINGS: ArthurSettings = {
 	ahpEndpoint: "100.75.249.5:4500",
 	ahpToken: "",
 	ahpEnableControl: false,
-	ahpEnableTerminal: false,
+	piExecutable: "pi",
 };
 
 /** Parse a bounded positive int; invalid/missing → fallback. */
@@ -406,17 +399,6 @@ class ArthurSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				}),
 		);
-		new Setting(containerEl)
-			.setName("AHP terminal input")
-			.setDesc(
-				"WARNING: Terminal input sends your keystrokes to the remote pi session over an ahp-terminal:/ channel. Default OFF = read-only terminal rendering. When on, keystrokes/resize still leave ONLY if the negotiated connection holds the broker's controller role (AND'd, fail-safe both ways — a viewer connection sends nothing). The plugin never spawns a pty; it only renders + relays over the existing authenticated WS. Requires a controller-role token, stored PLAINTEXT in this vault's data.json.",
-			)
-			.addToggle((toggle) =>
-				toggle.setValue(settings.ahpEnableTerminal).onChange(async (value) => {
-					settings.ahpEnableTerminal = value;
-					await this.plugin.saveSettings();
-				}),
-			);
 
 		const s = this.plugin.settings;
 		containerEl.createEl("h3", { text: "Dashboard display" });
@@ -435,6 +417,17 @@ class ArthurSettingTab extends PluginSettingTab {
 			.addText((text) =>
 				text.setValue(String(s.maxChartKeys)).onChange(async (value) => {
 					s.maxChartKeys = clampInt(value, 4, 1, 8);
+					await this.plugin.saveSettings();
+				})
+			);
+
+		containerEl.createEl("h3", { text: "Pi terminal" });
+		new Setting(containerEl)
+			.setName("pi executable")
+			.setDesc("Command used to spawn local pi terminals (the local-pty backend runs this with the chosen working directory; `pi -c` resumes the most recent session in that cwd). Default `pi` — must be on the machine's PATH where the plugin runs (desktop only).")
+			.addText((text) =>
+				text.setValue(s.piExecutable).onChange(async (value) => {
+					s.piExecutable = (value ?? "").trim() || "pi";
 					await this.plugin.saveSettings();
 				})
 			);
@@ -461,9 +454,9 @@ export default class ArthurPlugin extends Plugin {
 	/** Live dashboard view instance, if its leaf is open (set/cleared by the view). */
 	dashboardView: ArthurDashboardView | null = null;
 
-	/** Pi terminal InstanceManager-lite (T3): owns the shared AHP WS client +
-	 *  routes one terminal leaf per session. Created in onload, torn down in
-	 *  onunload; null only around the unload boundary. */
+	/** Pi terminal manager: routes one terminal leaf per cwd (local pty
+	 *  backend — each terminal owns its own pty, no shared socket). Created in
+	 *  onload, torn down in onunload; null only around the unload boundary. */
 	terminalManager: TerminalManager | null = null;
 
 	/** Cached comfy clients for dynamically discovered instance ports. */
@@ -519,10 +512,11 @@ export default class ArthurPlugin extends Plugin {
 			},
 		});
 
-		// pi terminal view factory + open command (T2/T4): the leaf may carry a
-		// target session via view state (openTerminal/activatePiTerminal); the
-		// bare no-session command now opens the fuzzy picker, and a picked
-		// session routes through the manager into a bound leaf.
+		// pi terminal view factory + open command (local pty backend): the leaf
+		// carries a target cwd via view state (openTerminal/activatePiTerminal);
+		// the bare command opens the local session/dir picker, and a picked cwd
+		// routes through the manager into a bound leaf. Desktop-only — hidden on
+		// mobile (the local pty + Node fs scan cannot run there).
 		this.registerView(VIEW_TYPE_PI_TERMINAL, (leaf) => new TerminalView(leaf, this));
 		this.addCommand({
 			id: "open-pi-terminal",
@@ -561,13 +555,6 @@ export default class ArthurPlugin extends Plugin {
 		this.clients?.lightPoller.stop();
 		this.clients?.detailPoller.stop();
 		this.rebuildClients();
-
-		// A settings change (endpoint/token/etc.) rebuilds the shared terminal
-		// client too — mirrors ahp-view's Refresh (close + lazily re-create from
-		// CURRENT settings on the next terminal attach). No-op until a client
-		// exists; live terminal leaves see the closed client and re-attach on
-		// the next open.
-		this.terminalManager?.rebuildClient();
 
 		const clients = this.clients;
 		if (!clients) return;
@@ -870,7 +857,10 @@ export default class ArthurPlugin extends Plugin {
 			// Off unless explicitly true — legacy data.json without the key stays
 			// read-only.
 			ahpEnableControl: data?.ahpEnableControl === true,
-			ahpEnableTerminal: data?.ahpEnableTerminal === true,
+			piExecutable:
+				typeof data?.piExecutable === "string" && data.piExecutable.trim()
+					? data.piExecutable.trim()
+					: DEFAULT_SETTINGS.piExecutable,
 		};
 	}
 
@@ -923,144 +913,46 @@ export default class ArthurPlugin extends Plugin {
 	}
 
 	/**
-	 * Open (or reveal) the pi terminal leaf — re-pointed through the
-	 * TerminalManager (T3) so multiple concurrent terminals share ONE AHP
-	 * WebSocket (one socket, many `ahp-terminal:/<id>` channel subs): a leaf
-	 * already bound to the given sessionId is focused, else an unbound
-	 * (no-arg) terminal leaf is repurposed, else a new main-area leaf is
-	 * created. `state` optionally carries `{sessionId, title}` through the
-	 * leaf's view state; with no session (the command path) the view renders
-	 * its 'no session attached' state line — the T4 picker instead fills it.
+	 * Open (or reveal) the pi terminal leaf for a working directory. Routed
+	 * through the TerminalManager (local pty backend): a leaf already bound to
+	 * the given cwd is focused, else a new main-area leaf is created and the
+	 * view spawns a local `pi` pty in that cwd. `state` carries `{cwd, title?}`
+	 * through the leaf's view state; with no cwd (the bare command path) the
+	 * view renders its 'no working directory' state line — the picker fills it.
 	 */
 	async activatePiTerminal(state?: Record<string, string>): Promise<void> {
 		if (!this.terminalManager) return;
-		const sessionId = typeof state?.sessionId === "string" ? state.sessionId : undefined;
+		const cwd = typeof state?.cwd === "string" ? state.cwd : undefined;
 		const title = typeof state?.title === "string" ? state.title : undefined;
-		await this.terminalManager.openTerminal(sessionId, title);
+		const fresh = state?.fresh != null && String(state.fresh) === "true";
+		await this.terminalManager.openTerminal(cwd, {
+			...(title ? { title } : {}),
+			...(fresh ? { fresh: true } : {}),
+		});
 	}
 
 	/**
-	 * Open the fuzzy terminal picker (T4) — the no-session entry point of the
-	 * 'Open pi terminal' command, the pi-panel opts-callback, and any caller
-	 * that wants a session chosen first. Picking a terminal-capable row routes
-	 * through `activatePiTerminal` → `TerminalManager.openTerminal` (re-attach
-	 * to a session already open focuses its leaf).
+	 * Open the local pi terminal picker — the no-cwd entry point of the 'Open
+	 * pi terminal' command and the pi-panel opts-callback. Lists local pi
+	 * sessions by scanning `~/.pi/agent/sessions/` (dir names encode cwd; the
+	 * most-recent session file mtime per cwd), plus a 'New terminal in vault
+	 * root' action and a cwd input row. Picking a row routes through
+	 * `activatePiTerminal` → `TerminalManager.openTerminal` (re-open of an
+	 * already-open cwd focuses its leaf). Desktop-only — a no-op on mobile
+	 * (the local pty + Node fs scan cannot run there).
 	 */
 	openTerminalPicker(): void {
+		if (Platform.isMobile) return; // local pty + Node fs scan are desktop-only
+		const vaultRoot = (this.app.vault?.adapter as { getBasePath?: () => string } | null)?.getBasePath?.() ?? "";
 		const modal = new TerminalPickerModal(this.app, {
-			loadSessions: () => this.loadTerminalSessions(),
-			watchSessions: (onUpdate) => this.watchTerminalSessions(onUpdate),
-			newSession: {
-				gate: () => this.newSessionGate(),
-				openPicker: (onChoose) => this.openPiTerminalDirPicker(onChoose),
-				spawn: (device, cwd) => this.spawnPiTerminal(device, cwd),
-			},
-			onPick: (sessionId, title) => {
-				void this.activatePiTerminal({ sessionId, title });
+			vaultRootCwd: vaultRoot,
+			loadSessions: () =>
+				Promise.resolve(listLocalPiSessions(defaultPiSessionsDir())),
+			onPick: (cwd, title) => {
+				void this.activatePiTerminal({ cwd, ...(title ? { title } : {}) });
 			},
 		});
 		modal.open();
-	}
-
-	/**
-	 * The picker's backing load — PROGRESSIVE: acquire the TerminalManager's
-	 * LAZY shared client (created + connected on first use) and resolve with
-	 * the catalogue it ALREADY holds, never blocking on the paged re-load.
-	 * The kicked background re-page commits its first page right away and
-	 * streams later pages (and any mid-paging failure) to the open modal via
-	 * `watchTerminalSessions`. A first-page failure is non-fatal (§32(b): the
-	 * existing catalogue still stands); rejects only when the broker is not
-	 * live (displayable modal error).
-	 */
-	async loadTerminalSessions(): Promise<AhpSessionSummary[]> {
-		const manager = this.terminalManager;
-		if (!manager) throw new Error("terminal manager unavailable (plugin unloading)");
-		const client = await manager.acquireClient();
-		if (client.currentState !== "ready") throw new Error(client.error ?? "AHP not connected");
-		// Non-blocking re-page: rows keep rendering from the current catalogue
-		// while page commits + listing errors arrive through the watcher.
-		void client.refresh().catch(() => undefined);
-		return client.catalogue();
-	}
-
-	/** The picker's live-catalogue subscription: rows stream in as background
-	 *  re-page commits land, and a mid-paging listing failure arrives as an
-	 *  error ALONGSIDE the surviving rows (state stays `ready`; the client's
-	 *  error surface carries the text). */
-	watchTerminalSessions(
-		onUpdate: (rows: AhpSessionSummary[], listingError: string | null) => void,
-	): () => void {
-		const manager = this.terminalManager;
-		if (!manager) return () => undefined;
-		return manager.addCatalogueListener((client) => {
-			onUpdate(client.catalogue(), client.error);
-		});
-	}
-
-	/** Gate for the picker's 'New pi session…' action — arthur-agent
-	 *  reachability (the spawn goes through the agent's v0.8.2
-	 *  POST /api/pi/terminal-sessions endpoint, NOT the AHP broker). null =
-	 *  available, else the disabled-action tooltip. The light poll's
-	 *  `agentOnline` flag is the plugin-wide reachability signal. */
-	private newSessionGate(): string | null {
-		if (!this.clients?.agent) return NEW_SESSION_DISABLED_TOOLTIP;
-		if (this.lightState.agentOnline !== true) return NEW_SESSION_DISABLED_TOOLTIP;
-		return null;
-	}
-
-	/** Open the device + directory picker (PiPickerModal) for the spawn flow.
-	 *  The device is chosen with the SAME heuristic the service-bar pi button
-	 *  uses (last-used → only online → first online); the picker's confirm
-	 *  hands the chosen {device, cwd} back to the terminal picker's spawn+poll
-	 *  cycle via `onChoose`. */
-	private openPiTerminalDirPicker(onChoose: (device: string, cwd: string) => void): void {
-		const agent = this.clients?.agent;
-		if (!agent) return;
-		void this.pickPiDeviceAndOpenDirPicker(agent, onChoose);
-	}
-
-	/** Fetch the agent's device list and open the PiPickerModal pinned to the
-	 *  chosen device (mirrors dashboard-view's piOpenNewSession heuristic). */
-	private async pickPiDeviceAndOpenDirPicker(
-		agent: ArthurAgentClient,
-		onChoose: (device: string, cwd: string) => void,
-	): Promise<void> {
-		let entries: AgentPiDeviceEntry[];
-		try {
-			const res = await agent.piDevices();
-			entries = Array.isArray(res.devices) ? res.devices : [];
-		} catch {
-			return; // agent went offline between the gate and the click — abort
-		}
-		const online = entries.filter((d) => d.online || d.reachable);
-		const last = (this.settings.lastUsedPiDevice ?? "").trim();
-		let dev = last ? online.find((d) => d.id === last) ?? null : null;
-		if (!dev && online.length > 0) dev = online[0]; // deterministic: agent order
-		if (!dev) return; // no online device — the gate would have caught a fully-offline agent
-		const device = { id: dev.id, hostname: dev.hostname, self: dev.self, ssh: dev.ssh };
-		new PiPickerModal(this.app, {
-			device,
-			initialPath: piDeviceRoot(device),
-			fetchDirs: (deviceId, path) => agent.piDirs(deviceId, path),
-			onUse: async (deviceId, cwd) => {
-				this.settings.lastUsedPiDevice = deviceId;
-				void this.saveSettings();
-				// runSpawn awaits the SPAWN only (resolves here → the dir picker
-				// closes); the catalogue poll continues detached in the terminal
-				// picker until the terminal channel registers.
-				await onChoose(deviceId, cwd);
-			},
-		}).open();
-	}
-
-	/** POST /api/pi/terminal-sessions {device, cwd} via the arthur agent —
-	 *  launches the pi-ahp-tty supervisor. Rejects with a typed ArthurApiError
-	 *  carrying the server's error message on 4xx/5xx (422/503/502), surfaced
-	 *  verbatim in the terminal picker. */
-	private async spawnPiTerminal(device: string, cwd: string): Promise<AgentPiTerminalSpawnResult> {
-		const agent = this.clients?.agent;
-		if (!agent) throw new Error("arthur agent unavailable (plugin unloading)");
-		return agent.piTerminalSpawn(device, cwd);
 	}
 
 	/** For docs/debugging: human summary of the last light tick. */

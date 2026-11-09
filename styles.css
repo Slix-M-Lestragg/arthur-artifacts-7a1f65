@@ -1941,17 +1941,8 @@
 	flex: 1;
 }
 
-/* Path A row: present but NOT selectable — the action is disabled because
-   no ahp-terminal:/<id> channel is registered (tooltip explains Path B). */
-.arthur-terminal-row--disabled {
-	opacity: 0.55;
-	cursor: default;
-}
-
-.arthur-terminal-row--disabled:hover {
-	background: transparent;
-}
-
+/* Right-aligned muted trailing text on a row (the session's relative mtime
+   in the local picker). */
 .arthur-terminal-nolink {
 	margin-left: auto;
 	color: var(--text-muted);
@@ -1973,8 +1964,8 @@
 	font-style: normal;
 }
 
-/* 'New pi session…' control row (picker FEATURE 1) — always visible at the
-   top; the cwd prompt unfolds below it while the flow runs. */
+/* Top control row of the local picker — the 'New terminal in vault root'
+   button + a cwd input row (type an absolute path, then Enter or Open). */
 .arthur-terminal-new {
 	display: flex;
 	flex-direction: column;
@@ -1990,14 +1981,6 @@
 .arthur-terminal-new-cwd {
 	flex: 1;
 	min-width: 0;
-}
-
-/* Created-but-unregistered row: stays highlighted after the terminal poll
-   times out so the user can attach later (picker FEATURE 1). */
-.arthur-terminal-row--new {
-	outline: 1px solid var(--interactive-accent);
-	outline-offset: -1px;
-	background: var(--background-modifier-hover);
 }
 
 /* ---------------------------------------------------------------- v0.12.x

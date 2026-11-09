@@ -298,20 +298,7 @@ export class AhpClient {
 
 	private readonly token: string;
 	private readonly callbacks: AhpCallbacks;
-	/** Public read-only: channel adapters (the terminal relay) read this for
-	 *  the self-echo filter (`origin.clientId === client.clientId`). Never
-	 *  written after construction. */
-	readonly clientId: string;
-	/** Per-channel action handlers registered by channel adapters (the
-	 *  terminal relay subscribes a `terminal/*` handler here). `handleEnvelope`
-	 *  dedupes by serverSeq first, then dispatches to the registered handler
-	 *  for the envelope's channel before the session/chat routing. */
-	private readonly channelHandlers = new Map<string, (env: AhpActionEnvelope) => void>();
-	/** Channels subscribed OUTSIDE the session-detail selection machinery
-	 *  (the terminal channel). Included in `activeChannels()` so the
-	 *  reconnect cursor + fire-and-forget teardown unsubscribes carry them;
-	 *  their per-channel serverSeq dedupe applies automatically. */
-	private readonly extraChannels = new Set<string>();
+	private readonly clientId: string;
 
 	private ws: any = null;
 	private state: AhpClientState = "idle";
@@ -707,21 +694,11 @@ export class AhpClient {
 		}
 		if (Array.isArray(res.missing) && this.state === "ready") {
 			for (const channel of (res.missing as unknown[]).map(String)) {
-				if (!channel || channel === AHP_ROOT_CHANNEL) continue;
-				if (this.subscribedDetail.has(channel)) {
+				if (channel && channel !== AHP_ROOT_CHANNEL && this.subscribedDetail.has(channel)) {
 					// A selected session the server could NOT restore loses its
 					// snapshot truth too (its detail is untrustworthy now).
 					if (channel === this.selectedResource) this.snapshotApplied = false;
 					this.forgetDetailChannel(channel);
-					continue;
-				}
-				// A channel-adapter channel (e.g. a terminal) the server could not
-				// restore: re-subscribe so the relay keeps its live stream (the
-				// plan's "snapshot-mode reconnect ... just re-subscribe if needed").
-				// The adapter's handler stays registered; a fresh subscribe re-seeds
-				// the channel watermark from the new reply's fromSeq.
-				if (this.extraChannels.has(channel) && this.channelHandlers.has(channel)) {
-					void this.subscribeChannel(channel);
 				}
 			}
 		}
@@ -947,75 +924,8 @@ export class AhpClient {
 		await this.request("disposeSession", { channel: resource });
 	}
 
-	// ----------------------------------------------- channel-adapter API (T1)
-
-	/** True when a mutation may be sent right now: a `ready` connection that
-	 *  holds the `controller` role. Public read-only gate for channel adapters
-	 *  (terminal input/resize) — mirrors the private `assertCanControl` local
-	 *  gate without throwing. The broker remains the authority; this keeps a
-	 *  viewer connection from spraying mutations whose only server reply is a
-	 *  silent `-32008`. */
-	get controlAllowed(): boolean {
-		return this.state === "ready" && this.canControl;
-	}
-
-	/** Register a per-channel action handler (the terminal relay's
-	 *  `terminal/*` routing). `handleEnvelope` calls it AFTER per-channel
-	 *  serverSeq dedupe for any envelope on `channel`; the handler does its
-	 *  own type routing and self-echo filtering. Re-registering the same
-	 *  channel replaces the handler. */
-	registerChannelHandler(channel: string, fn: (env: AhpActionEnvelope) => void): void {
-		if (channel) this.channelHandlers.set(channel, fn);
-	}
-
-	/** Remove a per-channel action handler (the relay's detach path). */
-	unregisterChannelHandler(channel: string): void {
-		this.channelHandlers.delete(channel);
-	}
-
-	/** Subscribe a channel OUTSIDE the session-detail selection machinery (a
-	 *  terminal channel). Adds it to `activeChannels()` so the reconnect
-	 *  cursor carries it; per-channel serverSeq dedupe applies to its
-	 *  envelopes automatically. Terminal channels carry no snapshot (the
-	 *  broker answers `{}`); any `fromSeq` the reply carries still seeds the
-	 *  channel watermark so a snapshot-mode reconnect stays dedupe-safe. */
-	async subscribeChannel(channel: string): Promise<void> {
-		if (this.state !== "ready") throw new Error("not connected");
-		this.extraChannels.add(channel);
-		const res = await this.request("subscribe", { channel });
-		const snap = parseSubscribeResult(res);
-		if (snap.fromSeq !== null) this.bumpWatermark(channel, snap.fromSeq);
-	}
-
-	/** Unsubscribe a `subscribeChannel`-added channel and drop its
-	 *  epoch-scoped serverSeq watermark + clientSeq counter (mirror the
-	 *  detail-chat `forgetDetailChannel` / `releaseDetailState` pattern — the
-	 *  `ahp-resub-1` bug class: a re-attach to the same idle terminal must
-	 *  not be wedged by a stale watermark). Fire-and-forget `unsubscribe`
-	 *  NOTIFICATION — never awaited. */
-	forgetChannel(channel: string): void {
-		this.extraChannels.delete(channel);
-		this.dropWatermarks([channel]);
-		if (this.ws !== null && this.ws.readyState === 1) {
-			try {
-				this.ws.send(JSON.stringify({ jsonrpc: "2.0", method: "unsubscribe", params: { channel } }));
-			} catch {
-				// Best-effort — the socket close is the fallback cleanup.
-			}
-		}
-	}
-
-	/** Send a `dispatchAction` NOTIFICATION on a channel (terminal/input,
-	 *  terminal/resized). `clientSeq` is monotonic per client+channel — the
-	 *  roles-server dispatchAction wire contract. Fire-and-forget: no reply;
-	 *  a rejection arrives via the echoed envelope. The caller gates this on
-	 *  `controlAllowed` AND its own opt-in setting (fail-safe both ways). */
-	sendDispatchAction(channel: string, action: Record<string, unknown>): void {
-		this.sendNotification("dispatchAction", { channel, clientSeq: this.nextClientSeq(channel), action });
-	}
-
 	/** Send one JSON-RPC NOTIFICATION (no id, no reply expected) — the exact
-	 *  teardown/unsubscribe fire-and-forget shape, reused for dispatchAction. */
+	 *  teardown/unsubscribe fire-and-forget shape. */
 	private sendNotification(method: string, params: Record<string, unknown>): void {
 		const ws = this.ws;
 		if (!ws || ws.readyState !== 1) throw new Error("not connected");
@@ -1159,13 +1069,6 @@ export class AhpClient {
 		if (!channel || !Number.isFinite(seq)) return;
 		// PER-CHANNEL dedupe: skip anything at or below the last observed seq.
 		if (!this.bumpWatermark(channel, seq)) return;
-		// Channel-adapter handlers (the terminal relay) get the deduped envelope
-		// first; the handler does its own type routing + self-echo filter.
-		const channelHandler = this.channelHandlers.get(channel);
-		if (channelHandler) {
-			channelHandler(envelope);
-			return;
-		}
 		const action = (envelope.action ?? null) as Record<string, unknown> | null;
 		const type = typeof action?.type === "string" ? action.type : "";
 		if (type.startsWith("session/")) {
@@ -1217,10 +1120,9 @@ export class AhpClient {
 	 *  reconnect payload + the fire-and-forget teardown unsubscribes). */
 	private activeChannels(): string[] {
 		const list: string[] = [AHP_ROOT_CHANNEL];
-		for (const channel of this.extraChannels) list.push(channel);
 		if (this.selectedResource !== null) list.push(this.selectedResource);
 		for (const channel of this.subscribedDetail) {
-			if (channel !== this.selectedResource && !this.extraChannels.has(channel)) list.push(channel);
+			if (channel !== this.selectedResource) list.push(channel);
 		}
 		return list;
 	}

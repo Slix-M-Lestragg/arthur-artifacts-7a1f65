@@ -1,171 +1,74 @@
 /**
- * TerminalManager — the InstanceManager-lite for multi-leaf pi terminals
- * (PI-TERMINAL-PORT-PLAN §3/T3). Owns ONE shared `AhpClient` (a single
- * WebSocket carrying many `ahp-terminal:/<sessionId>` channel subscriptions)
- * shared by every open terminal leaf, and routes open/close by sessionId.
+ * TerminalManager — per-cwd leaf routing for local pty-backed pi terminals.
+ * Each terminal leaf owns its OWN local pty (spawned by the view on attach);
+ * the manager only routes open/close by cwd and tears every leaf down on
+ * unload. There is NO shared socket and NO shared client — shared-nothing by
+ * design (the local pty backend replaced the AHP `ahp-terminal:/<id>` relay).
  *
- * Ownership split (the SMALLER refactor compatible with the existing T2
- * code — chosen over moving adapters into the manager): the manager owns
- * the shared `AhpClient` + leaf routing; each `TerminalView` still owns its
- * own `AhpTerminalAdapter` + xterm `Terminal`, constructed from the shared
- * client the manager hands it via `acquireClient()`. Closing one leaf
- * detaches that leaf's adapter (one channel `unsubscribe` + epoch-watermark
- * drop) and disposes its xterm — the shared socket and every other leaf are
- * untouched. The view never closes the shared client (it only dereferences
- * it); only the manager closes it (rebuild / unload).
+ * Routing: `openTerminal(cwd, opts)` focuses the existing leaf bound to that
+ * cwd if one is open, else creates a new main-area leaf. The target cwd flows
+ * to the view through the leaf's view state; the view's `setState` drives the
+ * pty spawn. `boundCwd` on the view is what the manager reads for reuse.
  *
- * Lifecycle:
- *   - The shared client is LAZY: created on the first `acquireClient()`
- *     (the first terminal attach OR the first T4 picker catalogue load),
- *     never on plugin load. Built from
- *     CURRENT settings so a settings change + rebuild picks up the new
- *     endpoint/token — mirrors ahp-view's Refresh (close + lazily re-create).
- *   - `rebuildClient()` (called from `rebuildRuntime` on settings change)
- *     closes the current shared client and nulls it; the next
- *     `acquireClient()` builds a fresh one. Adapters still bound to the
- *     closed client see it go `closed` (their state line updates via the
- *     shared state listener) and re-attach on the next open.
- *   - `closeAll()` (plugin `onunload`, AFTER the terminal leaves are
- *     detached so their adapters `unsubscribe` on the live socket first)
- *     closes the shared client for good and clears all routing/listeners.
+ * Pty factory injection: the manager exposes a settable `ptyFactory` (null =
+ * the real node-pty-backed default in `spawnPi`). Smoke tests set it to a fake
+ * before opening terminals so no native pty is ever loaded.
  *
- * Routing: `openTerminal(sessionId, title)` focuses the existing leaf bound
- * to that sessionId if present, else repurposes an existing UNBOUND (no-
- * session) terminal leaf (opened by the no-arg command), else creates a new
- * main-area leaf. The target session flows to the view through the leaf's
- * view state; the view's `setState` drives the attach.
+ * Lifecycle: created in `onload`, torn down in `onunload` (AFTER the terminal
+ * leaves are detached so each view kills its pty in `onClose`); `closeAll`
+ * clears the routing map. Closing one leaf never disturbs any other (each owns
+ * its own pty).
  */
 import type { WorkspaceLeaf } from "obsidian";
 
 import type ArthurPlugin from "../main";
-import { AhpClient } from "../api/ahp";
+import type { PtySpawnFn } from "../api/local-pty";
 import { VIEW_TYPE_PI_TERMINAL, TerminalView } from "./terminal-view";
 
+/** Options for `openTerminal`. */
+export interface OpenTerminalOpts {
+	/** Display title for the leaf (defaults to the cwd's last segment). */
+	title?: string;
+	/** Spawn a FRESH pi session instead of resuming the most recent one. */
+	fresh?: boolean;
+}
+
 export class TerminalManager {
-	/** Bound leaves keyed by sessionId (one terminal leaf per session). */
+	/** Bound leaves keyed by cwd (one terminal leaf per cwd). */
 	private readonly leaves = new Map<string, WorkspaceLeaf>();
-	/** The shared client (lazy); null before the first acquire / after close. */
-	private client: AhpClient | null = null;
-	/** In-flight first-load of the shared client (dedupes concurrent acquirers). */
-	private clientPromise: Promise<AhpClient> | null = null;
-	/** Shared-client state-change listeners (each open terminal view registers one). */
-	private readonly stateListeners = new Set<(client: AhpClient | null) => void>();
-	/** Catalogue listeners (the picker's progressive rendering): fired on every
-	 *  catalogue commit AND state transition (a mid-paging listing failure
-	 *  parks its error on the client without a state change of its own). */
-	private readonly catalogueListeners = new Set<(client: AhpClient) => void>();
+	/**
+	 * Optional pty factory override (null → `spawnPi`'s real node-pty default).
+	 * Smoke tests set this to a fake before opening terminals.
+	 */
+	ptyFactory: PtySpawnFn | null = null;
 
 	constructor(private readonly plugin: ArthurPlugin) {}
 
-	/** The current shared client (null before the first attach / after close). */
-	get sharedClient(): AhpClient | null {
-		return this.client;
-	}
-
 	/**
-	 * Acquire the shared `AhpClient` (lazy: built from CURRENT settings on the
-	 * first call). Concurrent callers share one in-flight load. Resolves with
-	 * the client regardless of load outcome (state `ready` or `error`); callers
-	 * gate on `currentState`. Never rejects — a blank/offline endpoint fails
-	 * inside the client and surfaces as `error`, never a thrown attach.
-	 */
-	async acquireClient(): Promise<AhpClient> {
-		// Re-attempt after a config-class failure: a memoized client whose
-		// first `load()` never opened (state `error`/`closed`/`idle`) is retried
-		// on the next acquire — the broker may have been momentarily unreachable
-		// and the AhpClient has no backoff on a never-opened socket (L601), so
-		// without this the cached failure poisons every later picker open. The
-		// socket stays cached while healthy (`ready`); a ready/connecting/
-		// reconnecting acquire piggybacks on the in-flight promise (no duplicate
-		// attempt). Never rejects — a failed retry surfaces as `error` state.
-		if (this.client && this.clientPromise) {
-			const st = this.client.currentState;
-			if (st === "ready" || st === "connecting" || st === "reconnecting") {
-				return this.clientPromise;
-			}
-			this.clientPromise = this.client
-				.load()
-				.catch(() => undefined)
-				.then(() => this.client as AhpClient);
-			this.emitState();
-			return this.clientPromise;
-		}
-		const client = new AhpClient(this.plugin.settings.ahpEndpoint, this.plugin.settings.ahpToken, {
-			onStateChanged: () => {
-				this.emitState();
-				this.emitCatalogue(); // a state-carried error (mid-paging failure) reaches the picker
-			},
-			onCatalogue: () => this.emitCatalogue(),
-		});
-		this.client = client;
-		// Swallow load failures: the state line carries the error (a blank/
-		// offline endpoint never opens a malformed WS — ahpWsUrl fails inside
-		// the client), exactly as the T2 view's own try/catch around load did.
-		this.clientPromise = client
-			.load()
-			.catch(() => undefined)
-			.then(() => client);
-		this.emitState();
-		return this.clientPromise;
-	}
-
-	/** Rebuild the shared client on settings change (mirror ahp-view Refresh):
-	 *  close the current client; the next `acquireClient()` builds a fresh one
-	 *  from the new endpoint/token. No-op when no client exists yet. */
-	rebuildClient(): void {
-		if (this.client) {
-			this.client.close();
-			this.client = null;
-		}
-		this.clientPromise = null;
-		this.emitState();
-	}
-
-	/** Subscribe to shared-client state changes (each open view registers one
-	 *  so its state line tracks the single connection). Called immediately
-	 *  with the current client so a late view picks up the live state. */
-	addStateListener(fn: (client: AhpClient | null) => void): void {
-		this.stateListeners.add(fn);
-		fn(this.client);
-	}
-
-	removeStateListener(fn: (client: AhpClient | null) => void): void {
-		this.stateListeners.delete(fn);
-	}
-
-	/** Subscribe to shared-client catalogue updates (the picker's progressive
-	 *  rendering: rows stream in as background pages commit). Returns an
-	 *  unsubscribe function; safe to call before any client exists. */
-	addCatalogueListener(fn: (client: AhpClient) => void): () => void {
-		this.catalogueListeners.add(fn);
-		return () => {
-			this.catalogueListeners.delete(fn);
-		};
-	}
-
-	/**
-	 * Open (or reveal) a terminal leaf for a session. The target session flows
-	 * to the view through the leaf's view state (the view's `setState` drives
-	 * the attach), so this method never touches the adapter directly.
-	 *   - With a sessionId: focus the existing leaf bound to it if present,
-	 *     else repurpose an existing unbound (no-session) terminal leaf,
-	 *     else create a new main-area leaf (`getLeaf(true)` — a terminal wants
+	 * Open (or reveal) a terminal leaf for a working directory. The target cwd
+	 * flows to the view through the leaf's view state (the view's `setState`
+	 * drives the pty spawn), so this method never touches the pty directly.
+	 *   - With a cwd: focus the existing leaf bound to it if present, else
+	 *     create a new main-area leaf (`getLeaf(true)` — a terminal wants
 	 *     space, not the right sidebar).
-	 *   - Without a sessionId: reveal an existing unbound leaf, else create one.
+	 *   - Without a cwd: reveal an existing unbound leaf, else create one
+	 *     (renders the 'no working directory' state line until a cwd arrives).
 	 */
-	async openTerminal(sessionId?: string, title?: string): Promise<WorkspaceLeaf> {
+	async openTerminal(cwd?: string, opts?: OpenTerminalOpts): Promise<WorkspaceLeaf> {
 		const { workspace } = this.plugin.app;
-		const sid = sessionId && sessionId.trim() ? sessionId.trim() : null;
-		if (sid) {
-			const state = { sessionId: sid, ...(title ? { title } : {}) };
-			const existing = this.leaves.get(sid);
+		const key = typeof cwd === "string" && cwd.trim() ? cwd.trim() : null;
+		if (key) {
+			const state: Record<string, unknown> = { cwd: key };
+			if (opts?.title) state.title = opts.title;
+			if (opts?.fresh) state.fresh = true;
+			const existing = this.leaves.get(key);
 			if (existing) {
 				await existing.setViewState({ type: VIEW_TYPE_PI_TERMINAL, active: true, state });
 				workspace.revealLeaf(existing);
 				return existing;
 			}
 			const leaf = this.findUnboundLeaf() ?? workspace.getLeaf(true);
-			this.leaves.set(sid, leaf);
+			this.leaves.set(key, leaf);
 			await leaf.setViewState({ type: VIEW_TYPE_PI_TERMINAL, active: true, state });
 			workspace.revealLeaf(leaf);
 			return leaf;
@@ -182,69 +85,49 @@ export class TerminalManager {
 	}
 
 	/**
-	 * Close one terminal leaf: detach it (real Obsidian `leaf.detach()` →
-	 * view `onClose` → teardown → adapter `unsubscribe` + xterm dispose) and
-	 * forget the routing entry. Closing ONE leaf must not disturb any other
-	 * leaf or the shared socket — only that leaf's channel is unsubscribed.
+	 * Close one terminal leaf: detach it (real Obsidian `leaf.detach()` → view
+	 * `onClose` → teardown → pty kill + xterm dispose) and forget the routing
+	 * entry. Closing ONE leaf must not disturb any other — each owns its pty.
 	 */
-	closeTerminal(sessionId: string): void {
-		const sid = sessionId && sessionId.trim() ? sessionId.trim() : null;
-		if (!sid) return;
-		const leaf = this.leaves.get(sid);
+	closeTerminal(cwd: string): void {
+		const key = typeof cwd === "string" && cwd.trim() ? cwd.trim() : null;
+		if (!key) return;
+		const leaf = this.leaves.get(key);
 		if (!leaf) return;
-		this.leaves.delete(sid);
+		this.leaves.delete(key);
 		leaf.detach();
 	}
 
 	/**
-	 * Drop the routing entry for a session — called by `TerminalView.teardown`
-	 * so a leaf closed any way (X button, `closeTerminal`, unload) stays
-	 * consistent with the map. Idempotent.
+	 * Drop the routing entry for a cwd — called by `TerminalView.teardown` so a
+	 * leaf closed any way (X button, `closeTerminal`, unload) stays consistent
+	 * with the map. Idempotent.
 	 */
-	forget(sessionId: string | null): void {
-		if (sessionId && sessionId.trim()) this.leaves.delete(sessionId.trim());
+	forget(cwd: string | null): void {
+		if (typeof cwd === "string" && cwd.trim()) this.leaves.delete(cwd.trim());
 	}
 
 	/**
-	 * Plugin unload: close the shared client for good. Called from `onunload`
-	 * AFTER `detachLeavesOfType(VIEW_TYPE_PI_TERMINAL)` so each leaf's adapter
-	 * has already sent its channel `unsubscribe` on the live socket; this then
-	 * unsubscribes the remaining root channel and closes the socket. Clears
-	 * all routing + listeners too.
+	 * Plugin unload: clear all routing. Called from `onunload` AFTER
+	 * `detachLeavesOfType(VIEW_TYPE_PI_TERMINAL)` so each leaf's view has
+	 * already killed its pty in `onClose`.
 	 */
 	closeAll(): void {
 		this.leaves.clear();
-		this.stateListeners.clear();
-		this.catalogueListeners.clear();
-		if (this.client) {
-			this.client.close();
-			this.client = null;
-		}
-		this.clientPromise = null;
+		this.ptyFactory = null;
 	}
 
 	// ---------------------------------------------------------------- internals
 
-	/** Find an existing terminal leaf whose view has no bound session (opened
-	 *  via the no-arg command) so `openTerminal(sessionId)` repurposes it
-	 *  instead of opening a duplicate — keeps the T2 single-leaf reuse
-	 *  behavior while still allowing one leaf per distinct session. */
+	/** Find an existing terminal leaf whose view has no bound cwd (opened via
+	 *  the no-arg command) so `openTerminal(cwd)` repurposes it instead of
+	 *  opening a duplicate. */
 	private findUnboundLeaf(): WorkspaceLeaf | null {
 		const leaves = this.plugin.app.workspace.getLeavesOfType(VIEW_TYPE_PI_TERMINAL);
 		for (const leaf of leaves) {
 			const view = leaf.view;
-			if (view instanceof TerminalView && view.boundSessionId === null) return leaf;
+			if (view instanceof TerminalView && view.boundCwd === null) return leaf;
 		}
 		return null;
-	}
-
-	private emitState(): void {
-		for (const fn of this.stateListeners) fn(this.client);
-	}
-
-	private emitCatalogue(): void {
-		const client = this.client;
-		if (!client) return;
-		for (const fn of this.catalogueListeners) fn(client);
 	}
 }

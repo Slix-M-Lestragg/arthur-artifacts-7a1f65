@@ -341,7 +341,10 @@ const obsidianStub = {
 	// simulate a hung/wedged server — see the timeout smoke section.
 	// NOTE: the resolved response mirrors Obsidian's REAL requestUrl contract:
 	// `.json` and `.text` are pre-parsed VALUE properties (not methods).
-	// getIcon: registry lookup — returns null for ids in _missingIcons (the T2
+	// Platform: desktop by default; the local terminal picker sets isMobile to
+	// assert the 'Open pi terminal' command hides on mobile.
+	Platform: { isMobile: false },
+	// getIcon: registry lookup — returns null for ids in _missingIcons (the
 	// terminal-view icon-fallback test poisons it with 'terminal-square').
 	getIcon: (id) => (id && !obsidianStub._missingIcons?.has(id) ? {} : null),
 	requestUrl: async (opts) => {
@@ -425,6 +428,9 @@ function makeApp() {
 	const leaves = [];
 	const app = {
 		viewFactories: new Map(),
+		// vault adapter: the local terminal picker reads the vault fs root for the
+		// 'New terminal in vault root' action (desktop only).
+		vault: { adapter: { getBasePath: () => "/tmp/arthur-vault-root" } },
 		workspace: {
 			getLeavesOfType: (type) => leaves.filter((l) => l.view?.getViewType?.() === type),
 			getRightLeaf: () => null, // force the canonical getLeaf(true) fallback
@@ -435,8 +441,12 @@ function makeApp() {
 			},
 			revealLeaf() {},
 			detachLeavesOfType(type) {
-				for (const leaf of leaves.splice(0)) {
-					if (leaf.view?.getViewType?.() === type) void leaf.view.onClose?.();
+				for (let i = leaves.length - 1; i >= 0; i--) {
+					const leaf = leaves[i];
+					if (leaf.view?.getViewType?.() === type) {
+						leaves.splice(i, 1);
+						void leaf.view.onClose?.();
+					}
 				}
 			},
 			/** Single-leaf detach backstop for StubLeaf.detach() (T3
@@ -5908,773 +5918,368 @@ try {
 	ws28.reconnectResult = null;
 	ws28.createdSessions = [];
 
-	// ---- 28h. AHP Phase T1 mock-terminal (adapter wire / self-echo / detach+watermark / reconnect cursor / controller+setting gating / viewer-sends-zero-input) ----
-	console.log("== 28h. AHP Phase T1 mock-terminal (adapter wire / self-echo / detach+watermark / reconnect / gating) ==");
 
-	await (async () => {
-	const AhpClientCtor = bundle.AhpClient;
-	const AhpTerminalAdapterCtor = bundle.AhpTerminalAdapter;
-	assert(typeof AhpClientCtor === "function", "(t0) bundle exports AhpClient");
-	assert(typeof AhpTerminalAdapterCtor === "function", "(t0) bundle exports AhpTerminalAdapter");
-
-	const SID = "test-sess";
-	const TCH = "ahp-terminal:/test-sess";
-
-	// Build a READY standalone AhpClient against the same MockAhpBroker. The
-	// terminal channel carries NO snapshot, so states has no entry for it and
-	// subscribe replies {} (the broker's terminal-channel contract).
-	async function readyClient(roles) {
-		ws28.roles = roles;
-		ws28.mismatch = false;
-		ws28.replayActions = [];
-		ws28.reconnectResult = null;
-		ws28.emptyCatalogue = false;
-		ws28.failListPage = 0;
-		ws28.holdListPage = 0;
-		ws28.heldListPageResult = null;
-		ws28.heldListReleases.splice(0);
-		ws28.serverModel = { counts: new Map(), chanSeq: new Map(), states: new Map(), defer: null, held: [] };
-		const c = new AhpClientCtor("100.75.249.5:4500", "smoke-token", {});
-		await c.load();
-		return c;
+	// Fake pty factory for the local terminal smoke (no native pty, no real pi).
+	// Each spawn returns a controllable stub LocalPty; `factory.ptys` lists them
+	// in spawn order. `p.emit(data)` feeds pty output into the view's xterm;
+	// `p.exit(code)` fires the exit callback (the state line).
+	function makeFakePtyFactory() {
+		const ptys = [];
+		const factory = (command, args, options) => {
+			const p = {
+				cmd: command,
+				args: args.slice(),
+				opts: { ...options },
+				writes: [],
+				resized: [],
+				killed: false,
+				_data: [],
+				_exit: [],
+				pid: ptys.length + 1,
+				write(d) { this.writes.push(String(d)); },
+				resize(c, r) { this.resized.push({ cols: c, rows: r }); },
+				onData(cb) { this._data.push(cb); return { dispose: () => { this._data = this._data.filter((x) => x !== cb); } }; },
+				onExit(cb) { this._exit.push(cb); return { dispose: () => { this._exit = this._exit.filter((x) => x !== cb); } }; },
+				kill() { this.killed = true; },
+				emit(d) { for (const cb of this._data) cb(String(d)); },
+				exit(code) { for (const cb of this._exit) cb({ exitCode: code, signal: null }); },
+			};
+			ptys.push(p);
+			return p;
+		};
+		return { factory, ptys };
 	}
-	const latestBroker = () => ws28.instances[ws28.instances.length - 1];
-	const dispatches = (broker) => broker.sent.filter((f) => f.method === "dispatchAction");
 
-	// (a) wire shapes: attach subscribes the terminal channel, sends an initial
-	//     terminal/resized, and routes inbound terminal/data to onData.
-	plugin.settings.ahpEnableTerminal = true;
-	const c = await readyClient(["viewer", "controller"]);
-	const broker = latestBroker();
-	const received = [];
-	const adapter = new AhpTerminalAdapterCtor(c, { enabled: () => plugin.settings.ahpEnableTerminal });
-	await adapter.attachTerminal(SID, 80, 24, (d) => received.push(d));
-	assert(ws28.subscribeCalls.some((ch) => ch === TCH), "(a) attach subscribed ahp-terminal:/test-sess");
-	assert(dispatches(broker).some((f) => f.params.channel === TCH && f.params.action.type === "terminal/resized" && f.params.action.cols === 80 && f.params.action.rows ===  24),
-		"(a) attach sent an initial terminal/resized {cols,rows}");
-	broker.push("action", { channel: TCH, action: { type: "terminal/data", data: "hello" }, serverSeq: 101, origin: { clientId: "server", clientSeq: 0 } });
-	await sleep(20);
-	assert(received.includes("hello"), "(a) inbound terminal/data reached onData");
-	assert(c.channelWatermark(TCH) === 101, "(a) terminal channel watermark parked at 101");
+	// ---- 28h. local pty terminal (injectable factory / spawn args / pty→xterm
+	//      data / xterm→pty keystrokes / resize forwarding / exit-state line) --
+	console.log("== 28h. local pty terminal (spawn args / pty→xterm / xterm→pty / resize / exit-state) ==");
+	await (async () => {
+		// Fresh plugin lifecycle: a clean local terminal manager + state.
+		await plugin.onunload();
+		await plugin.onload();
+		const T = "arthur-pi-terminal";
 
-	// (b) sendInput emits the exact terminal/input NOTIFICATION frame, no id,
-	//     clientSeq monotonic per channel.
-	adapter.sendInput("x");
-	adapter.sendInput("yz");
-	await sleep(10);
-	const inputs = dispatches(broker).filter((f) => f.params.action.type === "terminal/input");
-	assert(inputs.length === 2, "(b) sendInput emitted 2 terminal/input frames");
-	assert(inputs.every((f) => !("id" in f)), "(b) terminal/input is a NOTIFICATION (no id)");
-	assert(inputs.every((f) => f.params.channel === TCH), "(b) terminal/input targets the terminal channel");
-	assert(inputs[0].params.action.data === "x" && inputs[1].params.action.data === "yz", "(b) terminal/input carries the exact data string");
-	assert(inputs[0].params.clientSeq < inputs[1].params.clientSeq, "(b) clientSeq is monotonic per channel");
-	assert(inputs[0].params.clientSeq >= 1, "(b) clientSeq is a positive integer");
+		// (a) exports + registration.
+		assert(typeof bundle.spawnPi === "function", "(a) bundle exports spawnPi");
+		assert(typeof bundle.TerminalView === "function" && bundle.VIEW_TYPE_PI_TERMINAL === T, "(a) bundle exports TerminalView + VIEW_TYPE_PI_TERMINAL");
+		assert(app.viewFactories.has(T), "(a) registerView registered the terminal view factory at onload");
+		const tCmd = plugin.commands.get("open-pi-terminal");
+		assert(typeof tCmd?.callback === "function" && tCmd.name === "Open pi terminal", "(a) command 'Open pi terminal' is registered");
+		assert(typeof plugin.activatePiTerminal === "function", "(a) plugin.activatePiTerminal exists");
 
-	// (c) sendResize emits terminal/resized {cols,rows}.
-	adapter.sendResize(120, 40);
-	await sleep(10);
-	assert(dispatches(broker).some((f) => f.params.action.type === "terminal/resized" && f.params.action.cols === 120 && f.params.action.rows === 40),
-		"(c) sendResize emitted terminal/resized {cols,rows}");
+		const { factory, ptys } = makeFakePtyFactory();
+		plugin.terminalManager.ptyFactory = factory;
 
-	// (d) self-echo filter: an envelope whose origin.clientId === client.clientId
-	//     is skipped (local keystrokes never render twice in xterm).
-	const beforeEcho = received.length;
-	broker.push("action", { channel: TCH, action: { type: "terminal/data", data: "echo" }, serverSeq: 102, origin: { clientId: c.clientId, clientSeq: 0 } });
-	await sleep(20);
-	assert(!received.includes("echo"), "(d) self-echo envelope filtered (origin.clientId === client.clientId)");
-	assert(received.length === beforeEcho, "(d) self-echo produced no onData call");
+		// (b) spawn: activatePiTerminal({cwd}) → manager.openTerminal → view
+		//     spawns a local pi pty via the injected factory. Args default to
+		//     ["-c"] (resume the most recent session in the cwd); command = pi.
+		await plugin.activatePiTerminal({ cwd: "/tmp/s1", title: "session one" });
+		const leavesB = app.workspace.getLeavesOfType(T);
+		assert(leavesB.length === 1, "(b) one terminal leaf opened for /tmp/s1");
+		const viewB = leavesB[0].view;
+		assert(viewB.terminal != null, "(b) xterm Terminal constructed on attach");
+		assert(ptys.length === 1, "(b) one local pty spawned (shared-nothing — one per leaf)");
+		assert(ptys[0].cmd === "pi" && ptys[0].args.length === 1 && ptys[0].args[0] === "-c",
+			"(b) default spawn = `pi -c` (resume) in the cwd");
+		assert(ptys[0].opts.cwd === "/tmp/s1", "(b) the pty spawned in the chosen cwd");
+		assert(viewB.boundCwd === "/tmp/s1", "(b) the leaf is bound to the cwd");
+		assert(viewB.getDisplayText() === "session one", "(b) display text uses the title from view state");
+		assert(allText(viewB.contentEl).includes("live"), "(b) state line shows 'live' while the pty runs");
 
-	// (e) detach: fire-and-forget unsubscribe + DROP the epoch-scoped watermark
-	//     (the ahp-resub-1 bug class); re-attach to the SAME idle terminal is
-	//     NOT wedged (a fresh data frame at the same seq re-applies).
-	adapter.detach();
-	await sleep(20);
-	assert(ws28.unsubs.some((ch) => ch === TCH), "(e) detach sent unsubscribe for the terminal channel");
-	assert(c.channelWatermark(TCH) === null, "(e) detach dropped the terminal channel watermark");
-	const beforeDetach = received.length;
-	broker.push("action", { channel: TCH, action: { type: "terminal/data", data: "stale" }, serverSeq: 103, origin: { clientId: "server", clientSeq: 0 } });
-	await sleep(20);
-	assert(received.length === beforeDetach, "(e) after detach, terminal/data no longer reaches onData");
-	const received2 = [];
-	const adapter2 = new AhpTerminalAdapterCtor(c, { enabled: () => plugin.settings.ahpEnableTerminal });
-	await adapter2.attachTerminal(SID, 80, 24, (d) => received2.push(d));
-	broker.push("action", { channel: TCH, action: { type: "terminal/data", data: "rewake" }, serverSeq: 101, origin: { clientId: "server", clientSeq: 0 } });
-	await sleep(20);
-	assert(received2.includes("rewake"), "(e) re-attach to the same idle terminal is NOT wedged (seq 101 re-applies after the watermark drop)");
-	assert(c.channelWatermark(TCH) === 101, "(e) re-attach re-seeded the watermark to 101");
+		// (c) pty output → xterm buffer; xterm keystrokes → pty.write.
+		ptys[0].emit("hello>");
+		await sleep(20);
+		const lineC = viewB.terminal.buffer.active.getLine(0);
+		assert(!!lineC && lineC.translateToString(true).includes("hello>"), "(c) pty output lands in the xterm buffer");
+		viewB.terminal.input("k", true);
+		await sleep(10);
+		assert(ptys[0].writes.some((w) => w.includes("k")), "(c) xterm keystroke relayed to pty.write");
 
-	// (f) reconnect: the terminal channel rides the reconnect cursor
-	//     (activeChannels); per-channel dedupe absorbs the over-replay so no
-	//     frame duplicates.
-	ws28.replayActions = [
-		{ channel: TCH, action: { type: "terminal/data", data: "replay-old" }, serverSeq: 101, origin: { clientId: "server", clientSeq: 0 } }, // <= watermark -> deduped
-		{ channel: TCH, action: { type: "terminal/data", data: "replay-new" }, serverSeq: 105, origin: { clientId: "server", clientSeq: 0 } }, // > watermark -> applied
-	];
-	broker.drop();
-	await sleep(1700); // 1s backoff -> reconnect
-	assert(ws28.reconnects.length >= 1, "(f) a reconnect request was made after the drop");
-	const lastReconnect = ws28.reconnects[ws28.reconnects.length - 1];
-	assert(Array.isArray(lastReconnect.subscriptions) && lastReconnect.subscriptions.includes(TCH),
-		"(f) reconnect carries the terminal channel in subscriptions (cursor)");
-	// The cursor is the MIN across active channels (ahp-root:// at 40 + terminal at 101 = 40);
-	// per-channel dedupe is what actually prevents the duplicate (PI-TERMINAL-PORT-PLAN Q4).
-	assert(lastReconnect.lastSeenServerSeq === 40, "(f) reconnect cursor is the per-channel min (40); per-channel dedupe does the over-replay work");
-	await sleep(40);
-	assert(received2.includes("replay-new"), "(f) reconnect replay delivered the new terminal/data frame (seq 105)");
-	assert(!received2.includes("replay-old"), "(f) reconnect replay DEDUPED the stale terminal/data frame (seq 101, no duplicate)");
-	c.close();
+		// (d) resize: container ResizeObserver → debounced fit → pty.resize.
+		const resizedBefore = ptys[0].resized.length;
+		const roD = globalThis.ResizeObserver.instances.find((r) => !r.disconnected && String(r.target?.className ?? "").includes("arthur-pi-terminal-surface"));
+		assert(!!roD, "(d) the view observes its terminal surface with a ResizeObserver");
+		roD.cb([]);
+		await sleep(250); // FIT_DEBOUNCE_MS = 120
+		assert(ptys[0].resized.length > resizedBefore, "(d) container resize → debounced fit → pty.resize");
+		assert(ptys[0].resized[ptys[0].resized.length - 1].cols === viewB.terminal.cols, "(d) pty.resize received the xterm viewport cols");
 
-	// (g) controller gating: a VIEWER connection sends ZERO terminal/input+
-	//     resized frames even with ahpEnableTerminal ON (fail-safe).
-	plugin.settings.ahpEnableTerminal = true;
-	const cView = await readyClient(["viewer"]);
-	const brokerView = latestBroker();
-	assert(cView.controlAllowed === false, "(g) controlAllowed is false for a viewer connection");
-	const adapterView = new AhpTerminalAdapterCtor(cView, { enabled: () => plugin.settings.ahpEnableTerminal });
-	await adapterView.attachTerminal(SID, 80, 24, () => {});
-	const beforeView = dispatches(brokerView).length;
-	adapterView.sendInput("v");
-	adapterView.sendInput("w");
-	adapterView.sendResize(100, 30);
-	await sleep(10);
-	assert(dispatches(brokerView).length === beforeView, "(g) viewer connection sends ZERO terminal/input+resized frames (setting ON, role off)");
-	cView.close();
+		// (e) exit: the state line shows 'process exited (code N)' and further
+		//     keystrokes are refused.
+		ptys[0].exit(0);
+		await sleep(20);
+		assert(allText(viewB.contentEl).includes("process exited (code 0)"), "(e) exit sets the 'process exited (code 0)' state line");
+		const writesBeforeExit = ptys[0].writes.length;
+		viewB.terminal.input("z", true);
+		await sleep(10);
+		assert(ptys[0].writes.length === writesBeforeExit, "(e) after exit, keystrokes are no longer forwarded to the pty");
 
-	// (h) setting gating: a CONTROLLER sends zero when ahpEnableTerminal is OFF;
-	//     flipping it ON live re-arms the gate.
-	const cCtrl = await readyClient(["viewer", "controller"]);
-	const brokerCtrl = latestBroker();
-	assert(cCtrl.controlAllowed === true, "(h) controlAllowed is true for a controller connection");
-	plugin.settings.ahpEnableTerminal = false;
-	const adapterCtrl = new AhpTerminalAdapterCtor(cCtrl, { enabled: () => plugin.settings.ahpEnableTerminal });
-	await adapterCtrl.attachTerminal(SID, 80, 24, () => {});
-	const beforeCtrl = dispatches(brokerCtrl).length;
-	adapterCtrl.sendInput("c");
-	await sleep(10);
-	assert(dispatches(brokerCtrl).length === beforeCtrl, "(h) controller + setting OFF sends ZERO terminal/input frames");
-	plugin.settings.ahpEnableTerminal = true; // live toggle
-	adapterCtrl.sendInput("c2");
-	await sleep(10);
-	assert(dispatches(brokerCtrl).some((f) => f.params.action.type === "terminal/input" && f.params.action.data === "c2"),
-		"(h) flipping ahpEnableTerminal ON lets a controller send terminal/input (live gate)");
-	cCtrl.close();
-
-	// reset the shared broker state for any later sections
-	ws28.serverModel = null;
-	ws28.roles = undefined;
-	ws28.replayActions = [];
-	ws28.reconnectResult = null;
-	ws28.promptDispatches.splice(0);
-	plugin.settings.ahpEnableTerminal = false;
+		// (f) fresh spawn: opts.fresh drops the -c flag (a brand-new session).
+		const fresh2 = makeFakePtyFactory();
+		plugin.terminalManager.ptyFactory = fresh2.factory;
+		await plugin.activatePiTerminal({ cwd: "/tmp/fresh", fresh: true });
+		assert(fresh2.ptys.length === 1 && fresh2.ptys[0].args.length === 0, "(f) fresh spawn sends NO -c flag (brand-new session)");
+		assert(fresh2.ptys[0].opts.cwd === "/tmp/fresh", "(f) fresh spawn still targets the cwd");
 	})();
 
-	// ---- 29. AHP Phase T2 — pi terminal view (registration / lazy xterm /
-	//      attach wire / keystroke relay / close-dispose + WS cleanup) -------
-	console.log("== 29. AHP Phase T2 terminal view (register / lazy xterm / attach / input / close cleanup) ==");
-
+	// ---- 29. local terminal view lifecycle (lazy no-cwd / attach via view
+	//      state / close-dispose + pty kill / reopen re-attach) ---------------
+	console.log("== 29. local terminal view lifecycle (lazy no-cwd / attach / close-kill / reopen) ==");
 	await (async () => {
-	const T2TYPE = "arthur-pi-terminal";
-	const T2CH = "ahp-terminal:/test-sess";
-	const latestBroker29 = () => ws28.instances[ws28.instances.length - 1];
-	const dispatches29 = (broker) => broker.sent.filter((f) => f.method === "dispatchAction");
-	const unsubs29 = () => ws28.unsubs.filter((ch) => ch === T2CH);
+		const T = "arthur-pi-terminal";
+		await app.workspace.detachLeavesOfType(T);
+		const { factory, ptys } = makeFakePtyFactory();
+		plugin.terminalManager.ptyFactory = factory;
 
-	// Controller attach posture (the mock broker is still globalThis.WebSocket
-	// from section 28; legacy subscribe path answers terminal channels with {}).
-	ws28.roles = ["viewer", "controller"];
-	ws28.mismatch = false;
-	ws28.replayActions = [];
-	ws28.reconnectResult = null;
-	ws28.emptyCatalogue = false;
-	ws28.failListPage = 0;
-	ws28.holdListPage = 0;
-	ws28.serverModel = null;
-	ws28.snapshots = {};
-	plugin.settings.ahpEndpoint = "100.75.249.5:4500";
-	plugin.settings.ahpToken = "smoke-token";
-	plugin.settings.ahpEnableTerminal = true;
-
-	// (a) registration: bundle exports, view type, command + activate method.
-	assert(bundle.VIEW_TYPE_PI_TERMINAL === T2TYPE, "(a) bundle exports VIEW_TYPE_PI_TERMINAL === 'arthur-pi-terminal'");
-	assert(typeof bundle.TerminalView === "function", "(a) bundle exports TerminalView");
-	assert(app.viewFactories.has(T2TYPE), "(a) registerView registered the terminal view factory at onload");
-	const t2Cmd = plugin.commands.get("open-pi-terminal");
-	assert(typeof t2Cmd?.callback === "function" && t2Cmd.name === "Open pi terminal", "(a) command 'Open pi terminal' (open-pi-terminal) is registered");
-	assert(typeof plugin.activatePiTerminal === "function", "(a) plugin.activatePiTerminal exists");
-
-	// (b) opening WITHOUT a session is LAZY: no xterm construct, no
-	//     WebSocket — and a clear 'no session attached' state line.
-	const wsCountOpen = ws28.instances.length;
-	let okT2 = true;
-	try {
+		// (a) opening WITHOUT a cwd is LAZY: no xterm, no pty, 'no working directory'.
 		await plugin.activatePiTerminal();
-	} catch (err) {
-		okT2 = false;
-		console.error(`    activatePiTerminal threw: ${err?.stack ?? err}`);
-	}
-	assert(okT2, "(b) activatePiTerminal() did not throw");
-	const t2Leaves = app.workspace.getLeavesOfType(T2TYPE);
-	assert(t2Leaves.length === 1, "(b) exactly one arthur-pi-terminal leaf after the command");
-	const t2View = t2Leaves[0]?.view;
-	assert(!!t2View && t2View.getViewType() === T2TYPE, "(b) attached view reports the registered type");
-	assert(typeof t2View?.open === "function", "(b) view exposes a callable open() (no field shadowing)");
-	assert(t2View?.terminal == null, "(b) LAZY: no xterm Terminal constructed on open without a session");
-	assert(ws28.instances.length === wsCountOpen, "(b) LAZY: no WebSocket constructed on open without a session");
-	assert(allText(t2View.contentEl).includes("no session attached"), "(b) state line shows 'no session attached'");
-	assert(t2View.getDisplayText() === "pi terminal", "(b) display text falls back to 'pi terminal'");
-	assert(t2View.getIcon() === "terminal-square", "(b) icon is terminal-square when the registry has it");
-	obsidianStub._missingIcons = new Set(["terminal-square"]);
-	assert(t2View.getIcon() === "console", "(b) icon falls back to console when the registry lacks it");
-	obsidianStub._missingIcons = null;
+		const vA = app.workspace.getLeavesOfType(T)[0].view;
+		assert(vA.terminal == null, "(a) LAZY: no xterm constructed without a cwd");
+		assert(ptys.length === 0, "(a) LAZY: no pty spawned without a cwd");
+		assert(allText(vA.contentEl).includes("no working directory"), "(a) state line shows 'no working directory'");
+		assert(vA.getDisplayText() === "pi terminal", "(a) display text falls back to 'pi terminal'");
+		assert(vA.getIcon() === "terminal-square", "(a) icon is terminal-square when the registry has it");
+		obsidianStub._missingIcons = new Set(["terminal-square"]);
+		assert(vA.getIcon() === "console", "(a) icon falls back to console when the registry lacks it");
+		obsidianStub._missingIcons = null;
 
-	// (c) attach via leaf view state: client connects, xterm constructs+opens,
-	//     the terminal channel subscribes, the initial terminal/resized goes
-	//     out, the state line goes live with the fail-closed protocol badge.
-	let attachOk = true;
-	try {
-		await plugin.activatePiTerminal({ sessionId: "test-sess", title: "session A" });
-	} catch (err) {
-		attachOk = false;
-		console.error(`    terminal attach threw: ${err?.stack ?? err}`);
-	}
-	assert(attachOk, "(c) activatePiTerminal({sessionId,title}) attach did not throw");
-	assert(t2View.terminal != null, "(c) xterm Terminal constructed on first attach");
-	assert(t2View.adapter?.attached === true, "(c) adapter reports attached");
-	assert(ws28.subscribeCalls.some((ch) => ch === T2CH), "(c) attached subscribed ahp-terminal:/test-sess");
-	const broker29 = latestBroker29();
-	const initResize = dispatches29(broker29).filter((f) => f.params.channel === T2CH && f.params.action.type === "terminal/resized");
-	assert(initResize.length >= 1
-		&& initResize[0].params.action.cols === t2View.terminal.cols
-		&& initResize[0].params.action.rows === t2View.terminal.rows,
-		"(c) attach sent the initial terminal/resized {cols,rows} from the xterm viewport");
-	const t2Text = allText(t2View.contentEl);
-	assert(t2Text.includes("live") && t2Text.includes("0.3.0"), "(c) state line goes 'live · 0.3.0' (badge only in ready state)");
-	assert(t2View.getDisplayText() === "session A", "(c) display text uses the session title from view state");
+		// (b) attach via leaf view state: xterm constructs, pty spawns, 'live'.
+		await plugin.activatePiTerminal({ cwd: "/tmp/s9", title: "session nine" });
+		assert(vA.terminal != null && ptys.length === 1, "(b) attach constructed xterm + spawned a pty");
+		assert(allText(vA.contentEl).includes("live"), "(b) state line goes 'live'");
+		assert(vA.getDisplayText() === "session nine", "(b) display text uses the session title");
 
-	// (d) keystroke relay: xterm onData → terminal/input dispatchAction; with
-	//     ahpEnableTerminal OFF the view wires NO input (read-only, §3/T6).
-	t2View.terminal.input("k", true);
-	await sleep(10);
-	assert(dispatches29(broker29).some((f) => f.params.channel === T2CH && f.params.action.type === "terminal/input" && f.params.action.data === "k"),
-		"(d) xterm onData relays a keystroke as terminal/input");
-	plugin.settings.ahpEnableTerminal = false;
-	const framesBeforeRO = dispatches29(broker29).length;
-	t2View.terminal.input("z", true);
-	await sleep(10);
-	assert(dispatches29(broker29).length === framesBeforeRO,
-		"(d) ahpEnableTerminal OFF: zero terminal/input frames (read-only view)");
-	plugin.settings.ahpEnableTerminal = true;
+		// (c) close the leaf: pty killed, xterm disposed, refs nulled, content emptied.
+		const termC = vA.terminal;
+		let disposedC = false;
+		const origDispose = termC.dispose.bind(termC);
+		termC.dispose = () => { disposedC = true; return origDispose(); };
+		app.workspace.detachLeavesOfType(T);
+		await sleep(20);
+		assert(disposedC, "(c) closing the leaf disposed the xterm Terminal");
+		assert(ptys[0].killed, "(c) closing the leaf KILLED the pty");
+		assert(vA.terminal == null && vA.pty == null, "(c) onClose nulled the terminal/pty refs");
+		assert(allText(vA.contentEl).trim() === "", "(c) onClose emptied the leaf content");
 
-	// (e) inbound terminal/data renders into the xterm buffer (self-echo of
-	//     our own origin is filtered in the adapter — covered by section 28h).
-	broker29.push("action", { channel: T2CH, action: { type: "terminal/data", data: "hello>" }, serverSeq: 200, origin: { clientId: "server", clientSeq: 0 } });
-	await sleep(50);
-	const line29 = t2View.terminal.buffer.active.getLine(0);
-	assert(!!line29 && line29.translateToString(true).includes("hello>"),
-		"(e) inbound terminal/data lands in the xterm buffer");
-
-	// (f) the debounced ResizeObserver → fit → terminal/resized chain.
-	const resizedBefore = dispatches29(broker29).filter((f) => f.params.channel === T2CH && f.params.action.type === "terminal/resized").length;
-	const ro29 = globalThis.ResizeObserver.instances.find((r) => !r.disconnected && String(r.target?.className ?? "").includes("arthur-pi-terminal-surface"));
-	assert(!!ro29, "(f) the view observes its terminal surface with a ResizeObserver");
-	ro29?.cb([]);
-	await sleep(250); // FIT_DEBOUNCE_MS = 120
-	const resizedAfter = dispatches29(broker29).filter((f) => f.params.channel === T2CH && f.params.action.type === "terminal/resized");
-	assert(resizedAfter.length > resizedBefore
-		&& resizedAfter[resizedAfter.length - 1].params.action.cols === t2View.terminal.cols,
-		"(f) container resize → debounced fit → terminal/resized with the viewport cols/rows");
-
-	// (g) close the leaf: xterm disposes, refs null, the terminal channel is
-	//     unsubscribed EXACTLY once (detach; client.close() then carries only
-	//     its remaining channels), the observer disconnects, content empties.
-	const t2Terminal = t2View.terminal;
-	let disposedT2 = false;
-	const origDispose = t2Terminal.dispose.bind(t2Terminal);
-	t2Terminal.dispose = () => { disposedT2 = true; return origDispose(); };
-	const unsubsBeforeClose = unsubs29().length;
-	app.workspace.detachLeavesOfType(T2TYPE);
-	await sleep(20);
-	assert(disposedT2, "(g) closing the leaf disposed the xterm Terminal");
-	assert(t2View.terminal == null && t2View.client == null && t2View.adapter == null,
-		"(g) onClose nulled the terminal/client/adapter refs");
-	assert(unsubs29().length === unsubsBeforeClose + 1,
-		"(g) close unsubscribed the terminal channel exactly once (WS channel cleanup)");
-	assert(globalThis.ResizeObserver.instances.every((r) => r.target?.className !== "arthur-pi-terminal-surface" || r.disconnected),
-		"(g) the view's ResizeObserver disconnected");
-	assert(allText(t2View.contentEl).trim() === "", "(g) onClose emptied the leaf content");
-
-	// (h) reopen the same session: a FRESH view re-attaches cleanly — new
-	//     xterm construct, one more subscribe, and a data frame at the SAME
-	//     serverSeq as before applies (the dropped watermark cannot wedge it).
-	let reopenOk = true;
-	const subsBefore29 = ws28.subscribeCalls.filter((ch) => ch === T2CH).length;
-	try {
-		await plugin.activatePiTerminal({ sessionId: "test-sess", title: "session A" });
-	} catch (err) {
-		reopenOk = false;
-		console.error(`    terminal reopen threw: ${err?.stack ?? err}`);
-	}
-	assert(reopenOk, "(h) reopening the terminal did not throw");
-	const t2Leaves2 = app.workspace.getLeavesOfType(T2TYPE);
-	assert(t2Leaves2.length === 1, "(h) reopened exactly one terminal leaf (no duplicate)");
-	const t2View2 = t2Leaves2[0]?.view;
-	assert(t2View2 !== t2View && t2View2?.terminal != null, "(h) fresh view re-attached with a new xterm Terminal");
-	assert(ws28.subscribeCalls.filter((ch) => ch === T2CH).length === subsBefore29 + 1
-		&& t2View2.adapter?.attached === true,
-		"(h) re-attach re-subscribed the terminal channel exactly once");
-	const broker29b = latestBroker29();
-	broker29b.push("action", { channel: T2CH, action: { type: "terminal/data", data: "again>" }, serverSeq: 200, origin: { clientId: "server", clientSeq: 0 } });
-	await sleep(50);
-	const line29b = t2View2.terminal.buffer.active.getLine(0);
-	assert(!!line29b && line29b.translateToString(true).includes("again>"),
-		"(h) re-attach is NOT wedged: a same-seq frame re-applies (fresh watermark)");
-
-	plugin.settings.ahpEnableTerminal = false; // leave the T6 gate at its default
+		// (d) reopen the same cwd: a FRESH view re-attaches (new xterm + new pty).
+		const fresh2 = makeFakePtyFactory();
+		plugin.terminalManager.ptyFactory = fresh2.factory;
+		await plugin.activatePiTerminal({ cwd: "/tmp/s9", title: "session nine" });
+		const vD = app.workspace.getLeavesOfType(T)[0].view;
+		assert(vD !== vA && vD.terminal != null, "(d) fresh view re-attached with a new xterm");
+		assert(fresh2.ptys.length === 1 && fresh2.ptys[0].opts.cwd === "/tmp/s9", "(d) re-attach spawned a fresh pty in the same cwd");
 	})();
 
-	// ---- 30. AHP Phase T3 — multi-instance TerminalManager (one shared WS /
-	//      many channels / keystroke routing / no cross-channel leakage /
-	//      partial-teardown isolation / full-unload cleanup) ---------------
-	console.log("== 30. AHP Phase T3 multi-instance TerminalManager (shared WS / 3 leaves / routing / partial+full teardown) ==");
-
+	// ---- 30. local terminal manager (per-cwd routing / 3 independent leaves /
+	//      keystroke+data isolation / leaf reuse by cwd / partial+full teardown) -
+	console.log("== 30. local terminal manager (per-cwd routing / 3 leaves / isolation / reuse / full-unload kill-all) ==");
 	await (async () => {
-	const T3TYPE = "arthur-pi-terminal";
-	const latestBroker30 = () => ws28.instances[ws28.instances.length - 1];
-	const dispatches30 = (broker) => broker.sent.filter((f) => f.method === "dispatchAction");
-	const tch = (sid) => `ahp-terminal:/${sid}`;
-
-	// Controller posture, legacy subscribe path (terminal channels answer {}).
-	ws28.roles = ["viewer", "controller"];
-	ws28.mismatch = false;
-	ws28.replayActions = [];
-	ws28.reconnectResult = null;
-	ws28.emptyCatalogue = false;
-	ws28.failListPage = 0;
-	ws28.holdListPage = 0;
-	ws28.serverModel = null;
-	ws28.snapshots = {};
-	plugin.settings.ahpEndpoint = "100.75.249.5:4500";
-	plugin.settings.ahpToken = "smoke-token";
-	plugin.settings.ahpEnableTerminal = true;
-
-	// (a) bundle exports TerminalManager + the plugin owns one.
-	assert(typeof bundle.TerminalManager === "function", "(a) bundle exports TerminalManager");
-	assert(!!plugin.terminalManager && plugin.terminalManager instanceof bundle.TerminalManager,
-		"(a) plugin owns a TerminalManager instance after onload");
-
-	// Clean slate: drop the terminal leaf section 29 (h) left open and rebuild
-	// the shared client so the multi-leaf counts below are unambiguous.
-	await app.workspace.detachLeavesOfType(T3TYPE);
-	plugin.terminalManager.rebuildClient();
-	await sleep(20);
-	ws28.instances.length = 0;
-	ws28.subscribeCalls.length = 0;
-	ws28.unsubs.length = 0;
-	ws28.reconnects.length = 0;
-	ws28.promptDispatches.length = 0;
-
-	// (b) open 3 terminals for 3 distinct sessions: each openTerminal creates a
-	//     new main-area leaf (no unbound leaf to repurpose), all share ONE
-	//     WebSocket (the manager's lazily-created client), each subscribes its
-	//     own ahp-terminal:/<sid> channel.
-	const wsBefore = ws28.instances.length;
-	await plugin.activatePiTerminal({ sessionId: "s1", title: "session 1" });
-	await plugin.activatePiTerminal({ sessionId: "s2", title: "session 2" });
-	await plugin.activatePiTerminal({ sessionId: "s3", title: "session 3" });
-	const t3Leaves = app.workspace.getLeavesOfType(T3TYPE);
-	assert(t3Leaves.length === 3, "(b) 3 concurrent arthur-pi-terminal leaves for 3 sessions");
-	const views = t3Leaves.map((l) => l.view);
-	assert(views.every((v) => v?.terminal != null && v?.adapter?.attached === true),
-		"(b) every leaf constructed xterm + attached its adapter");
-	assert(ws28.instances.length === wsBefore + 1,
-		"(b) ALL 3 terminals share ONE WebSocket (single shared AhpClient socket)");
-	assert(["s1", "s2", "s3"].every((sid) => ws28.subscribeCalls.includes(tch(sid))),
-		"(b) each session subscribed its own ahp-terminal:/<sid> channel on the shared socket");
-	const sharedBroker = latestBroker30();
-	assert(views.every((v) => v.client === views[0].client),
-		"(b) every view derefs the SAME shared AhpClient instance");
-
-	// (c) openTerminal focuses the existing leaf for an already-open session
-	//     instead of creating a duplicate (InstanceManager-lite dedup).
-	const leavesBeforeReuse = app.workspace.getLeavesOfType(T3TYPE).length;
-	const s1LeafBefore = app.workspace.getLeavesOfType(T3TYPE).find((l) => l.view?.boundSessionId === "s1");
-	await plugin.activatePiTerminal({ sessionId: "s1", title: "session 1" });
-	assert(app.workspace.getLeavesOfType(T3TYPE).length === leavesBeforeReuse,
-		"(c) re-open of an already-open session focuses its leaf (no duplicate)");
-	assert(app.workspace.getLeavesOfType(T3TYPE).find((l) => l.view?.boundSessionId === "s1") === s1LeafBefore,
-		"(c) the focused leaf is the SAME instance already bound to s1");
-
-	// (d) keystroke routing: typing into leaf N emits terminal/input on leaf N's
-	//     channel ONLY (zero cross-channel leakage — per-channel handlers).
-	const s1View = views.find((v) => v.boundSessionId === "s1");
-	const s2View = views.find((v) => v.boundSessionId === "s2");
-	const s3View = views.find((v) => v.boundSessionId === "s3");
-	s1View.terminal.input("a", true);
-	s2View.terminal.input("b", true);
-	s3View.terminal.input("c", true);
-	await sleep(20);
-	const inputs30 = dispatches30(sharedBroker).filter((f) => f.params.action.type === "terminal/input");
-	assert(inputs30.some((f) => f.params.channel === tch("s1") && f.params.action.data === "a"), "(d) s1 keystroke → terminal/input on ahp-terminal:/s1");
-	assert(inputs30.some((f) => f.params.channel === tch("s2") && f.params.action.data === "b"), "(d) s2 keystroke → terminal/input on ahp-terminal:/s2");
-	assert(inputs30.some((f) => f.params.channel === tch("s3") && f.params.action.data === "c"), "(d) s3 keystroke → terminal/input on ahp-terminal:/s3");
-	assert(inputs30.every((f) => f.params.action.data !== "a" || f.params.channel === tch("s1")), "(d) no 'a' keystroke leaked onto another channel");
-	assert(inputs30.every((f) => f.params.action.data !== "b" || f.params.channel === tch("s2")), "(d) no 'b' keystroke leaked onto another channel");
-
-	// (e) inbound terminal/data renders into ONLY the matching leaf's xterm
-	//     buffer (per-channel handler routing — zero cross-channel data leak).
-	sharedBroker.push("action", { channel: tch("s2"), action: { type: "terminal/data", data: "only-s2>" }, serverSeq: 301, origin: { clientId: "server", clientSeq: 0 } });
-	sharedBroker.push("action", { channel: tch("s3"), action: { type: "terminal/data", data: "only-s3>" }, serverSeq: 302, origin: { clientId: "server", clientSeq: 0 } });
-	await sleep(50);
-	const buf = (v) => v.terminal.buffer.active.getLine(0).translateToString(true);
-	assert(buf(s2View).includes("only-s2>") && !buf(s1View).includes("only-s2>") && !buf(s3View).includes("only-s2>"),
-		"(e) terminal/data on ahp-terminal:/s2 lands in s2's buffer ONLY");
-	assert(buf(s3View).includes("only-s3>") && !buf(s1View).includes("only-s3>") && !buf(s2View).includes("only-s3>"),
-		"(e) terminal/data on ahp-terminal:/s3 lands in s3's buffer ONLY");
-
-	// (f) close ONE leaf via TerminalManager.closeTerminal: that leaf's channel
-	//     is unsubscribed + xterm disposed + map entry forgotten, but the
-	//     shared socket and the other two leaves are untouched.
-	const s2Terminal = s2View.terminal;
-	let s2Disposed = false;
-	const origDispose30 = s2Terminal.dispose.bind(s2Terminal);
-	s2Terminal.dispose = () => { s2Disposed = true; return origDispose30(); };
-	const s2Adapter = s2View.adapter;
-	plugin.terminalManager.closeTerminal("s2");
-	await sleep(30);
-	assert(s2Disposed, "(f) closeTerminal disposed the closed leaf's xterm");
-	assert(s2Adapter.attached === false, "(f) the closed leaf's adapter detached (channel handler unregistered)");
-	assert(ws28.unsubs.includes(tch("s2")), "(f) closeTerminal unsubscribed ahp-terminal:/s2");
-	assert(app.workspace.getLeavesOfType(T3TYPE).length === 2, "(f) exactly 2 terminal leaves remain");
-	assert(s1View.adapter?.attached === true && s3View.adapter?.attached === true,
-		"(f) the other two leaves' adapters are still attached");
-	assert(s1View.terminal != null && s3View.terminal != null,
-		"(f) the other two leaves' xterm instances are intact");
-	assert(plugin.terminalManager.sharedClient?.currentState === "ready",
-		"(f) the shared socket stays 'ready' after a partial close");
-	assert(!ws28.unsubs.includes(tch("s1")) && !ws28.unsubs.includes(tch("s3")),
-		"(f) the other channels were NOT unsubscribed by the partial close");
-	// s1 still receives data after s2's closure (no socket disturbance).
-	sharedBroker.push("action", { channel: tch("s1"), action: { type: "terminal/data", data: "s1-still-live>" }, serverSeq: 303, origin: { clientId: "server", clientSeq: 0 } });
-	await sleep(50);
-	assert(buf(s1View).includes("s1-still-live>"), "(f) a surviving leaf still receives terminal/data after the partial close");
-
-	// (g) re-open the closed session: a FRESH leaf re-attaches on the SAME
-	//     shared socket (the manager's dedup map was cleared by closeTerminal).
-	const subsBeforeReopen = ws28.subscribeCalls.filter((ch) => ch === tch("s2")).length;
-	await plugin.activatePiTerminal({ sessionId: "s2", title: "session 2" });
-	assert(app.workspace.getLeavesOfType(T3TYPE).length === 3, "(g) re-open of the closed session created a 3rd leaf again");
-	assert(ws28.subscribeCalls.filter((ch) => ch === tch("s2")).length === subsBeforeReopen + 1,
-		"(g) re-open re-subscribed ahp-terminal:/s2 on the shared socket");
-	assert(ws28.instances.length === wsBefore + 1,
-		"(g) still ONE WebSocket — re-open reused the shared socket (no new connection)");
-
-	// (h) full-unload teardown: plugin.onunload detaches every terminal leaf
-	//     (each adapter unsubscribes its channel on the live socket, each xterm
-	//     disposes) and then closes the shared client for good.
-	assert(app.workspace.getLeavesOfType(T3TYPE).length === 3, "(h) 3 terminal leaves open right before unload");
-	await plugin.onunload();
-	assert(app.workspace.getLeavesOfType(T3TYPE).length === 0, "(h) all terminal leaves detached on unload");
-	assert(plugin.terminalManager == null, "(h) the TerminalManager (and its shared client) was torn down");
-	assert(["s1", "s2", "s3"].every((sid) => ws28.unsubs.includes(tch(sid))),
-		"(h) every terminal channel was unsubscribed during full-unload teardown");
-
-	plugin.settings.ahpEnableTerminal = false; // leave the T6 gate at its default
-	})();
-
-	// ---- 31. AHP Phase T4 — fuzzy terminal picker (catalogue filter /
-	//      Path A disabled / stable-id dedup / select→openTerminal /
-	//      spawn→catalogue→select state machine) --------------------------
-	console.log("== 31. AHP Phase T4 fuzzy terminal picker (catalogue-filter / Path A disabled / dedup / select→openTerminal / spawn state machine) ==");
-
-	await (async () => {
-	const T4TYPE = "arthur-pi-terminal";
-
-	// Fresh plugin lifecycle (section 30 (h) unloaded it) — mirrors the
-	// proven 27→28 unload/onload seam, then a clean mock-broker posture.
-	await plugin.onunload();
-	await plugin.onload();
-	ws28.roles = ["viewer", "controller"];
-	ws28.mismatch = false;
-	ws28.replayActions = [];
-	ws28.reconnectResult = null;
-	ws28.emptyCatalogue = false;
-	ws28.failListPage = 0;
-	ws28.holdListPage = 0;
-	ws28.serverModel = null;
-	ws28.snapshots = {};
-	ws28.dupePages = false;
-	ws28.ttySpawn = false;
-	ws28.ttyA = true; // session A carries a registered terminal channel
-	// Leftover controller-created sessions from section 28 would add rows;
-	// the picker suite owns page 1 from here (spawn-1 is pushed in (e)).
-	ws28.createdSessions.length = 0;
-	ws28.createdCwds.length = 0;
-	ws28.createdProviders.length = 0;
-	ws28.pausedMap = {};
-	plugin.settings.ahpEndpoint = "100.75.249.5:4500";
-	plugin.settings.ahpToken = "smoke-token";
-	plugin.settings.ahpEnableTerminal = true;
-	StubModal.reset();
-
-	// (a) exports + entry point: the bare 'Open pi terminal' command (no
-	//     sessionId) now opens the fuzzy picker instead of a 'no session
-	//     attached' leaf.
-	assert(typeof bundle.TerminalPickerModal === "function", "(a) bundle exports TerminalPickerModal");
-	assert(typeof bundle.hasTerminalChannel === "function" && typeof bundle.sessionIdFromResource === "function",
-		"(a) bundle exports the picker helpers (hasTerminalChannel / sessionIdFromResource)");
-	assert(typeof bundle.NO_TERMINAL_TOOLTIP === "string" && bundle.NO_TERMINAL_TOOLTIP.includes("pi-ahp-tty"),
-		"(a) the no-terminal tooltip names the pi-ahp-tty Path B requirement");
-	assert(bundle.sessionIdFromResource("ahp-session:/sess-9") === "sess-9"
-		&& bundle.sessionIdFromResource("sess-9") === "sess-9",
-		"(a) sessionIdFromResource strips the ahp-session:/ prefix (bare ids pass through)");
-	const t4Cmd = plugin.commands.get("open-pi-terminal");
-	assert(typeof t4Cmd?.callback === "function" && t4Cmd.name === "Open pi terminal",
-		"(a) command 'Open pi terminal' is still registered");
-	let openOk4 = true;
-	try {
-		t4Cmd?.callback?.();
-	} catch (err) {
-		openOk4 = false;
-		console.error(`    picker command threw: ${err?.stack ?? err}`);
-	}
-	await sleep(250); // shared client: initialize + paged listSessions over the mock
-	assert(openOk4, "(a) the command did not throw");
-	const pick0 = StubModal.opened[StubModal.opened.length - 1];
-	assert(pick0 instanceof bundle.TerminalPickerModal, "(a) the command opens the terminal picker modal");
-	assert(!!plugin.terminalManager?.sharedClient && plugin.terminalManager.sharedClient.currentState === "ready",
-		"(a) the picker load acquired the manager's LAZY shared client (connected, catalogue paged)");
-
-	// (b) catalogue filter: the terminal-registered session is selectable; the
-	//     Path A session is PRESENT but marked 'no terminal channel' + disabled
-	//     with the Path B tooltip; the fuzzy input narrows on title + cwd.
-	const rowsB = findByClass(pick0.contentEl, "arthur-terminal-row");
-	assert(rowsB.length === 3, `(b) 3 catalogued sessions render 3 rows (got ${rowsB.length})`);
-	const rowA = rowsB.find((r) => r.getAttribute("data-terminal-session") === "ahp-session:/a");
-	const rowB = rowsB.find((r) => r.getAttribute("data-terminal-session") === "ahp-session:/b");
-	assert(!!rowA && !rowA.hasClass("arthur-terminal-row--disabled") && rowA.attributes.get("role") === "button",
-		"(b) the terminal-registered session row is selectable (role=button, no disabled class)");
-	assert(!!rowB && rowB.hasClass("arthur-terminal-row--disabled") && rowB.attributes.get("aria-disabled") === "true",
-		"(b) the Path A session row is present but disabled (aria-disabled)");
-	assert(String(rowB?.textContent ?? "").includes("no terminal channel"),
-		"(b) the disabled row is marked 'no terminal channel'");
-	assert(String(rowB?.attributes.get("title") ?? "").includes("pi-ahp-tty"),
-		"(b) the disabled row's tooltip explains the pi-ahp-tty Path B requirement");
-	assert((rowB?.handlers.get("click") ?? []).length === 0,
-		"(b) the disabled Path A row wires NO click action (terminal action disabled)");
-	const filter4 = findByClass(pick0.contentEl, "arthur-terminal-filter")[0];
-	assert(!!filter4, "(b) the modal renders the fuzzy filter input");
-	filter4.value = "arthur"; // matches A's workingDirectory only
-	filter4.handlers.get("input")[0]?.();
-	let visible4 = findByClass(pick0.contentEl, "arthur-terminal-row");
-	assert(visible4.length === 1 && allText(visible4[0]).includes("session A"),
-		"(b) fuzzy filter narrows to the session whose workingDirectory matches");
-	filter4.value = "session b";
-	filter4.handlers.get("input")[0]?.();
-	visible4 = findByClass(pick0.contentEl, "arthur-terminal-row");
-	assert(visible4.length === 1 && allText(visible4[0]).includes("session B"),
-		"(b) fuzzy filter narrows to the matching title");
-	filter4.value = "";
-	filter4.handlers.get("input")[0]?.();
-	assert(findByClass(pick0.contentEl, "arthur-terminal-row").length === 3, "(b) clearing the filter restores all rows");
-
-	// (c) stable-id dedup (TESTING #92): two listSessions pages carrying the
-	//     SAME resource → one row (picker dedup on top of the resource-keyed
-	//     catalogue map); the reload re-pages with dupePages armed.
-	ws28.dupePages = true;
-	pick0.close();
-	t4Cmd?.callback?.();
-	await sleep(250);
-	const pick1 = StubModal.opened[StubModal.opened.length - 1];
-	const rowsC = findByClass(pick1.contentEl, "arthur-terminal-row");
-	const dupRowsA = rowsC.filter((r) => r.getAttribute("data-terminal-session") === "ahp-session:/a");
-	assert(dupRowsA.length === 1, `(c) a resource served on BOTH pages renders ONE row (got ${dupRowsA.length})`);
-	assert(rowsC.length === 3, `(c) the dupe adds no extra row (got ${rowsC.length} rows)`);
-	const t4client = plugin.terminalManager.sharedClient;
-	assert(!!t4client && t4client.catalogue().filter((s) => s.resource === "ahp-session:/a").length === 1,
-		"(c) the shared client's resource-keyed map holds ONE entry for the duplicated resource");
-	ws28.dupePages = false;
-
-	// (d) select→openTerminal wiring: clicking the selectable row binds a
-	//     terminal leaf to the STRIPPED session id + subscribes its channel,
-	//     on the ONE shared socket; re-attaching the same session reuses the
-	//     leaf (T3 manager dedup — no duplicate leaf).
-	const wsCountD = ws28.instances.length;
-	const leavesD0 = app.workspace.getLeavesOfType(T4TYPE).length;
-	// Click the row of the OPEN pick1 modal (pick0's DOM is gone since onClose).
-	dupRowsA[0]?.handlers.get("click")[0]?.();
-	await sleep(250);
-	assert(pick1._closed === true, "(d) selecting a session closes the picker");
-	let leavesD1 = app.workspace.getLeavesOfType(T4TYPE);
-	assert(leavesD1.length === leavesD0 + 1, "(d) selecting opened exactly one terminal leaf");
-	const leafA = leavesD1.find((l) => l.view?.boundSessionId === "a");
-	assert(!!leafA, "(d) the leaf is bound to the sessionId stripped from the resource");
-	assert(leafA?.view?.terminal != null && leafA?.view?.adapter?.attached === true,
-		"(d) the picked session attached (xterm + adapter live)");
-	assert(ws28.subscribeCalls.includes("ahp-terminal:/a"), "(d) the attach subscribed ahp-terminal:/a");
-	// Re-attach: pick the SAME session again → focus the existing leaf.
-	t4Cmd?.callback?.();
-	await sleep(250);
-	const pick2 = StubModal.opened[StubModal.opened.length - 1];
-	findByClass(pick2.contentEl, "arthur-terminal-row")
-		.find((r) => r.getAttribute("data-terminal-session") === "ahp-session:/a")
-		?.handlers.get("click")[0]?.();
-	await sleep(100);
-	const leavesD2 = app.workspace.getLeavesOfType(T4TYPE);
-	assert(leavesD2.length === leavesD1.length,
-		"(d) re-attaching an already-open session focuses its leaf (no duplicate)");
-	assert(leavesD2.find((l) => l.view?.boundSessionId === "a") === leafA,
-		"(d) the SAME leaf instance is reused for the re-attach");
-
-	// (e) spawn→catalogue→select state machine (mock, §5): a Path A tmux
-	//     spawn lands in the catalogue WITHOUT a terminal channel (present,
-	//     disabled); the device-side pi-ahp-tty registration (Path B) reprojects
-	//     the summary with host fields; the reloaded row then picks into a live
-	//     ahp-terminal:/<id> attach — still ONE shared socket throughout.
-	ws28.createdSessions.push("ahp-session:/spawn-1"); // arthur-agent tmux spawn (Path A)
-	ws28.createdCwds.push("/tmp/spawn");
-	ws28.createdProviders.push("pi");
-	t4Cmd?.callback?.();
-	await sleep(250);
-	const pickE = StubModal.opened[StubModal.opened.length - 1];
-	const rowE1 = findByClass(pickE.contentEl, "arthur-terminal-row")
-		.find((r) => r.getAttribute("data-terminal-session") === "ahp-session:/spawn-1");
-	assert(!!rowE1, "(e) the Path A spawn appears in the picker after the catalogue reload");
-	assert(!!rowE1 && rowE1.hasClass("arthur-terminal-row--disabled") === true && (rowE1.handlers.get("click") ?? []).length === 0,
-		"(e) the tmux-spawned session has NO terminal channel: present but disabled");
-	pickE.close();
-	ws28.ttySpawn = true; // pi-ahp-tty registers ahp-terminal:/<id> on the device
-	t4Cmd?.callback?.();
-	await sleep(250);
-	const pickE2 = StubModal.opened[StubModal.opened.length - 1];
-	const rowE2 = findByClass(pickE2.contentEl, "arthur-terminal-row")
-		.find((r) => r.getAttribute("data-terminal-session") === "ahp-session:/spawn-1");
-	assert(!!rowE2 && rowE2.hasClass("arthur-terminal-row--disabled") === false,
-		"(e) after pi-ahp-tty registers the terminal, the row becomes selectable");
-	rowE2?.handlers.get("click")[0]?.();
-	await sleep(250);
-	const spawnLeaf = app.workspace.getLeavesOfType(T4TYPE).find((l) => l.view?.boundSessionId === "spawn-1");
-	assert(!!spawnLeaf && spawnLeaf.view?.terminal != null && spawnLeaf.view?.adapter?.attached === true,
-		"(e) select → openTerminal bound a fresh leaf for the registered session");
-	assert(ws28.subscribeCalls.includes("ahp-terminal:/spawn-1"),
-		"(e) the attach subscribed ahp-terminal:/spawn-1 on the shared socket");
-	assert(ws28.instances.length === wsCountD,
-		"(e) still ONE shared WebSocket after every picker open + attach (T3 invariant via T4 flow)");
-
-	// reset: T6 gate default + mock modes for any later section
-	plugin.settings.ahpEnableTerminal = false;
-	ws28.ttyA = false;
-	ws28.ttySpawn = false;
-	ws28.dupePages = false;
-	})();
-
-	// ---- 32. terminal picker resilience — retry a failed client load and
-	//      fall back to the catalogue when a redundant refresh() fails -----
-	console.log("== 32. terminal picker resilience (retry failed client load / refresh-failure fallback) ==");
-	await (async () => {
-		// Fresh plugin lifecycle (section 31 unloaded nothing) — a clean
-		// terminalManager with NO shared client, then a mock-broker posture.
+		const T = "arthur-pi-terminal";
+		await app.workspace.detachLeavesOfType(T);
 		await plugin.onunload();
 		await plugin.onload();
-		ws28.roles = ["viewer", "controller"];
-		ws28.replayActions = [];
-		ws28.reconnectResult = null;
-		ws28.emptyCatalogue = false;
-		ws28.failListPage = 0;
-		ws28.holdListPage = 0;
-		ws28.dupePages = false;
-		ws28.ttySpawn = false;
-		ws28.ttyA = true;
-		ws28.createdSessions.length = 0;
-		ws28.createdCwds.length = 0;
-		ws28.createdProviders.length = 0;
-		ws28.pausedMap = {};
-		ws28.listCalls.length = 0;
-		plugin.settings.ahpEndpoint = "100.75.249.5:4500";
-		plugin.settings.ahpToken = "smoke-token";
-		plugin.settings.ahpEnableTerminal = true;
+		const { factory, ptys } = makeFakePtyFactory();
+		plugin.terminalManager.ptyFactory = factory;
+		assert(typeof bundle.TerminalManager === "function", "(a) bundle exports TerminalManager");
+		assert(!!plugin.terminalManager && plugin.terminalManager instanceof bundle.TerminalManager, "(a) plugin owns a TerminalManager instance after onload");
+
+		// (b) open 3 terminals for 3 distinct cwds: 3 leaves, 3 independent ptys.
+		await plugin.activatePiTerminal({ cwd: "/tmp/a" });
+		await plugin.activatePiTerminal({ cwd: "/tmp/b" });
+		await plugin.activatePiTerminal({ cwd: "/tmp/c" });
+		const leavesB = app.workspace.getLeavesOfType(T);
+		assert(leavesB.length === 3, "(b) 3 concurrent leaves for 3 cwds");
+		assert(ptys.length === 3, "(b) 3 independent local ptys (one per leaf — shared-nothing)");
+		assert(ptys.every((p) => p.opts.cwd.startsWith("/tmp/")), "(b) each pty spawned in its leaf's cwd");
+
+		// (c) openTerminal focuses the existing leaf for an already-open cwd.
+		const leavesBeforeReuse = app.workspace.getLeavesOfType(T).length;
+		const aLeafBefore = app.workspace.getLeavesOfType(T).find((l) => l.view?.boundCwd === "/tmp/a");
+		await plugin.activatePiTerminal({ cwd: "/tmp/a" });
+		assert(app.workspace.getLeavesOfType(T).length === leavesBeforeReuse, "(c) re-open of an open cwd focuses its leaf (no duplicate)");
+		assert(app.workspace.getLeavesOfType(T).find((l) => l.view?.boundCwd === "/tmp/a") === aLeafBefore, "(c) the focused leaf is the SAME instance already bound to /tmp/a");
+		assert(ptys.length === 3, "(c) re-open focused without spawning a new pty");
+
+		// (d) keystroke isolation: typing into leaf N writes to leaf N's pty ONLY.
+		const aView = leavesB.find((l) => l.view.boundCwd === "/tmp/a").view;
+		const bView = leavesB.find((l) => l.view.boundCwd === "/tmp/b").view;
+		const cView = leavesB.find((l) => l.view.boundCwd === "/tmp/c").view;
+		const aPty = ptys.find((p) => p.opts.cwd === "/tmp/a");
+		const bPty = ptys.find((p) => p.opts.cwd === "/tmp/b");
+		const cPty = ptys.find((p) => p.opts.cwd === "/tmp/c");
+		aView.terminal.input("a", true);
+		bView.terminal.input("b", true);
+		cView.terminal.input("c", true);
+		await sleep(20);
+		assert(aPty.writes.some((w) => w.includes("a")) && !bPty.writes.some((w) => w.includes("a")) && !cPty.writes.some((w) => w.includes("a")), "(d) 'a' keystroke reached only /tmp/a's pty");
+		assert(bPty.writes.some((w) => w.includes("b")) && !aPty.writes.some((w) => w.includes("b")), "(d) 'b' keystroke reached only /tmp/b's pty");
+
+		// (e) pty output isolation: emitting on pty N lands in leaf N's buffer only.
+		aPty.emit("only-a>");
+		bPty.emit("only-b>");
+		await sleep(20);
+		const buf = (v) => v.terminal.buffer.active.getLine(0).translateToString(true);
+		assert(buf(aView).includes("only-a>") && !buf(bView).includes("only-a>"), "(e) /tmp/a output lands in a's buffer only");
+		assert(buf(bView).includes("only-b>") && !buf(aView).includes("only-b>"), "(e) /tmp/b output lands in b's buffer only");
+
+		// (f) close ONE leaf via closeTerminal: only that pty is killed; the
+		//     others stay live (shared-nothing — no socket to disturb).
+		plugin.terminalManager.closeTerminal("/tmp/b");
+		await sleep(30);
+		assert(bPty.killed, "(f) closeTerminal killed the closed leaf's pty");
+		assert(!aPty.killed && !cPty.killed, "(f) the other ptys are NOT killed by the partial close");
+		assert(app.workspace.getLeavesOfType(T).length === 2, "(f) exactly 2 terminal leaves remain");
+		const aWritesBefore = aPty.writes.length;
+		aView.terminal.input("x", true);
+		await sleep(10);
+		assert(aPty.writes.length > aWritesBefore, "(f) a surviving leaf still forwards keystrokes after the partial close");
+
+		// (g) full-unload teardown: plugin.onunload detaches every terminal leaf
+		//     (each view kills its pty in onClose) and clears the manager.
+		assert(app.workspace.getLeavesOfType(T).length === 2, "(g) 2 terminal leaves open right before unload");
+		await plugin.onunload();
+		assert(app.workspace.getLeavesOfType(T).length === 0, "(g) all terminal leaves detached on unload");
+		assert(plugin.terminalManager == null, "(g) the TerminalManager was torn down");
+		assert(aPty.killed && cPty.killed, "(g) every surviving pty was killed during full-unload teardown");
+		await plugin.onload(); // reload so later sections have a live plugin
+	})();
+
+	// ---- 31. local pi terminal picker (session/dir listing from a fake sessions
+	//      dir / select→open / vault-root + cwd input / fuzzy filter / mobile) -
+	console.log("== 31. local pi terminal picker (fake-sessions-dir listing / select→open / vault-root / cwd input / mobile-hide) ==");
+	await (async () => {
+		assert(typeof bundle.TerminalPickerModal === "function", "(a) bundle exports TerminalPickerModal");
+		assert(typeof bundle.listLocalPiSessions === "function" && typeof bundle.defaultPiSessionsDir === "function", "(a) bundle exports listLocalPiSessions + defaultPiSessionsDir");
+		assert(typeof bundle.fuzzyMatch === "function", "(a) bundle exports fuzzyMatch");
+		assert(bundle.fuzzyMatch("sA", "session A") === true && bundle.fuzzyMatch("sA", "zzz") === false, "(a) fuzzyMatch subsequence semantics");
+
+		// (b) listLocalPiSessions against a FAKE sessions dir: cwd read from the
+		//     most-recent session jsonl's first line; sorted most-recent first;
+		//     an empty subdir falls back to the decoded dir name.
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "arthur-pi-sessions-"));
+		const alphaDir = path.join(dir, "--tmp-alpha--");
+		fs.mkdirSync(alphaDir);
+		const alphaNew = path.join(alphaDir, "2026-11-08T20-00-00-000Z_aaaa.jsonl");
+		fs.writeFileSync(alphaNew, JSON.stringify({ type: "session", cwd: "/tmp/alpha" }) + "\n");
+		fs.utimesSync(alphaNew, 2_000_000_000, 2_000_000_000);
+		const alphaOld = path.join(alphaDir, "2026-11-08T10-00-00-000Z_aaaa-old.jsonl");
+		fs.writeFileSync(alphaOld, JSON.stringify({ type: "session", cwd: "/tmp/alpha" }) + "\n");
+		fs.utimesSync(alphaOld, 1_000_000_000, 1_000_000_000);
+		const homeDir = path.join(dir, "--home-slix--");
+		fs.mkdirSync(homeDir);
+		const homeFile = path.join(homeDir, "2026-11-08T15-00-00-000Z_hhhh.jsonl");
+		fs.writeFileSync(homeFile, JSON.stringify({ type: "session", cwd: "/home/slix" }) + "\n");
+		fs.utimesSync(homeFile, 1_500_000_000, 1_500_000_000);
+		const emptyDir = path.join(dir, "--var-empty--");
+		fs.mkdirSync(emptyDir);
+		fs.utimesSync(emptyDir, 500_000_000, 500_000_000); // older than home → sorts last
+		const sessions = bundle.listLocalPiSessions(dir);
+		assert(sessions.length === 3, `(b) 3 cwds listed (got ${sessions.length})`);
+		assert(sessions[0].cwd === "/tmp/alpha", "(b) the most-recent session (alpha) sorts first");
+		assert(sessions[1].cwd === "/home/slix", "(b) home/slix sorts second by mtime");
+		assert(sessions[2].cwd === "/var/empty", "(b) the empty subdir falls back to the decoded name (/var/empty)");
+		assert(bundle.listLocalPiSessions(path.join(os.tmpdir(), "arthur-nope-xyz-zzz")).length === 0, "(b) a missing sessions dir lists nothing");
+
+		// (c) command-opened picker: a TerminalPickerModal with a filter, the
+		//     'New terminal in vault root' button + a cwd input row. (Row count
+		//     is NOT asserted — the production path scans the real
+		//     ~/.pi/agent/sessions on the test host.)
 		StubModal.reset();
-
-		const t4Cmd32 = plugin.commands.get("open-pi-terminal");
-		const RealAhpBroker = MockAhpBroker;
-
-		// (a) A client whose FIRST load fails (broker unreachable) recovers on
-		//     the next acquireClient() once reachable — WITHOUT a settings
-		//     change or plugin unload. The cached error state must be retried,
-		//     not poisoned forever (the AhpClient has no backoff on a never-
-		//     opened socket, so the memoized failure never re-attempts unaided).
-		class UnreachableAhpBroker {
-			constructor(url) {
-				this.url = String(url);
-				this.readyState = 3; // never opens — simulates a dead/unreachable broker
-				this.onopen = null; this.onmessage = null; this.onclose = null; this.onerror = null;
-				queueMicrotask(() => this.onclose?.({})); // opened=false → state 'error'
-			}
-			send() {}
-			close() {}
-		}
-		globalThis.WebSocket = UnreachableAhpBroker;
-		t4Cmd32?.callback?.();            // picker #1 → first load fails (broker unreachable)
+		const tCmd = plugin.commands.get("open-pi-terminal");
+		assert(typeof tCmd?.callback === "function", "(c) 'Open pi terminal' command registered");
+		let openOk = true;
+		try { tCmd.callback(); } catch (e) { openOk = false; console.error(e); }
 		await sleep(120);
-		const pick32a = StubModal.opened[StubModal.opened.length - 1];
-		const client32 = plugin.terminalManager?.sharedClient;
-		assert(!!client32 && client32.currentState === "error",
-			"(a) the first picker open with an unreachable broker leaves the shared client in state 'error'");
-		assert(findByClass(pick32a.contentEl, "arthur-terminal-row").length === 0,
-			"(a) the failed-load picker renders NO session rows");
-		assert(allText(pick32a.contentEl).includes("session listing failed"),
-			"(a) the failed-load picker shows the listing-failed note (not a blank modal)");
+		assert(openOk, "(c) the picker command did not throw");
+		const pickCmd = StubModal.opened[StubModal.opened.length - 1];
+		assert(pickCmd instanceof bundle.TerminalPickerModal, "(c) the command opens the local terminal picker modal");
+		assert(!!findByClass(pickCmd.contentEl, "arthur-terminal-filter")[0], "(c) the modal renders the fuzzy filter input");
+		assert(!!findButton(pickCmd.contentEl, "New terminal in vault root"), "(c) the modal renders the 'New terminal in vault root' button");
+		assert(!!findByClass(pickCmd.contentEl, "arthur-terminal-new-cwd")[0], "(c) the modal renders the cwd input row");
+		pickCmd.close();
 
-		// Restore a reachable broker and open the picker AGAIN — no settings
-		// change, no unload. The SAME client instance re-runs load() + connects.
-		globalThis.WebSocket = RealAhpBroker;
-		t4Cmd32?.callback?.();            // picker #2 → acquireClient retries the error client
-		await sleep(250);
-		const pick32a2 = StubModal.opened[StubModal.opened.length - 1];
-		assert(plugin.terminalManager?.sharedClient === client32,
-			"(a) recovery reuses the SAME shared client instance (no settings change / unload)");
-		assert(plugin.terminalManager?.sharedClient?.currentState === "ready",
-			"(a) the retried client connected → state 'ready' once the broker is reachable");
-		const rows32a = findByClass(pick32a2.contentEl, "arthur-terminal-row");
-		assert(rows32a.length === 3, `(a) the recovered picker renders the 3 catalogued session rows (got ${rows32a.length})`);
-		pick32a.close();
-		pick32a2.close();
+		// (d) direct-opts picker with an injected fake loadSessions: rows render,
+		//     fuzzy filter narrows, selecting a row fires onPick(cwd).
+		let pickedD = null;
+		const modalD = new bundle.TerminalPickerModal(app, {
+			vaultRootCwd: "/tmp/vault-root",
+			loadSessions: async () => [
+				{ cwd: "/tmp/alpha", mtimeMs: 2_000_000_000 },
+				{ cwd: "/home/slix", mtimeMs: 1_500_000_000 },
+			],
+			onPick: (cwd) => { pickedD = cwd; },
+		});
+		modalD.open();
+		await sleep(60);
+		const rowsD0 = findByClass(modalD.contentEl, "arthur-terminal-row");
+		assert(rowsD0.length === 2, `(d) 2 injected sessions render 2 rows (got ${rowsD0.length})`);
+		const filterD = findByClass(modalD.contentEl, "arthur-terminal-filter")[0];
+		filterD.value = "alpha";
+		filterD.handlers.get("input")[0]?.();
+		assert(findByClass(modalD.contentEl, "arthur-terminal-row").length === 1, "(d) fuzzy filter narrows to the matching cwd");
+		filterD.value = "";
+		filterD.handlers.get("input")[0]?.();
+		findByClass(modalD.contentEl, "arthur-terminal-row")
+			.find((r) => r.getAttribute("data-terminal-cwd") === "/tmp/alpha")
+			?.handlers.get("click")[0]?.();
+		await sleep(20);
+		assert(pickedD === "/tmp/alpha", "(d) selecting a row fires onPick with the cwd");
+		assert(modalD._closed === true, "(d) selecting a row closes the picker");
 
-		// (b) A refresh() failure AFTER a ready load() falls back to the EXIST-
-		//     ING catalogue — one slow/timed-out listSessions page must NOT
-		//     fail the modal while the connection stays ready. failListPage=1
-		//     makes the re-page reject instantly (the same throw path a 10s
-		//     REQUEST_TIMEOUT_MS takes), exercising the try/catch fallback.
-		ws28.failListPage = 1;
-		t4Cmd32?.callback?.();            // picker #3 → loadTerminalSessions refresh() rejects
-		await sleep(250);
-		const pick32b = StubModal.opened[StubModal.opened.length - 1];
-		assert(plugin.terminalManager?.sharedClient?.currentState === "ready",
-			"(b) the connection stays 'ready' after the refresh failure (no error state)");
-		const rows32b = findByClass(pick32b.contentEl, "arthur-terminal-row");
-		assert(rows32b.length === 3, `(b) the picker falls back to the existing catalogue and renders 3 rows (got ${rows32b.length})`);
-		assert(allText(pick32b.contentEl).includes("session listing failed") === false,
-			"(b) no listing-failed note — the load promise resolved with the fallback catalogue");
-		assert(!!rows32b.find((r) => r.getAttribute("data-terminal-session") === "ahp-session:/a"),
-			"(b) the fallback catalogue row for session A is present and selectable");
-		pick32b.close();
-		ws28.failListPage = 0;
+		// (e) 'New terminal in vault root' button → onPick(vaultRootCwd).
+		let pickedE = null;
+		const modalE = new bundle.TerminalPickerModal(app, {
+			vaultRootCwd: "/tmp/vault-root",
+			loadSessions: async () => [],
+			onPick: (cwd) => { pickedE = cwd; },
+		});
+		modalE.open();
+		await sleep(40);
+		findButton(modalE.contentEl, "New terminal in vault root")?.handlers.get("click")[0]?.();
+		await sleep(20);
+		assert(pickedE === "/tmp/vault-root", "(e) the vault-root button fires onPick with the vault root cwd");
+		assert(modalE._closed === true, "(e) the vault-root button closes the picker");
 
-		// reset for any later section
-		plugin.settings.ahpEnableTerminal = false;
-		ws28.ttyA = false;
+		// (f) cwd input + Enter → onPick(typed path).
+		let pickedF = null;
+		const modalF = new bundle.TerminalPickerModal(app, {
+			vaultRootCwd: "/tmp/vault-root",
+			loadSessions: async () => [],
+			onPick: (cwd) => { pickedF = cwd; },
+		});
+		modalF.open();
+		await sleep(40);
+		const cwdInput = findByClass(modalF.contentEl, "arthur-terminal-new-cwd")[0];
+		cwdInput.value = "/opt/custom";
+		cwdInput.handlers.get("keydown")[0]?.({ key: "Enter", preventDefault() {} });
+		await sleep(20);
+		assert(pickedF === "/opt/custom", "(f) typing a path + Enter fires onPick with that path");
+		assert(modalF._closed === true, "(f) the cwd-input Enter closes the picker");
+
+		// (g) mobile: Platform.isMobile = true → the command opens NO modal.
+		obsidianStub.Platform.isMobile = true;
+		StubModal.reset();
+		tCmd.callback();
+		await sleep(50);
+		assert(StubModal.opened.length === 0, "(g) on mobile the 'Open pi terminal' command opens no picker (desktop-only)");
+		obsidianStub.Platform.isMobile = false;
+
+		fs.rmSync(dir, { recursive: true, force: true });
 	})();
 
-	// ---- 33. terminal picker progressive rendering ----------------------
-	//      The createSession New-session flow was REMOVED (it cannot produce a
-	//      terminal channel — only pi-ahp-tty registers terminal/registerExternal);
-	//      the new pi-ahp-tty spawn flow lives in §34. This section keeps the
-	//      progressive-rendering asserts: page-1 rows before page 2 / live
-	//      append / mid-paging failure preserves rendered rows + inline note.
-	console.log("== 33. terminal picker progressive rendering (page-1 before page 2 / live append / mid-paging note) ==");
+	// ---- 32. AhpClient load-retry resilience (819e2bb regression) -------------
+	//      A client whose FIRST load() fails (broker unreachable) must NOT be
+	//      poisoned: a later load() (no settings change / no unload) re-attempts
+	//      and connects once the broker is reachable. The 819e2bb fix is the
+	//      currentAttempt cleanup-promise identity in ensureConnected — without
+	//      it the rejected attempt's currentAttempt is never cleared and every
+	//      later load() returns the stale rejection forever. This benefits the
+	//      AHP sessions view (AhpView's Refresh reuses the same client), so the
+	//      regression is exercised directly against AhpClient (no terminal manager).
+	console.log("== 32. AhpClient load-retry resilience (819e2bb regression: failed first load does not poison later loads) ==");
 	await (async () => {
-		// Fresh plugin lifecycle + clean mock posture (32 left its modes reset).
-		await plugin.onunload();
-		await plugin.onload();
+		const AhpClientCtor = bundle.AhpClient;
+		assert(typeof AhpClientCtor === "function", "(a) bundle exports AhpClient");
 		ws28.roles = ["viewer"];
 		ws28.mismatch = false;
 		ws28.replayActions = [];
@@ -6682,347 +6287,61 @@ try {
 		ws28.emptyCatalogue = false;
 		ws28.failListPage = 0;
 		ws28.holdListPage = 0;
-		ws28.dupePages = false;
-		ws28.ttySpawn = false;
-		ws28.ttyA = false;
 		ws28.createdSessions.length = 0;
 		ws28.createdCwds.length = 0;
 		ws28.createdProviders.length = 0;
 		ws28.pausedMap = {};
-		ws28.listCalls.length = 0;
-		ws28.mutCalls.createSession.length = 0;
-		ws28.heldListReleases.splice(0);
-		plugin.settings.ahpEndpoint = "100.75.249.5:4500";
-		plugin.settings.ahpToken = "smoke-token";
-		plugin.settings.ahpEnableTerminal = true;
-		plugin.settings.ahpEnableControl = true;
-		StubModal.reset();
 
-		const t4Cmd33 = plugin.commands.get("open-pi-terminal");
-		const T4TYPE33 = "arthur-pi-terminal";
-
-		// progressive rendering: page-1 rows render while page 2 is held, the
-		// released page 2 STREAMS into the open modal, and a mid-paging failure
-		// keeps the rendered rows + shows the listing-failed note. Warm the
-		// shared client first (complete the cold initial paged load) so the hold
-		// measures a re-page — otherwise the initial load ALSO holds page 2 and a
-		// single release races against the re-page's page-1 recommit.
-		t4Cmd33?.callback?.();
-		await sleep(300);
-		StubModal.opened[StubModal.opened.length - 1].close();
-		ws28.createdSessions.length = 0;
-		ws28.createdCwds.length = 0;
-		ws28.createdProviders.length = 0;
-		ws28.holdListPage = 2;
-		t4Cmd33?.callback?.();
-		await sleep(250);
-		const pickD33 = StubModal.opened[StubModal.opened.length - 1];
-		const rowsD33 = findByClass(pickD33.contentEl, "arthur-terminal-row");
-		assert(rowsD33.length === 2, `page-1 rows render while page 2 is held (got ${rowsD33.length})`);
-		assert(!allText(pickD33.contentEl).includes("session C"),
-			"the held page-2 session is NOT rendered yet");
-		ws28.holdListPage = 0;
-		await sleep(150); // let the re-page request (and hold) page 2
-		ws28.heldListReleases.shift()?.(); // release page 2 → live append
-		await sleep(300);
-		const rowsD34 = findByClass(pickD33.contentEl, "arthur-terminal-row");
-		assert(rowsD34.length === 3 && allText(pickD33.contentEl).includes("session C"),
-			`the released page 2 STREAMS into the already-open modal (got ${rowsD34.length})`);
-		pickD33.close();
-
-		ws28.failListPage = 2; // page 1 lands, page 2 errors
-		t4Cmd33?.callback?.();
-		await sleep(300);
-		const pickF33 = StubModal.opened[StubModal.opened.length - 1];
-		const rowsF33 = findByClass(pickF33.contentEl, "arthur-terminal-row");
-		assert(rowsF33.length >= 1 && !!rowsF33.find((r) => r.getAttribute("data-terminal-session") === "ahp-session:/a"),
-			`a mid-paging failure PRESERVES the rendered rows (got ${rowsF33.length})`);
-		assert(allText(pickF33.contentEl).includes("session listing failed"),
-			"the mid-paging failure renders the inline listing-failed note");
-		pickF33.close();
-		ws28.failListPage = 0;
-
-		// reset for any later section
-		plugin.settings.ahpEnableControl = false;
-		plugin.settings.ahpEnableTerminal = false;
-		ws28.ttyA = false;
-	})();
-
-	// ---- 34. terminal picker NEW-SESSION via pi-ahp-tty spawn (agent v0.8.3) ---
-	//      (a) happy path: spawn 201 with detail.sessionId → poll the AHP
-	//          catalogue for THAT EXACT resource (no cwd match required) →
-	//          attach + close,
-	//      (b) sessionId null → fallback to the cwd-prefix heuristic → attach,
-	//      (c) live row upgrade: a rendered non-terminal row becomes selectable
-	//          after a summary flip, without reopening the modal,
-	//      (d) 422 surfaced verbatim, no attach, picker open,
-	//      (e) poll timeout → note (supervisor log path) + highlighted row,
-	//      (f) agent offline → button disabled + reachability tooltip, no
-	//          PiPickerModal on click -----------------------------------------
-	console.log("== 34. terminal picker new-session via pi-ahp-tty spawn (201→exact-id poll→attach / sessionId-null fallback / live row upgrade / 422 / timeout / agent-offline gate) ==");
-	await (async () => {
-		await plugin.onunload();
-		await plugin.onload();
-		ws28.roles = ["viewer"]; // AHP role is irrelevant to the new gate
-		ws28.mismatch = false;
-		ws28.replayActions = [];
-		ws28.reconnectResult = null;
-		ws28.emptyCatalogue = false;
-		ws28.failListPage = 0;
-		ws28.holdListPage = 0;
-		ws28.dupePages = false;
-		ws28.ttySpawn = false;
-		ws28.ttyA = false;
-		ws28.createdSessions.length = 0;
-		ws28.createdCwds.length = 0;
-		ws28.createdProviders.length = 0;
-		ws28.pausedMap = {};
-		ws28.listCalls.length = 0;
-		ws28.mutCalls.createSession.length = 0;
-		ws28.heldListReleases.splice(0);
-		plugin.settings.ahpEndpoint = "100.75.249.5:4500";
-		plugin.settings.ahpToken = "smoke-token";
-		plugin.settings.ahpEnableTerminal = true;
-		plugin.settings.ahpEnableControl = true;
-		plugin.settings.profiles[0].comfyPorts = "";
-		plugin.settings.profiles[0].aiToolkitEnabled = false;
-		plugin.settings.lastUsedPiDevice = "Arthur";
-		StubModal.reset();
-
-		const t4Cmd34 = plugin.commands.get("open-pi-terminal");
-		const T4TYPE34 = "arthur-pi-terminal";
-		const spawnLog34 = "/home/slix/.pi/agent/extensions/pi-ahp-client/logs/pi-ahp-tty-smoke.log";
-		const termSpawnBodies34 = [];
-		// Agent HTTP responder: /api/status (reachable → lightState.agentOnline
-		// true, no comfy instances → no comfy probes) + the pi deploy surface
-		// (devices, dirs) + the v0.8.2 terminal-sessions spawn endpoint.
-		const agentResp34 = (opts) => {
-			if (opts.url.endsWith("/health")) return { status: 200, body: { ok: true, version: "0.8.2" } };
-			if (opts.url.endsWith("/api/status")) return { status: 200, body: { version: "0.8.2", host_uptime: 1, services: [] } };
-			if (opts.url.endsWith("/api/gpus")) return { status: 200, body: { gpus: [], count: 0 } };
-			if (opts.url.endsWith("/api/pi/status")) return { status: 200, body: { devices: [] } };
-			if (opts.url.endsWith("/api/pi/devices")) return { status: 200, body: { devices: [
-				{ id: "Arthur", hostname: "arthur", online: true, reachable: true, self: true, ssh: null, sessionsActive: 0, sessionsTotal: 0 },
-			] } };
-			const dirsM = opts.url.match(/\/api\/pi\/devices\/([^/]+)\/dirs\?path=([^&]+)/);
-			if (dirsM) {
-				const p = decodeURIComponent(dirsM[2]);
-				const table = {
-					"/home/slix": { dirs: ["deep", "proj", "Downloads"], parent: "/" },
-					"/tmp": { dirs: ["newpi"], parent: "/" },
-					"/tmp/newpi": { dirs: [], parent: "/tmp" },
-				};
-				return { status: 200, body: { device: decodeURIComponent(dirsM[1]), path: p, ...(table[p] ?? { dirs: [], parent: null }) } };
+		let unreachableCount = 0;
+		class UnreachableAhpBroker {
+			constructor(url) {
+				unreachableCount++;
+				this.url = String(url);
+				this.readyState = 3; // never opens
+				this.onopen = null; this.onmessage = null; this.onclose = null; this.onerror = null;
+				queueMicrotask(() => this.onclose?.({})); // opened=false → state 'error'
 			}
-			if (opts.url.endsWith("/api/pi/terminal-sessions") && (opts.method ?? "GET") === "POST") {
-				const parsed = typeof opts.body === "string" ? JSON.parse(opts.body) : (opts.body ?? {});
-				termSpawnBodies34.push(parsed);
-				if (parsed.device === "Arthur" && parsed.cwd === "/home/slix") {
-					return { status: 201, body: { device: parsed.device, cwd: parsed.cwd, spawned: "pi-ahp-tty", detail: { log: spawnLog34, pid: 4242, sessionId: "ahp-session:/tty-spawn-1" } } };
-				}
-				if (parsed.device === "ulysse" && parsed.cwd === "/tmp/newpi") {
-					return { status: 422, body: { error: "pi-ahp-tty not available on ulysse" } };
-				}
-				return { status: 502, body: { error: "launch failed" } };
-			}
-			return null;
-		};
-		httpResponder = agentResp34;
-		// Prime lightState.agentOnline = true (the gate signal) via a light poll.
-		plugin.clients?.lightPoller.pollNow();
-		await sleep(400);
-		assert(plugin.lightState.agentOnline === true, "(setup) the agent responder primed lightState.agentOnline true");
+			send() {}
+			close() {}
+		}
 
-		// (a) happy path: command → picker → 'New pi session…' → PiPickerModal →
-		//     'Use this directory' at the self root (/home/slix) → spawn 201 with
-		//     detail.sessionId → poll attaches the EXACT resource (whose cwd does
-		//     NOT match the chosen one) + closes both pickers.
-		t4Cmd34?.callback?.();
-		await sleep(250);
-		const pickA34 = StubModal.opened[StubModal.opened.length - 1];
-		const btnA34 = findButton(pickA34.contentEl, "New pi session");
-		assert(!!btnA34 && btnA34.disabled !== true,
-			"(a) agent reachable → the 'New pi session…' action renders ENABLED");
-		assert(String(btnA34?.attributes.get("title") ?? "").includes("pi-ahp-tty"),
-			"(a) the enabled action's tooltip names the pi-ahp-tty spawn (no controller/control-setting language)");
-		btnA34?.handlers.get("click")[0]?.(); // openPicker → fetch devices → PiPickerModal
-		await sleep(250);
-		const piPickA34 = StubModal.opened[StubModal.opened.length - 1];
-		assert(!!piPickA34 && piPickA34.titleEl.textContent === "Arthur — choose working directory",
-			"(a) 'New pi session…' opens the PiPickerModal pinned to the last-used device (Arthur)");
-		// arm the broker catalogue: the EXACT session the 201's detail.sessionId
-		// names — with a workingDirectory that does NOT match the chosen cwd (the
-		// exact-resource poll must attach WITHOUT any cwd-prefix help).
-		ws28.createdSessions.length = 0;
-		ws28.createdCwds.length = 0;
-		ws28.createdProviders.length = 0;
-		ws28.createdSessions.push("ahp-session:/tty-spawn-1");
-		ws28.createdCwds.push("/var/elsewhere");
-		ws28.createdProviders.push("pi");
-		ws28.ttySpawn = true;
-		findButton(piPickA34.contentEl, "Use this directory")?.handlers.get("click")[0]?.();
-		await sleep(1500); // covers the 1s default poll interval
-		assert(termSpawnBodies34.length === 1 && termSpawnBodies34[0].device === "Arthur" && termSpawnBodies34[0].cwd === "/home/slix",
-			"(a) confirm POSTed {device, cwd} to /api/pi/terminal-sessions (pi-ahp-tty spawn)");
-		assert(ws28.mutCalls.createSession.length === 0, "(a) NO createSession frame reached the AHP broker (the spawn is agent-side)");
-		assert(piPickA34._closed === true, "(a) the dir picker closed after the spawn+poll completed");
-		assert(pickA34._closed === true, "(a) the successful terminal poll CLOSES the terminal picker");
-		const leafA34 = app.workspace.getLeavesOfType(T4TYPE34).find((l) => l.view?.boundSessionId === "tty-spawn-1");
-		assert(!!leafA34 && leafA34.view?.terminal != null && leafA34.view?.adapter?.attached === true,
-			"(a) openTerminal bound the polled terminal-bearing session id (xterm + adapter live)");
-		assert(ws28.subscribeCalls.includes("ahp-terminal:/tty-spawn-1"),
-			"(a) the attach subscribed ahp-terminal:/tty-spawn-1 on the shared socket");
-		assert(ws28.createdSessions[0] === "ahp-session:/tty-spawn-1"
-			&& ws28.createdCwds[0] === "/var/elsewhere"
-			&& termSpawnBodies34[0]?.cwd === "/home/slix",
-			"(a) the armed catalogue row's workingDirectory (/var/elsewhere) does NOT match the chosen cwd (/home/slix) — yet the exact-resource poll attached it, so the poll requires NO cwd match");
-		ws28.ttySpawn = false;
+		// (b) first load() fails (broker unreachable) → state 'error', one socket.
+		globalThis.WebSocket = UnreachableAhpBroker;
+		const c = new AhpClientCtor("100.75.249.5:4500", "smoke-token", {});
+		let threwB = false;
+		try { await c.load(); } catch { threwB = true; }
+		assert(threwB, "(b) a never-opening broker makes load() reject");
+		assert(c.currentState === "error", "(b) the failed load leaves the client in state 'error'");
+		assert(unreachableCount === 1, "(b) the first load attempted exactly one socket");
 
-		// (b) sessionId-null fallback (older agent / async mint): the poll falls
-		//     back to the cwd-prefix heuristic — a terminal-bearing row UNDER the
-		//     chosen cwd attaches even though the 201 carried no exact id.
-		const rowsB34 = [{ resource: "ahp-session:/fallback-1", title: "fallback session", provider: "pi",
-			workingDirectory: "/home/slix/deep", hostOnline: true, terminalMode: "external", hostAgentId: "host-1" }];
-		let picksB34 = 0;
-		let pickedB34 = null;
-		const modalB34 = new bundle.TerminalPickerModal(app, {
-			loadSessions: async () => rowsB34.slice(),
-			newSession: {
-				gate: () => null,
-				openPicker: (onChoose) => { onChoose("Arthur", "/home/slix"); },
-				spawn: async () => ({ device: "Arthur", cwd: "/home/slix", spawned: "pi-ahp-tty", detail: { log: spawnLog34, pid: 77, sessionId: null } }),
-				poll: { intervalMs: 50, timeoutMs: 1500 },
-			},
-			onPick: (id) => { picksB34++; pickedB34 = id; },
-		});
-		modalB34.open();
-		await sleep(80);
-		findButton(modalB34.contentEl, "New pi session")?.handlers.get("click")[0]?.();
-		await sleep(500);
-		assert(picksB34 === 1 && pickedB34 === "fallback-1",
-			`(b) sessionId null → the cwd-prefix heuristic picks the terminal row under /home/slix (got ${pickedB34})`);
-		assert(modalB34._closed === true, "(b) the fallback poll CLOSES the picker");
+		// (c) restore a reachable broker and load() AGAIN — no settings change,
+		//     no unload. With the 819e2bb fix the stale rejected
+		//     currentAttempt was cleared, so this re-attempts (instead of
+		//     returning the stale rejection) and connects → state 'ready'.
+		globalThis.WebSocket = MockAhpBroker;
+		let threwC = false;
+		try { await c.load(); } catch (e) { threwC = true; console.error(e); }
+		assert(!threwC, "(c) the recovered load() resolved (the stale rejection was cleared — 819e2bb)");
+		assert(c.currentState === "ready", "(c) the retried client connected → state 'ready'");
+		assert(unreachableCount === 1, "(c) recovery used the reachable broker (no second unreachable socket)");
+		assert(Array.isArray(c.catalogue()), "(c) the recovered client holds a catalogue");
+		c.close();
 
-		// (c) live row upgrade: a rendered NON-terminal row becomes selectable
-		//     when its summary flips (root/sessionSummaryChanged → onCatalogue
-		//     → watchSessions → repaint) — WITHOUT reopening the modal.
-		ws28.createdSessions.length = 0;
-		ws28.createdCwds.length = 0;
-		ws28.createdProviders.length = 0;
-		ws28.createdSessions.push("ahp-session:/late-tty");
-		ws28.createdCwds.push("/tmp/late3");
-		ws28.createdProviders.push("pi");
-		ws28.ttySpawn = false; // not registered yet → the row renders disabled
-		t4Cmd34?.callback?.();
-		await sleep(400); // the background re-page commits the created row
-		const pickC34 = StubModal.opened[StubModal.opened.length - 1];
-		const rowPreC34 = findByClass(pickC34.contentEl, "arthur-terminal-row")
-			.find((r) => r.getAttribute("data-terminal-session") === "ahp-session:/late-tty");
-		assert(!!rowPreC34, "(c) the not-yet-registered session renders a row");
-		assert(!!rowPreC34 && rowPreC34.hasClass("arthur-terminal-row--disabled")
-			&& (rowPreC34.handlers.get("click") ?? []).length === 0,
-			"(c) before registration the row renders DISABLED (no terminal channel, no click wiring)");
-		ws28.instances[ws28.instances.length - 1].push("root/sessionSummaryChanged",
-			{ channel: "ahp-root://", session: "ahp-session:/late-tty",
-				changes: { hostOnline: true, terminalMode: "external", hostAgentId: "host-1" } });
-		await sleep(300);
-		const rowPostC34 = findByClass(pickC34.contentEl, "arthur-terminal-row")
-			.find((r) => r.getAttribute("data-terminal-session") === "ahp-session:/late-tty");
-		assert(!!rowPostC34 && !rowPostC34.hasClass("arthur-terminal-row--disabled")
-			&& rowPostC34.attributes.get("role") === "button"
-			&& (rowPostC34.handlers.get("click") ?? []).length === 1,
-			"(c) the summary flip makes the ALREADY-RENDERED row selectable without reopening the modal");
-		assert(pickC34._closed !== true, "(c) the modal stayed open through the live upgrade");
-		rowPostC34?.handlers.get("click")[0]?.();
-		await sleep(250);
-		assert(pickC34._closed === true, "(c) clicking the upgraded row attaches + closes the picker");
-		const leafC34 = app.workspace.getLeavesOfType(T4TYPE34).find((l) => l.view?.boundSessionId === "late-tty");
-		assert(!!leafC34 && leafC34.view?.terminal != null && leafC34.view?.adapter?.attached === true,
-			"(c) openTerminal bound the live-upgraded session id (xterm + adapter live)");
-
-		// (d) 422 surfaced verbatim: direct-opts modal, mock openPicker calls
-		//     onChoose directly + spawn rejects with the server's 422 error.
-		let picksD34 = 0;
-		const modalD34 = new bundle.TerminalPickerModal(app, {
-			loadSessions: async () => [],
-			newSession: {
-				gate: () => null,
-				openPicker: (onChoose) => { onChoose("ulysse", "/tmp/newpi"); },
-				spawn: async () => { throw new Error("pi-ahp-tty not available on ulysse"); },
-				poll: { intervalMs: 50, timeoutMs: 250 },
-			},
-			onPick: () => { picksD34++; },
-		});
-		modalD34.open();
-		await sleep(80);
-		findButton(modalD34.contentEl, "New pi session")?.handlers.get("click")[0]?.();
-		await sleep(300);
-		assert(modalD34._closed !== true, "(d) a 422 spawn leaves the picker OPEN");
-		assert(picksD34 === 0, "(d) onPick (→ openTerminal) NEVER fired on 422");
-		assert(allText(modalD34.contentEl).includes("pi-ahp-tty not available on ulysse"),
-			"(d) the server's 422 error message is surfaced VERBATIM in the modal");
-		modalD34.close();
-
-		// (e) poll timeout (direct-opts modal, fast poll pacing; the spawn detail
-		//     carries NO sessionId key — the older-agent shape): the dir row
-		//     matching the cwd stays HIGHLIGHTED with a note naming the supervisor
-		//     log path, the picker stays open, and onPick never fires.
-		const rowsE34 = [{ resource: "ahp-session:/pending", title: "pending session", provider: "pi", workingDirectory: "/tmp/late" }];
-		let picksE34 = 0;
-		const modalE34 = new bundle.TerminalPickerModal(app, {
-			loadSessions: async () => rowsE34.slice(),
-			newSession: {
-				gate: () => null,
-				openPicker: (onChoose) => { onChoose("Arthur", "/tmp/late"); },
-				spawn: async () => ({ device: "Arthur", cwd: "/tmp/late", spawned: "pi-ahp-tty", detail: { log: spawnLog34, pid: 99 } }),
-				poll: { intervalMs: 50, timeoutMs: 250 },
-			},
-			onPick: () => { picksE34++; },
-		});
-		modalE34.open();
-		await sleep(80);
-		findButton(modalE34.contentEl, "New pi session")?.handlers.get("click")[0]?.();
-		await sleep(800); // > the 250ms poll budget → bounded timeout
-		assert(modalE34._closed !== true, "(e) a poll timeout leaves the picker OPEN");
-		assert(picksE34 === 0, "(e) onPick (→ openTerminal) NEVER fired on timeout");
-		const lateRowE34 = findByClass(modalE34.contentEl, "arthur-terminal-row")
-			.find((r) => r.getAttribute("data-terminal-session") === "ahp-session:/pending");
-		assert(!!lateRowE34 && lateRowE34.hasClass("arthur-terminal-row--new"),
-			"(e) the cwd-matching row renders HIGHLIGHTED after the timeout");
-		assert(allText(modalE34.contentEl).includes("isn't registered yet"),
-			"(e) the timeout note says the terminal channel isn't registered yet");
-		assert(allText(modalE34.contentEl).includes(spawnLog34),
-			"(e) the timeout note mentions the supervisor log path (detail.log)");
-		modalE34.close();
-
-		// (f) agent offline → the action renders DISABLED with the reachability
-		//     tooltip, and clicking it opens NO PiPickerModal (gate re-checked
-		//     on click → openPicker never called).
-		httpResponder = null; // agent offline
-		plugin.clients?.lightPoller.pollNow();
-		await sleep(400);
-		assert(plugin.lightState.agentOnline === false, "(f) the agent-offline poll flipped lightState.agentOnline false");
-		const piModalsBeforeF34 = StubModal.opened.filter((m) => /— choose working directory$/.test(m.titleEl.textContent ?? "")).length;
-		t4Cmd34?.callback?.();
-		await sleep(250);
-		const pickF34 = StubModal.opened[StubModal.opened.length - 1];
-		const btnF34 = findButton(pickF34.contentEl, "New pi session");
-		assert(!!btnF34 && btnF34.disabled === true,
-			"(f) agent offline → the 'New pi session…' action renders DISABLED");
-		assert(String(btnF34?.attributes.get("title") ?? "").includes("arthur agent"),
-			"(f) the disabled action's tooltip names the arthur-agent reachability requirement");
-		btnF34?.handlers.get("click")[0]?.(); // stub clicks ignore `disabled` — the handler re-gates
-		await sleep(150);
-		const piModalsAfterF34 = StubModal.opened.filter((m) => /— choose working directory$/.test(m.titleEl.textContent ?? "")).length;
-		assert(piModalsAfterF34 === piModalsBeforeF34,
-			"(f) clicking the disabled (agent-offline) action opens NO PiPickerModal");
-		pickF34.close();
+		// (d) a SECOND fresh client fails then recovers the same way (the fix
+		//     holds across instances — not a one-off global).
+		globalThis.WebSocket = UnreachableAhpBroker;
+		const c2 = new AhpClientCtor("100.75.249.5:4500", "smoke-token", {});
+		try { await c2.load(); } catch {}
+		assert(c2.currentState === "error", "(d) second client also starts in 'error' after an unreachable first load");
+		globalThis.WebSocket = MockAhpBroker;
+		let threwD = false;
+		try { await c2.load(); } catch { threwD = true; }
+		assert(!threwD && c2.currentState === "ready", "(d) second client also recovers on retry (819e2bb holds across instances)");
+		c2.close();
 
 		// reset for the cleanup section
-		plugin.settings.ahpEnableControl = false;
-		plugin.settings.ahpEnableTerminal = false;
-		ws28.ttyA = false;
-		httpResponder = null;
+		ws28.roles = undefined;
+		globalThis.WebSocket = MockAhpBroker;
 	})();
 
 	// ---- cleanup ----------------------------------------------------------
@@ -7043,4 +6362,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / ahp-phaseT1-mock-terminal-adapter-wire+self-echo+detach-watermark+reconnect-cursor+controller+setting-gating / pi-terminal-view-register+lazy-xterm-construct+attach-wire+input-relay+close-dispose+channel-cleanup / pi-terminal-manager-multi-instance+shared-ws+3-leaves+routing+no-leakage+partial+full-teardown / pi-terminal-picker-catalogue-filter+pathA-disabled+stable-id-dedup+select-wiring+spawn-state-machine / pi-terminal-picker-resilience-retry-failed-load+refresh-failure-catalogue-fallback / pi-terminal-picker-new-session-gate+exact-id-poll+sessionid-null-fallback+live-row-upgrade+create-poll-attach+timeout+progressive-rendering all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / local-pty-terminal-spawn-args+pty→xterm+xterm→pty+resize+exit-state / local-terminal-view-lazy-no-cwd+attach+close-kill+reopen / local-terminal-manager-per-cwd-routing+3-leaves+isolation+reuse+full-unload-kill-all / local-terminal-picker-fake-sessions-dir+select→open+vault-root+cwd-input+mobile-hide / ahp-client-load-retry-resilience-819e2bb-regression all clean");

@@ -1,3 +1,16 @@
+> **SUPERSEDED (2026-11-08).** The AHP `ahp-terminal:/<id>` remote-relay
+> approach described in this plan (an `AhpTerminalAdapter` over the broker WS,
+> a shared-client multi-leaf `TerminalManager`, and the agent-side
+> `pi-ahp-tty` spawn flow) was REMOVED from the plugin and replaced by a
+> **local pty-backed** pi terminal: each terminal leaf spawns its own local
+> `pi` process via `@homebridge/node-pty-prebuilt-multiarch` and pipes it into
+> xterm.js — no broker, no remote relay. The picker was repurposed into a
+> LOCAL session/dir picker scanning `~/.pi/agent/sessions/`. See
+> `docs/LOCAL-PI-TERMINAL.md` for the new architecture and the node-pty
+> runtime-resolution requirement. The AHP sessions view (`src/ui/ahp-view.ts`)
+> and the `AhpClient` read/controller surface in `src/api/ahp.ts` are
+> UNAFFECTED and remain.
+
 # Arthur — pi Terminal Views port plan (AHP 0.3.0)
 
 - **Date:** 2026-11-08
