@@ -28,7 +28,7 @@ import { FitAddon } from "@xterm/addon-fit";
 
 import type ArthurPlugin from "../main";
 import type { LocalPty } from "../api/local-pty";
-import { spawnPi } from "../api/local-pty";
+import { spawnPi, resolvePtyModulePath } from "../api/local-pty";
 import { el } from "../util";
 
 export const VIEW_TYPE_PI_TERMINAL = "arthur-pi-terminal";
@@ -194,6 +194,18 @@ export class TerminalView extends ItemView {
 		this.fitNow();
 		const manager = this.plugin.terminalManager;
 		const factory = manager?.ptyFactory ?? null;
+		// Resolve the native pty module by ABSOLUTE path: Obsidian loads main.js
+		// through Electron's renderer require, which does NOT resolve bare
+		// specifiers against the plugin folder's node_modules. The vault base
+		// path comes from the FileSystemAdapter (`getBasePath()` — structural
+		// cast; the adapter is a FileSystemAdapter on desktop); the plugin dir
+		// relative to the vault root is `plugin.manifest.dir`.
+		const vaultBasePath =
+			(this.plugin.app.vault?.adapter as { getBasePath?: () => string } | null)?.getBasePath?.() ??
+			"";
+		const ptyModulePath = vaultBasePath
+			? resolvePtyModulePath(vaultBasePath, this.plugin.manifest.dir ?? "")
+			: undefined;
 		let pty: LocalPty;
 		try {
 			pty = spawnPi(
@@ -203,6 +215,7 @@ export class TerminalView extends ItemView {
 					cols: terminal.cols,
 					rows: terminal.rows,
 					command: this.plugin.settings.piExecutable,
+					ptyModulePath,
 				},
 				factory ?? undefined,
 			);

@@ -52,7 +52,7 @@ export { TerminalManager } from "./ui/terminal-manager";
 export { TerminalPickerModal, fuzzyMatch, listLocalPiSessions, defaultPiSessionsDir } from "./ui/terminal-picker";
 export type { LocalPiSession } from "./ui/terminal-picker";
 // local pty spawn wrapper (smoke asserts the spawn args/factory contract).
-export { spawnPi } from "./api/local-pty";
+export { spawnPi, resolvePtyModulePath } from "./api/local-pty";
 export type { LocalPty, PtySpawnFn, SpawnPiOpts } from "./api/local-pty";
 
 /** One server profile — host + which ports the services live on + tokens. */

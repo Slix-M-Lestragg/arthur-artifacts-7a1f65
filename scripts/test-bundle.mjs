@@ -6022,6 +6022,45 @@ try {
 		assert(fresh2.ptys[0].opts.cwd === "/tmp/fresh", "(f) fresh spawn still targets the cwd");
 	})();
 
+	// ---- 28i. node-pty native module resolver (absolute-path require / no
+	//      native load in smoke — a fake module stands in for the native binding).
+	console.log("== 28i. node-pty resolver: absolute ptyModulePath require (Electron renderer fix) ==");
+	await (async () => {
+		// (a) resolvePtyModulePath joins vault base + manifest dir into an absolute
+		//     path under the plugin's node_modules (the Electron renderer fix:
+		//     the renderer require does NOT resolve bare specifiers there).
+		assert(typeof bundle.resolvePtyModulePath === "function", "(a) bundle exports resolvePtyModulePath");
+		const resolved = bundle.resolvePtyModulePath("/tmp/arthur-vault-root", ".obsidian/plugins/arthur");
+		assert(resolved === "/tmp/arthur-vault-root/.obsidian/plugins/arthur/node_modules/@homebridge/node-pty-prebuilt-multiarch",
+			`(a) resolvePtyModulePath produces the absolute plugin node_modules path (got ${resolved})`);
+		// surrounding slashes are normalized.
+		assert(bundle.resolvePtyModulePath("/tmp/v/", "/p") === "/tmp/v/p/node_modules/@homebridge/node-pty-prebuilt-multiarch",
+			"(a) resolvePtyModulePath normalizes surrounding slashes");
+
+		// (b) the DEFAULT factory (no factory injection) loads the module via the
+		//     ABSOLUTE ptyModulePath — a `require(absPath)` esbuild leaves
+		//     untouched. A fake CJS module (folder + package.json main, mirroring
+		//     the real node-pty layout) stands in for the native binding so smoke
+		//     never loads a real .node prebuild.
+		const fakeDir = fs.mkdtempSync(path.join(os.tmpdir(), "arthur-pty-fake-"));
+		const fakeRoot = path.join(fakeDir, "node_modules", "@homebridge", "node-pty-prebuilt-multiarch");
+		fs.mkdirSync(fakeRoot, { recursive: true });
+		fs.writeFileSync(path.join(fakeRoot, "package.json"), JSON.stringify({ name: "fake-pty", main: "index.js" }));
+		fs.writeFileSync(path.join(fakeRoot, "index.js"),
+			"module.exports = {\n" +
+			"  spawn(command, args, options) {\n" +
+			"    return { pid: 4242, command, args: args.slice(), options,\n" +
+			"      write(){}, resize(){}, kill(){},\n" +
+			"      onData(){ return { dispose(){} }; }, onExit(){ return { dispose(){} }; } };\n" +
+			"  },\n" +
+			"};\n", "utf8");
+		const pty = bundle.spawnPi("/tmp/r", { ptyModulePath: fakeRoot, command: "fakepi" }, undefined);
+		assert(pty.pid === 4242, "(b) default factory loaded the module at the absolute ptyModulePath (dynamic require survived the bundle)");
+		assert(pty.command === "fakepi" && pty.args.length === 1 && pty.args[0] === "-c", "(b) spawn args forwarded through the absolute-path-loaded module");
+		assert(pty.options.cwd === "/tmp/r", "(b) cwd forwarded through the absolute-path-loaded module");
+		fs.rmSync(fakeDir, { recursive: true, force: true });
+	})();
+
 	// ---- 29. local terminal view lifecycle (lazy no-cwd / attach via view
 	//      state / close-dispose + pty kill / reopen re-attach) ---------------
 	console.log("== 29. local terminal view lifecycle (lazy no-cwd / attach / close-kill / reopen) ==");
@@ -6362,4 +6401,4 @@ if (failures > 0) {
 	console.error(`\nbundle smoke check FAILED (${failures} assertion(s))`);
 	process.exit(1);
 }
-console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / local-pty-terminal-spawn-args+pty→xterm+xterm→pty+resize+exit-state / local-terminal-view-lazy-no-cwd+attach+close-kill+reopen / local-terminal-manager-per-cwd-routing+3-leaves+isolation+reuse+full-unload-kill-all / local-terminal-picker-fake-sessions-dir+select→open+vault-root+cwd-input+mobile-hide / ahp-client-load-retry-resilience-819e2bb-regression all clean");
+console.log("\nbundle smoke check passed: onload-empty / settings-rebuild / empty-profile-onOpen / partial-profile-ws / activateView-leaf-contract / host-normalizer / scheme-load-normalization / offline-error-banner+tooltips / agent-v0.8.1-service-bar / hung-request-timeout-guard / down-instance-filtering+remove(forget)-flow / ws-close-connecting-swallowed / debug-breadcrumbs / gpu-instance-grid+stats+queue-chips+remove+column-collapse / pure-job-list-queue / services-section-collapse / training-jobs-unified-queue / row-packing+expandable-cards+webviewer+stop-all-forgotten+version-banner / service-inactive-grid+ws-up-ports+default-remove-hidden / ws-backoff-30s-cap / optimistic-spawning+gpu-dropdown+hover-intent / all-service-dropdown+occupancy-tooltips / pi-in-Services+registry-icons+stats+pi-queue-jobs / pi-pseudo-service-button+device-dropdown+session-submenu+directory-picker / instances-subcontainers+subagent-archives+debug-pane / ait-integration-toggle-off+on-unreachable-folded-line / running-vs-active-pi-cues+queue-pulse+session-archives-grouping / unmanaged-visible-rows+foreign-chip+live-only-service / ahp-catalogue+ws-contract+stable-order+protocol-badge / ahp-detail-selection+chat-reducers+reconnect+detail-first+close-detail / resubscribe-same-session+ab-a-roundtrip+held-reply-races+epoch-watermarks / ahp-controller-roles-gate+opt-in-controls+exact-mutation-wire+no-auto-repeat / ahp-stale-detail-empty-catalogue+refresh-empty / ahp-progressive-drift-reconcile+limit500 / ahp-zero-chat-snapshot-flag+create-autoselect / local-pty-terminal-spawn-args+pty→xterm+xterm→pty+resize+exit-state / local-pty-resolver-absolute-path-require+no-native-load / local-terminal-view-lazy-no-cwd+attach+close-kill+reopen / local-terminal-manager-per-cwd-routing+3-leaves+isolation+reuse+full-unload-kill-all / local-terminal-picker-fake-sessions-dir+select→open+vault-root+cwd-input+mobile-hide / ahp-client-load-retry-resilience-819e2bb-regression all clean");

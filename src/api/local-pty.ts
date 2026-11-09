@@ -7,13 +7,18 @@
  *
  * Native module resolution: `@homebridge/node-pty-prebuilt-multiarch` is an
  * esbuild `external` (see esbuild.config.mjs) — the built main.js `require`s
- * it at RUNTIME from the plugin dir's `node_modules`, it is NEVER bundled.
- * That means `npm install` must run wherever the plugin is BUILT/TESTED/RUN so
- * the native prebuild for the host Electron ABI is present (see
- * docs/LOCAL-PI-TERMINAL.md). The default factory below lazy-`require`s the
- * module ONLY on first spawn, so importing this file (or the bundle) never
- * touches the native binding — smoke tests inject a fake factory and never
- * load the real one.
+ * it at RUNTIME, it is NEVER bundled. Obsidian loads main.js through
+ * Electron's RENDERER require, which does NOT resolve bare specifiers
+ * against the plugin folder's `node_modules` — so the default factory
+ * resolves the module by ABSOLUTE PATH under the plugin's own `node_modules`
+ * (built from `app.vault.adapter.getBasePath()` + `plugin.manifest.dir`),
+ * then falls back to a bare `require` (works when main.js runs from a repo
+ * checkout with node_modules — dev/smoke). That means `npm install` must run
+ * wherever the plugin is BUILT/TESTED/RUN so the native prebuild for the host
+ * Electron ABI is present (see docs/LOCAL-PI-TERMINAL.md). The default
+ * factory lazy-loads the module ONLY on first spawn, so importing this file
+ * (or the bundle) never touches the native binding — smoke tests inject a
+ * fake factory and never load the real one.
  *
  * Testability: `spawnPi` takes an optional `factory` param. The default
  * factory is the real node-pty `spawn`; tests pass a fake that returns a
@@ -50,6 +55,13 @@ export interface PtySpawnOptions {
 	cwd?: string;
 	/** Extra environment (merged over process.env by the default factory). */
 	env?: Record<string, string>;
+	/** Absolute path to the native pty module folder, pre-resolved by the
+	 *  caller from the vault base path + plugin manifest dir (see
+	 *  `resolvePtyModulePath`). The default factory `require`s it directly —
+	 *  Electron's renderer require needs an absolute path (bare specifiers
+	 *  don't resolve against the plugin's node_modules there). Optional: when
+	 *  absent the factory falls back to a bare require (dev/smoke). */
+	ptyModulePath?: string;
 }
 
 /**
@@ -76,29 +88,87 @@ export interface SpawnPiOpts {
 	command?: string;
 	/** Extra environment passthrough. */
 	env?: Record<string, string>;
+	/** Absolute path to the native pty module (see `resolvePtyModulePath`).
+	 *  Passed through to the default factory; ignored by injected fakes. */
+	ptyModulePath?: string;
 }
 
 /** Default cols/rows when the view has no measured geometry yet. */
 const DEFAULT_COLS = 80;
 const DEFAULT_ROWS = 24;
 
+/** Module id of the native pty dependency (an esbuild `external`). */
+const PTY_MODULE_ID = "@homebridge/node-pty-prebuilt-multiarch";
+
+/** Minimal shape of the loaded native pty module (its `spawn` matches PtySpawnFn). */
+type PtyModule = { spawn: PtySpawnFn };
+
 /**
- * The default factory: lazy-`require` the native pty module on first use and
- * call its `spawn`. Never invoked at import time (smoke injects a fake before
- * any spawn), so a missing/incompatible prebuild never breaks the bundle load.
+ * Resolve the native pty module to an ABSOLUTE path under the plugin's own
+ * `node_modules`. Obsidian loads main.js through Electron's RENDERER require,
+ * which does NOT resolve bare specifiers against the plugin folder — it needs
+ * an absolute path. `vaultBasePath` is the vault root (from
+ * `app.vault.adapter.getBasePath()` — cast the adapter to `FileSystemAdapter`
+ * via a typed structural cast); `manifestDir` is the plugin dir relative to
+ * the vault root (from `plugin.manifest.dir`, typically
+ * `.obsidian/plugins/arthur`). Returns the joined absolute folder path.
+ */
+export function resolvePtyModulePath(vaultBasePath: string, manifestDir: string): string {
+	const base = (vaultBasePath || "").replace(/[\\/]+$/, "");
+	const dir = (manifestDir || "").replace(/^[\\/]+/, "").replace(/[\\/]+$/, "");
+	return [base, dir, "node_modules", PTY_MODULE_ID].filter(Boolean).join("/");
+}
+
+/**
+ * Load the native pty module. Resolution order:
+ *   1. `require(absPath)` — absolute path under the plugin's node_modules
+ *      (Electron renderer require needs an absolute path; bare specifiers do
+ *      NOT resolve against the plugin folder there).
+ *   2. `require(PTY_MODULE_ID)` — bare fallback; works when main.js runs from
+ *      a repo checkout with node_modules (dev/smoke).
+ * The dynamic `require(absPath)` uses a non-literal argument so esbuild
+ * leaves it untouched (it can't resolve it); the bare `require` stays a real
+ * require because the module is an esbuild `external`. Throws a clear,
+ * user-facing message on total failure (the view shows `.message`, no stack).
+ */
+function loadPtyModule(absPath?: string): PtyModule {
+	if (absPath) {
+		try {
+			return require(absPath) as PtyModule;
+		} catch {
+			// absolute path missed (no node_modules / wrong layout) → try bare.
+		}
+	}
+	try {
+		// Bare literal require — esbuild matches this against its `external`
+		// list and keeps it as a real runtime require (NOT bundled).
+		return require("@homebridge/node-pty-prebuilt-multiarch") as PtyModule;
+	} catch {
+		// both paths failed — surface a clear message, not a stack dump.
+	}
+	throw new Error(
+		"node-pty native module not found — run npm install in the plugin directory",
+	);
+}
+
+/**
+ * The default factory: lazy-load the native pty module on first use (via
+ * `loadPtyModule`) and call its `spawn`. Never invoked at import time (smoke
+ * injects a fake before any spawn), so a missing/incompatible prebuild never
+ * breaks the bundle load.
  */
 const defaultPtySpawn: PtySpawnFn = (command, args, options) => {
-	// Lazy require so the native binding only loads when a real terminal opens.
-	// `require` here resolves at runtime to the plugin's node_modules (the
-	// module is an esbuild external — never inlined into main.js).
-	const pty = require("@homebridge/node-pty-prebuilt-multiarch");
+	const pty = loadPtyModule(options.ptyModulePath);
+	const env = options.env ? { ...process.env, ...options.env } : process.env;
 	return pty.spawn(command, args, {
 		name: options.name ?? "xterm-256color",
 		cols: options.cols ?? DEFAULT_COLS,
 		rows: options.rows ?? DEFAULT_ROWS,
 		cwd: options.cwd,
-		env: options.env ? { ...process.env, ...options.env } : process.env,
-	}) as LocalPty;
+		// node-pty accepts the full process.env; the cast only satisfies our
+		// narrower PtySpawnOptions.env type (ProcessEnv values may be undefined).
+		env: env as Record<string, string>,
+	});
 };
 
 /**
@@ -123,5 +193,6 @@ export function spawnPi(
 		rows: o.rows ?? DEFAULT_ROWS,
 		cwd: cwd || undefined,
 		env: o.env,
+		ptyModulePath: o.ptyModulePath,
 	});
 }
